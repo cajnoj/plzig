@@ -1,0 +1,140 @@
+--
+-- lifecycle: replace, lazy compilation, validator behaviour, instance cache
+--
+\set VERBOSITY terse
+-- CREATE OR REPLACE picks up the new code in the same session
+CREATE FUNCTION version_fn() RETURNS int LANGUAGE plzig AS $$ return 1; $$;
+SELECT version_fn();
+ version_fn 
+------------
+          1
+(1 row)
+
+CREATE OR REPLACE FUNCTION version_fn() RETURNS int LANGUAGE plzig AS $$ return 2; $$;
+SELECT version_fn();
+ version_fn 
+------------
+          2
+(1 row)
+
+-- rolled-back replacement: the old code is used again
+BEGIN;
+CREATE OR REPLACE FUNCTION version_fn() RETURNS int LANGUAGE plzig AS $$ return 3; $$;
+SELECT version_fn();
+ version_fn 
+------------
+          3
+(1 row)
+
+ROLLBACK;
+SELECT version_fn();
+ version_fn 
+------------
+          2
+(1 row)
+
+-- check_function_bodies = off (pg_dump restore): no compilation at CREATE ...
+SET check_function_bodies = off;
+CREATE FUNCTION lazy_ok() RETURNS text LANGUAGE plzig AS $$ return "compiled lazily"; $$;
+CREATE FUNCTION lazy_bad() RETURNS int LANGUAGE plzig AS $$ return @embedFile("/etc/passwd"); $$;
+CREATE FUNCTION lazy_broken() RETURNS int LANGUAGE plzig AS $$ return nope; $$;
+-- ... but signature checks still apply
+CREATE FUNCTION lazy_setof() RETURNS SETOF int LANGUAGE plzig AS $$ return 1; $$;
+ERROR:  PL/Zig functions cannot return sets
+RESET check_function_bodies;
+-- ... compiled (and policy-checked) at first call
+SELECT lazy_ok();
+     lazy_ok     
+-----------------
+ compiled lazily
+(1 row)
+
+SELECT lazy_bad();
+ERROR:  PL/Zig source rejected by policy
+SELECT lazy_broken();
+ERROR:  PL/Zig compilation failed
+-- validator access checks: cannot validate someone else's function by calling it directly
+SET ROLE regress_plzig_nobody;
+SELECT plzig_validator('lazy_ok()'::regprocedure);
+ERROR:  permission denied for language plzig
+RESET ROLE;
+-- instance cache: with size 0 every call gets a fresh instance (globals reset)
+CREATE FUNCTION tick() RETURNS int LANGUAGE plzig AS $$
+    n += 1;
+    return n;
+}
+var n: i32 = 0;
+fn unused() void {
+$$;
+SELECT tick(), tick(), tick();
+ tick | tick | tick 
+------+------+------
+    1 |    2 |    3
+(1 row)
+
+SET plzig.instance_cache_size = 0;
+SELECT tick(), tick();
+ tick | tick 
+------+------
+    4 |    1
+(1 row)
+
+RESET plzig.instance_cache_size;
+SELECT tick(), tick();
+ tick | tick 
+------+------
+    1 |    2
+(1 row)
+
+-- dropping a function while its module is cached is harmless
+CREATE FUNCTION dropme() RETURNS int LANGUAGE plzig AS $$ return 5; $$;
+SELECT dropme();
+ dropme 
+--------
+      5
+(1 row)
+
+DROP FUNCTION dropme();
+SELECT dropme();
+ERROR:  function dropme() does not exist at character 8
+-- functions are never shared: identical bodies keep separate globals
+CREATE FUNCTION tick2() RETURNS int LANGUAGE plzig AS $$
+    n += 1;
+    return n;
+}
+var n: i32 = 0;
+fn unused() void {
+$$;
+SELECT tick2(), tick2();
+ tick2 | tick2 
+-------+-------
+     1 |     2
+(1 row)
+
+-- ALTER FUNCTION ... STABLE changes SPI to read-only on next call
+CREATE TABLE lc (x int);
+CREATE FUNCTION lc_ins() RETURNS bigint LANGUAGE plzig AS $$
+    const r = try plzig.spi.execute("INSERT INTO lc VALUES (1)", &.{});
+    return @intCast(r.rows);
+$$;
+SELECT lc_ins();
+ lc_ins 
+--------
+      1
+(1 row)
+
+ALTER FUNCTION lc_ins() STABLE;
+SELECT lc_ins();
+ERROR:  INSERT is not allowed in a non-volatile function
+-- the compiler sandbox status is visible to superusers (value depends on the host kernel)
+SELECT plzig_sandbox_status() ~ '^(enforced \(landlock ABI [0-9]+\)|unavailable|off)' AS status_known;
+ status_known 
+--------------
+ t
+(1 row)
+
+-- cleanup of cluster-wide objects
+DROP OWNED BY regress_plzig_dev;
+DROP OWNED BY regress_plzig_nobody;
+DROP ROLE regress_plzig_dev;
+DROP ROLE regress_plzig_nobody;

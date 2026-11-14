@@ -1,0 +1,158 @@
+--- a/core/iwasm/interpreter/wasm_interp_classic.c
++++ b/core/iwasm/interpreter/wasm_interp_classic.c
+@@ -1452,6 +1452,20 @@
+     } while (0)
+ #endif /* WASM_ENABLE_DEBUG_INTERP */
+ #endif /* WASM_ENABLE_THREAD_MGR */
++#if WASM_ENABLE_THREAD_MGR == 0 && WASM_ENABLE_PLZIG_INTERRUPT != 0
++/* PL/Zig: poll host interrupt flags (PostgreSQL QueryCancelPending and
++   ProcDiePending) at every branch, call and function entry; trap if set. */
++#include <signal.h>
++extern volatile sig_atomic_t *wamr_plzig_interrupt_flags[2];
++#define CHECK_SUSPEND_FLAGS()                                       \
++    do {                                                            \
++        if (*wamr_plzig_interrupt_flags[0]                          \
++            || *wamr_plzig_interrupt_flags[1]) {                    \
++            wasm_set_exception(module, "plzig: interrupted");       \
++            goto got_exception;                                     \
++        }                                                           \
++    } while (0)
++#endif /* WASM_ENABLE_PLZIG_INTERRUPT */
+ 
+ #if WASM_ENABLE_THREAD_MGR != 0 && WASM_ENABLE_DEBUG_INTERP != 0
+ #if BH_ATOMIC_32_IS_ATOMIC != 0
+@@ -2218,7 +2232,7 @@
+ 
+             HANDLE_OP(WASM_OP_BR)
+             {
+-#if WASM_ENABLE_THREAD_MGR != 0
++#if WASM_ENABLE_THREAD_MGR != 0 || WASM_ENABLE_PLZIG_INTERRUPT != 0
+                 CHECK_SUSPEND_FLAGS();
+ #endif
+                 read_leb_uint32(frame_ip, frame_ip_end, depth);
+@@ -2239,7 +2253,7 @@
+ 
+             HANDLE_OP(WASM_OP_BR_IF)
+             {
+-#if WASM_ENABLE_THREAD_MGR != 0
++#if WASM_ENABLE_THREAD_MGR != 0 || WASM_ENABLE_PLZIG_INTERRUPT != 0
+                 CHECK_SUSPEND_FLAGS();
+ #endif
+                 read_leb_uint32(frame_ip, frame_ip_end, depth);
+@@ -2251,7 +2265,7 @@
+ 
+             HANDLE_OP(WASM_OP_BR_TABLE)
+             {
+-#if WASM_ENABLE_THREAD_MGR != 0
++#if WASM_ENABLE_THREAD_MGR != 0 || WASM_ENABLE_PLZIG_INTERRUPT != 0
+                 CHECK_SUSPEND_FLAGS();
+ #endif
+                 read_leb_uint32(frame_ip, frame_ip_end, count);
+@@ -2268,7 +2282,7 @@
+                     bh_list_first_elem(module->module->br_table_cache_list);
+                 BrTableCache *node_next;
+ 
+-#if WASM_ENABLE_THREAD_MGR != 0
++#if WASM_ENABLE_THREAD_MGR != 0 || WASM_ENABLE_PLZIG_INTERRUPT != 0
+                 CHECK_SUSPEND_FLAGS();
+ #endif
+                 lidx = POP_I32();
+@@ -2306,7 +2320,7 @@
+ 
+             HANDLE_OP(WASM_OP_CALL)
+             {
+-#if WASM_ENABLE_THREAD_MGR != 0
++#if WASM_ENABLE_THREAD_MGR != 0 || WASM_ENABLE_PLZIG_INTERRUPT != 0
+                 CHECK_SUSPEND_FLAGS();
+ #endif
+                 read_leb_uint32(frame_ip, frame_ip_end, fidx);
+@@ -2324,7 +2338,7 @@
+ #if WASM_ENABLE_TAIL_CALL != 0
+             HANDLE_OP(WASM_OP_RETURN_CALL)
+             {
+-#if WASM_ENABLE_THREAD_MGR != 0
++#if WASM_ENABLE_THREAD_MGR != 0 || WASM_ENABLE_PLZIG_INTERRUPT != 0
+                 CHECK_SUSPEND_FLAGS();
+ #endif
+                 read_leb_uint32(frame_ip, frame_ip_end, fidx);
+@@ -2352,7 +2366,7 @@
+ #if WASM_ENABLE_TAIL_CALL != 0
+                 opcode = *(frame_ip - 1);
+ #endif
+-#if WASM_ENABLE_THREAD_MGR != 0
++#if WASM_ENABLE_THREAD_MGR != 0 || WASM_ENABLE_PLZIG_INTERRUPT != 0
+                 CHECK_SUSPEND_FLAGS();
+ #endif
+ 
+@@ -2631,7 +2645,7 @@
+ #if WASM_ENABLE_GC != 0
+             HANDLE_OP(WASM_OP_CALL_REF)
+             {
+-#if WASM_ENABLE_THREAD_MGR != 0
++#if WASM_ENABLE_THREAD_MGR != 0 || WASM_ENABLE_PLZIG_INTERRUPT != 0
+                 CHECK_SUSPEND_FLAGS();
+ #endif
+                 read_leb_uint32(frame_ip, frame_ip_end, type_index);
+@@ -2648,7 +2662,7 @@
+ 
+             HANDLE_OP(WASM_OP_RETURN_CALL_REF)
+             {
+-#if WASM_ENABLE_THREAD_MGR != 0
++#if WASM_ENABLE_THREAD_MGR != 0 || WASM_ENABLE_PLZIG_INTERRUPT != 0
+                 CHECK_SUSPEND_FLAGS();
+ #endif
+                 read_leb_uint32(frame_ip, frame_ip_end, type_index);
+@@ -2686,7 +2700,7 @@
+ 
+             HANDLE_OP(WASM_OP_BR_ON_NULL)
+             {
+-#if WASM_ENABLE_THREAD_MGR != 0
++#if WASM_ENABLE_THREAD_MGR != 0 || WASM_ENABLE_PLZIG_INTERRUPT != 0
+                 CHECK_SUSPEND_FLAGS();
+ #endif
+                 read_leb_uint32(frame_ip, frame_ip_end, depth);
+@@ -2701,7 +2715,7 @@
+ 
+             HANDLE_OP(WASM_OP_BR_ON_NON_NULL)
+             {
+-#if WASM_ENABLE_THREAD_MGR != 0
++#if WASM_ENABLE_THREAD_MGR != 0 || WASM_ENABLE_PLZIG_INTERRUPT != 0
+                 CHECK_SUSPEND_FLAGS();
+ #endif
+                 read_leb_uint32(frame_ip, frame_ip_end, depth);
+@@ -3305,7 +3319,7 @@
+                         int32 heap_type, heap_type_dst;
+                         uint8 castflags;
+ 
+-#if WASM_ENABLE_THREAD_MGR != 0
++#if WASM_ENABLE_THREAD_MGR != 0 || WASM_ENABLE_PLZIG_INTERRUPT != 0
+                         CHECK_SUSPEND_FLAGS();
+ #endif
+                         castflags = *frame_ip++;
+@@ -6200,7 +6214,7 @@
+                         if (ret == (uint32)-1)
+                             goto got_exception;
+ 
+-#if WASM_ENABLE_THREAD_MGR != 0
++#if WASM_ENABLE_THREAD_MGR != 0 || WASM_ENABLE_PLZIG_INTERRUPT != 0
+                         CHECK_SUSPEND_FLAGS();
+ #endif
+ 
+@@ -6224,7 +6238,7 @@
+                         if (ret == (uint32)-1)
+                             goto got_exception;
+ 
+-#if WASM_ENABLE_THREAD_MGR != 0
++#if WASM_ENABLE_THREAD_MGR != 0 || WASM_ENABLE_PLZIG_INTERRUPT != 0
+                         CHECK_SUSPEND_FLAGS();
+ #endif
+ 
+@@ -6836,7 +6850,7 @@
+ 
+             wasm_exec_env_set_cur_frame(exec_env, frame);
+         }
+-#if WASM_ENABLE_THREAD_MGR != 0
++#if WASM_ENABLE_THREAD_MGR != 0 || WASM_ENABLE_PLZIG_INTERRUPT != 0
+         CHECK_SUSPEND_FLAGS();
+ #endif
+         HANDLE_OP_END();

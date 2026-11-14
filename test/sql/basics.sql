@@ -1,0 +1,133 @@
+--
+-- basics: calling convention, NULL handling, errors, procedures, DO
+--
+\set VERBOSITY terse
+
+CREATE FUNCTION add(a int, b int) RETURNS int STRICT LANGUAGE plzig AS $$
+    return a + b;
+$$;
+SELECT add(1, 2), add(-5, 3), add(NULL, 1);
+
+-- non-strict: parameters are optionals
+CREATE FUNCTION add_lax(a int, b int) RETURNS int LANGUAGE plzig AS $$
+    return (a orelse 0) + (b orelse 0);
+$$;
+SELECT add_lax(1, 2), add_lax(NULL, 2), add_lax(NULL, NULL);
+
+-- returning null gives SQL NULL
+CREATE FUNCTION maybe(x int) RETURNS int STRICT LANGUAGE plzig AS $$
+    if (x < 0) return null;
+    return x * 2;
+$$;
+SELECT maybe(21), maybe(-1) IS NULL AS is_null;
+
+-- unnamed parameters are arg1..argN
+CREATE FUNCTION sub(int, int) RETURNS int STRICT LANGUAGE plzig AS $$
+    return arg1 - arg2;
+$$;
+SELECT sub(10, 3);
+
+-- unused parameters are fine; helper functions after the body
+CREATE FUNCTION fib(n int, unused text) RETURNS bigint STRICT LANGUAGE plzig AS $$
+    return fibImpl(@intCast(n));
+}
+fn fibImpl(n: u32) i64 {
+    if (n < 2) return n;
+    var a: i64 = 0;
+    var b: i64 = 1;
+    var i: u32 = 1;
+    while (i < n) : (i += 1) {
+        const t = a + b;
+        a = b;
+        b = t;
+    }
+    return b;
+$$;
+SELECT fib(10, 'x'), fib(90, 'y'), fib(1, NULL);
+
+-- logging at each level
+CREATE FUNCTION chatty() RETURNS void LANGUAGE plzig AS $$
+    plzig.debug("debug {d}", .{1});
+    plzig.info("info {d}", .{2});
+    plzig.notice("notice {s}", .{"three"});
+    plzig.warning("warning {d}", .{4});
+$$;
+SELECT chatty();
+
+-- a returned Zig error becomes an SQL error
+CREATE FUNCTION fails(x int) RETURNS int STRICT LANGUAGE plzig AS $$
+    if (x == 0) return error.DivisionByZero;
+    return @divTrunc(100, x);
+$$;
+SELECT fails(4);
+SELECT fails(0);
+
+-- plzig.raise raises SQLSTATE P0001 and never returns
+CREATE FUNCTION raiser(x int) RETURNS int STRICT LANGUAGE plzig AS $$
+    if (x > 10) plzig.raise("value {d} is too big", .{x});
+    return x;
+$$;
+SELECT raiser(5);
+SELECT raiser(50);
+DO $$
+BEGIN
+  PERFORM raiser(50);
+EXCEPTION WHEN raise_exception THEN
+  RAISE NOTICE 'caught: % (%)', SQLERRM, SQLSTATE;
+END $$;
+
+-- error context names the function
+\set VERBOSITY default
+SELECT raiser(99);
+\set VERBOSITY terse
+
+-- procedures
+CREATE TABLE proc_log (msg text);
+CREATE PROCEDURE log_it(m text) LANGUAGE plzig AS $$
+    _ = try plzig.spi.execute("INSERT INTO proc_log VALUES ($1)", &.{m});
+$$;
+CALL log_it('from a procedure');
+CALL log_it(NULL);
+SELECT * FROM proc_log ORDER BY msg NULLS LAST;
+
+-- DO blocks
+DO $$ plzig.notice("hello from DO", .{}); $$ LANGUAGE plzig;
+DO $$
+    const r = try plzig.spi.execute("SELECT count(*) FROM proc_log", &.{});
+    plzig.notice("proc_log has {s} rows", .{(try r.get(0, 0)).?});
+$$ LANGUAGE plzig;
+DO $$ return error.FromDo; $$ LANGUAGE plzig;
+
+-- session state: globals persist per function per session
+CREATE FUNCTION counter() RETURNS int LANGUAGE plzig AS $$
+    return next();
+}
+var count: i32 = 0;
+fn next() i32 {
+    count += 1;
+    return count;
+$$;
+SELECT counter(), counter(), counter();
+
+-- the per-call arena: plzig.allocator memory is released after each call
+CREATE FUNCTION alloc_mb(mb int) RETURNS int STRICT LANGUAGE plzig AS $$
+    const n: usize = @intCast(mb);
+    const buf = try plzig.allocator.alloc(u8, n * 1024 * 1024);
+    @memset(buf, 0xAB);
+    return @intCast(buf.len >> 20);
+$$;
+SELECT alloc_mb(40), alloc_mb(40), alloc_mb(40);
+
+-- recursion through SPI uses a second instance
+CREATE FUNCTION fact(n int) RETURNS bigint STRICT LANGUAGE plzig AS $$
+    if (n <= 1) return 1;
+    var buf: [16]u8 = undefined;
+    const arg = try std.fmt.bufPrint(&buf, "{d}", .{n - 1});
+    const r = try plzig.spi.execute("SELECT fact($1::int)", &.{arg});
+    const sub = try std.fmt.parseInt(i64, (try r.get(0, 0)).?, 10);
+    return @as(i64, n) * sub;
+$$;
+SELECT fact(10);
+
+-- triggers are not supported
+CREATE FUNCTION trg() RETURNS trigger LANGUAGE plzig AS $$ return; $$;
