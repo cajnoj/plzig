@@ -541,7 +541,8 @@ v1 is expected to be slower than PL/pgSQL; neither weakens the sandbox.
    - Do it in phase D with the marshalling benchmark (task 10) measured
      before and after; add a regress case for invalid encoding and embedded
      NUL in a returned value if the suite does not already have one.
-7. **Raising SQL errors with a chosen SQLSTATE, detail and hint** (owner
+7. **Done (2026-11-14), see Deviations from plan, 28.**
+   **Raising SQL errors with a chosen SQLSTATE, detail and hint** (owner
    decision, 2026-11-14). Today `plzig.raise` always uses `P0001`, and Zig
    errors and panics use `38000`.
    - SDK: e.g. `plzig.raiseError(.{ .sqlstate = "23514", .message = ...,

@@ -286,6 +286,14 @@ CREATE OR REPLACE FUNCTION hostile(what int) RETURNS int STRICT LANGUAGE plzig A
         40 => { const pc = try plzig.spi.prepare("SELECT 1", &.{}); const c = h.spi_cursor_open_plan(pc.handle, &vals, 0);
                 _ = h.spi_cursor_fetch(c, &buf, 0); _ = h.spi_cursor_fetch(c ^ 1, &buf, buf.len); },
         41 => { _ = try plzig.spi.execute("SELECT 'x'::text", &.{}); const n: u32 = @intCast(h.spi_row_size(0)); _ = h.spi_row_read(0, &buf, n - 1); },
+        42 => h.raise_error(P([*]const u8, bad), 5, sql.ptr, 3, sql.ptr, 0, sql.ptr, 0),
+        43 => h.raise_error("23514", 5, P([*]const u8, bad), 10, sql.ptr, 0, sql.ptr, 0),
+        44 => h.raise_error("23514", 5, sql.ptr, 3, P([*]const u8, bad), 10, sql.ptr, 0),
+        45 => h.raise_error("23514", 5, sql.ptr, 3, sql.ptr, 3, P([*]const u8, plzig.memSize() - 4), 0xffff_ffff),
+        46 => h.raise_error("2351423514", 0xffff_ffff, sql.ptr, 3, sql.ptr, 0, sql.ptr, 0),
+        47 => h.raise_error("XX000", 5, P([*]const u8, bad), 0xffff_ffff, sql.ptr, 0, sql.ptr, 0),
+        48 => { const s = "a\x00b"; h.raise_error("23514", 5, s, 3, sql.ptr, 0, sql.ptr, 0); },
+        49 => { const s = "23514"; h.raise_error(s, 5, sql.ptr, sql.len, sql.ptr, 0, sql.ptr, 0); },
         else => return 0,
     }
     return 1;
@@ -344,9 +352,17 @@ done <<'CASES'
 39|invalid prepared statement handle
 40|invalid cursor handle
 41|row buffer is too small
+42|guest passed an invalid memory range
+43|guest passed an invalid memory range
+44|guest passed an invalid memory range
+45|guest passed an invalid memory range
+46|invalid SQLSTATE "2351423514
+47|SQLSTATE XX000 cannot be raised by a PL/Zig function
+48|invalid byte sequence for encoding "UTF8": 0x00
+49|ERROR:  SELECT $1::text
 0|0
 CASES
-if [ "$n" -eq 42 ]; then pass "hostile guest: all 41 forged calls end in a clean ERROR"; fi
+if [ "$n" -eq 50 ]; then pass "hostile guest: all 49 forged calls end in a clean ERROR"; fi
 expect "hostile guest: backend still healthy" "4242" "SELECT 4242;"
 if grep -qE "terminated by signal|server process .* was terminated" /tmp/server.log; then fail "hostile guest: no backend crash in the server log"; else pass "hostile guest: no backend crash in the server log"; fi
 psqlq -c "DROP FUNCTION hostile(int); SELECT plzig_cache_clear();" >/dev/null

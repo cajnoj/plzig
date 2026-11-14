@@ -47,6 +47,17 @@ h_raise(wasm_exec_env_t env, uint32 ptr, uint32 len)
 }
 
 static void
+h_raise_error(wasm_exec_env_t env, uint32 cp, uint32 cl, uint32 mp, uint32 ml,
+			  uint32 dp, uint32 dl, uint32 hp, uint32 hl)
+{
+	(void) stub_range(env, cp, cl > 16 ? 16 : cl);
+	(void) stub_range(env, mp, ml > 65536 ? 65536 : ml);
+	(void) stub_range(env, dp, dl > 65536 ? 65536 : dl);
+	(void) stub_range(env, hp, hl > 65536 ? 65536 : hl);
+	stub_trap(env, "plzig: host error");
+}
+
+static void
 h_panic(wasm_exec_env_t env, uint32 ptr, uint32 len)
 {
 	(void) stub_range(env, ptr, len > 1024 ? 1024 : len);
@@ -133,6 +144,7 @@ static NativeSymbol stub_symbols[] = {
 	{"log", (void *) h_log, "(iii)", NULL},
 	{"raise", (void *) h_raise, "(ii)", NULL},
 	{"panic", (void *) h_panic, "(ii)", NULL},
+	{"raise_error", (void *) h_raise_error, "(iiiiiiii)", NULL},
 	{"spi_execute", (void *) h_iiii_I, "(iiii)I", NULL},
 	{"spi_ncols", (void *) h_v_i, "()i", NULL},
 	{"spi_value_len", (void *) h_ii_i, "(ii)i", NULL},

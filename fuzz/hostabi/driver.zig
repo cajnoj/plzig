@@ -176,6 +176,18 @@ fn sqlArg(sc: *Script) struct { u32, u32 } {
     return .{ ptrArg(sc), lenArg(sc) };
 }
 
+const codes = [_][]const u8{ "P0001", "23514", "22012", "Z9999", "XX000", "57014", "00000", "08006", "53100", "F0000", "58030", "01000", "02000", "p0001", "2351", "235140", "23\x0014", "\u{e9}235" };
+
+/// a SQLSTATE: from the pool (valid, refused, malformed) or forged
+fn codeArg(sc: *Script) struct { u32, u32 } {
+    const sel = sc.byte();
+    if (sel < 220) {
+        const c = codes[sel % codes.len];
+        return .{ @intCast(plzig.addrOf(c.ptr)), @intCast(c.len) };
+    }
+    return .{ ptrArg(sc), lenArg(sc) };
+}
+
 /// fill n parameter slots in gbuf (text parameters); returns their address
 fn textParams(sc: *Script, n: u32) u32 {
     const max = @min(n, 64);
@@ -225,7 +237,14 @@ fn run(script: []const u8) i32 {
         const op = sc.byte();
         switch (op % 24) {
             0 => h.log(sc.byte() % 6, P([*]const u8, ptrArg(&sc)), lenArg(&sc)),
-            1 => if (op == 1) h.raise(P([*]const u8, ptrArg(&sc)), lenArg(&sc)),
+            1 => if (op == 1) {
+                h.raise(P([*]const u8, ptrArg(&sc)), lenArg(&sc));
+            } else if (op == 25) {
+                // raise_error: SQLSTATE from the pool or forged, strings forged
+                const code = codeArg(&sc);
+                h.raise_error(P([*]const u8, code[0]), code[1], P([*]const u8, ptrArg(&sc)), lenArg(&sc),
+                    P([*]const u8, ptrArg(&sc)), lenArg(&sc), P([*]const u8, ptrArg(&sc)), lenArg(&sc));
+            },
             2 => if (op == 2) h.panic(P([*]const u8, ptrArg(&sc)), lenArg(&sc)),
             3, 4 => {
                 const q = sqlArg(&sc);

@@ -273,7 +273,28 @@ $$;
 ```zig
 plzig.notice("processed {d} rows", .{n});     // also debug/info/warning
 plzig.raise("bad input: {s}", .{s});          // ERROR, SQLSTATE P0001, never returns
+plzig.raiseError(.{                           // ERROR with your own SQLSTATE, never returns
+    .sqlstate = "23514",                      // check_violation
+    .message = "quantity must be positive",
+    .detail = "The order has 3 lines.",      // optional
+    .hint = "Remove the line instead.",      // optional
+});
+plzig.raiseErrorFmt(.{ .sqlstate = "22003", .hint = "Use at most 10." },
+                    "value {d} is out of range", .{x});
 ```
+
+A calling PL/pgSQL function can catch these by condition name or SQLSTATE
+(`EXCEPTION WHEN check_violation`, `WHEN SQLSTATE '22003'`) and read the
+detail and hint with `GET STACKED DIAGNOSTICS`. The severity is always
+`ERROR`. The SQLSTATE must be five characters, digits or upper-case letters
+(`P0001` if omitted); codes of the classes `00`, `01`, `02` (not errors),
+`08`, `53`, `57`, `58`, `F0` and `XX` (connection, resources, operator
+intervention, system, configuration and internal errors: conditions that
+monitoring, poolers and drivers react to) are refused with an error of
+their own (`22023`), as are malformed codes. Message, detail and hint must
+be valid in the database encoding without NUL bytes, are cut at 64 kB, and
+control characters other than newline and tab are shown as `?`. Empty or
+`null` detail and hint are omitted.
 
 Integer overflow, out-of-bounds indexing, `unreachable`, null unwrapping and
 other safety checks are on (`ReleaseSafe`) and raise

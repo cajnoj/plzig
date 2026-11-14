@@ -69,6 +69,7 @@ const wasm_env = struct {
         extern "plzig" fn log(level: u32, ptr: [*]const u8, len: u32) void;
         extern "plzig" fn raise(ptr: [*]const u8, len: u32) void;
         extern "plzig" fn panic(ptr: [*]const u8, len: u32) void;
+        extern "plzig" fn raise_error(code_ptr: [*]const u8, code_len: u32, msg_ptr: [*]const u8, msg_len: u32, detail_ptr: [*]const u8, detail_len: u32, hint_ptr: [*]const u8, hint_len: u32) void;
         extern "plzig" fn spi_execute(sql_ptr: [*]const u8, sql_len: u32, params_ptr: [*]const Slot, nparams: u32) i64;
         extern "plzig" fn spi_ncols() u32;
         extern "plzig" fn spi_value_len(row: u32, col: u32) i32;
@@ -233,6 +234,51 @@ pub fn raise(comptime fmt: []const u8, args: anytype) noreturn {
 pub fn raiseMsg(msg: []const u8) noreturn {
     host.raise(msg.ptr, @intCast(@min(msg.len, 0xffff_ffff)));
     @trap();
+}
+
+/// An SQL error with a chosen SQLSTATE, for `raiseError`.
+pub const ErrorReport = struct {
+    /// Five characters, each a digit or an upper-case letter (e.g. "23514",
+    /// check_violation). Refused, with an error of its own: classes 00, 01,
+    /// 02 (not errors), 08, 53, 57, 58, F0 and XX (conditions of the server
+    /// itself), and anything malformed.
+    sqlstate: []const u8 = "P0001",
+    message: []const u8,
+    /// Omitted when null or empty.
+    detail: ?[]const u8 = null,
+    /// Omitted when null or empty.
+    hint: ?[]const u8 = null,
+};
+
+/// The fields of `ErrorReport` other than the message, for `raiseErrorFmt`.
+pub const ErrorFields = struct {
+    sqlstate: []const u8 = "P0001",
+    detail: ?[]const u8 = null,
+    hint: ?[]const u8 = null,
+};
+
+fn hostLen(b: []const u8) u32 {
+    return @intCast(@min(b.len, 0xffff_ffff));
+}
+
+/// Raise an SQL ERROR with the given SQLSTATE, message, detail and hint;
+/// it can be caught by condition name or SQLSTATE in a calling PL/pgSQL
+/// function (`EXCEPTION WHEN check_violation`). Never returns. Severity is
+/// always ERROR. Message, detail and hint must be valid in the database
+/// encoding (no NUL bytes); each is cut at 64 kB.
+pub fn raiseError(report: ErrorReport) noreturn {
+    const none: []const u8 = "";
+    const detail = report.detail orelse none;
+    const hint = report.hint orelse none;
+    host.raise_error(report.sqlstate.ptr, hostLen(report.sqlstate), report.message.ptr, hostLen(report.message), detail.ptr, hostLen(detail), hint.ptr, hostLen(hint));
+    @trap();
+}
+
+/// `raiseError` with a formatted message:
+/// `plzig.raiseErrorFmt(.{ .sqlstate = "22023", .hint = "Use a positive value." }, "bad value {d}", .{x})`.
+pub fn raiseErrorFmt(fields: ErrorFields, comptime fmt: []const u8, args: anytype) noreturn {
+    const msg = s.fmt.allocPrint(allocator, fmt, args) catch "plzig: out of memory while formatting error message";
+    raiseError(.{ .sqlstate = fields.sqlstate, .message = msg, .detail = fields.detail, .hint = fields.hint });
 }
 
 /// Panic handler used by the SDK root (Zig safety-check failures).

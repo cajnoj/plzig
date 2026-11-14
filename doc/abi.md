@@ -31,7 +31,7 @@ A module is accepted by the loader (`plzig_module_load`) only if
   (checked before WAMR sees the module, see doc/security.md §4.5);
 * WAMR's loader validates it (full validation, classic interpreter);
 * every import is a **function** imported from module **`plzig`**, its name
-  is one of the 18 host functions below, and WAMR linked it (i.e. the
+  is one of the 19 host functions below, and WAMR linked it (i.e. the
   signature matched the registered one) — anything else is rejected;
 * it instantiates under the current `plzig.max_memory`;
 * it exports a linear memory and the four functions below with exactly the
@@ -159,7 +159,7 @@ parentheses). Every import:
   guest memory across anything that could run guest code;
 * validates every handle on every use (*Handles*).
 
-18 imports, the complete list (the loader's allowlist,
+19 imports, the complete list (the loader's allowlist,
 `plzig_known_imports` in `src/plzig_runtime.c`, and the registration table
 in `src/plzig_host.c` must match):
 
@@ -167,6 +167,7 @@ in `src/plzig_host.c` must match):
 |--------|-----------|-----------|
 | `log(level, ptr, len)` | `(iii)` | `level` 0..4 = `DEBUG1`, `LOG`, `INFO`, `NOTICE`, `WARNING`; anything else is an error. Message truncated to 64 kB; must be valid in the database encoding (no NUL). |
 | `raise(ptr, len)` | `(ii)` | `ERROR` with SQLSTATE `P0001` and the given message (64 kB max). Does not return to the guest. |
+| `raise_error(code_ptr, code_len, msg_ptr, msg_len, detail_ptr, detail_len, hint_ptr, hint_len)` | `(iiiiiiii)` | `ERROR` (always that severity) with the given SQLSTATE, message, detail and hint. The SQLSTATE is checked first: it must be exactly 5 bytes of `[0-9A-Z]` (at most 16 bytes are read, and shown with non-printable bytes as `?`), else `22023 PL/Zig: invalid SQLSTATE "..."`; classes `00`, `01`, `02`, `08`, `53`, `57`, `58`, `F0`, `XX` are refused with `22023 PL/Zig: SQLSTATE <code> cannot be raised by a PL/Zig function` (never substituted). Message, detail and hint are copied like `raise`'s message (64 kB each, cut on a character boundary, valid in the database encoding, no NUL); then C0 control characters other than newline and tab, and DEL, become `?`. Detail or hint with length 0 are omitted (the pointer is not looked at). Does not return to the guest. |
 | `panic(ptr, len)` | `(ii)` | Zig panic handler (safety-check failures, `@panic`, `unreachable`): `ERROR` `38000` `PL/Zig panic: <msg>` (1 kB max). |
 | `spi_execute(sql_ptr, sql_len, params_ptr, nparams)` | `(iiii)I` | Runs one SQL string with `SPI_execute_with_args`; `params_ptr` points to `nparams` (≤ 65535) slots, each `is_null` or a text value (`val`/`len`); all parameter types are `text` (cast in SQL: `$1::int`). `read_only` is true unless the function is `VOLATILE` (`DO` blocks are volatile). The SPI connection is opened lazily (atomic, so no transaction control) and closed at the end of the call. Returns `SPI_processed` (capped at `INT64_MAX`). Any SQL error aborts the call. The previous result is freed. |
 | `spi_ncols()` | `()i` | Number of columns of the last result (0 if none). |
@@ -298,7 +299,11 @@ grows only through the `memory.grow` instruction, bounded by
   `free`/`resize` work for the most recent allocation; `error.OutOfMemory`
   when `memory.grow` fails.
 * `plzig.print(level, fmt, args)`, `debug`, `info`, `notice`, `warning`.
-* `plzig.raise(fmt, args) noreturn`, `plzig.raiseMsg(msg) noreturn`.
+* `plzig.raise(fmt, args) noreturn`, `plzig.raiseMsg(msg) noreturn` (`P0001`).
+* `plzig.raiseError(.{ .sqlstate = "23514", .message = m, .detail = d, .hint = h }) noreturn`
+  (`ErrorReport`; `sqlstate` defaults to `"P0001"`, `detail`/`hint` to
+  `null`) and `plzig.raiseErrorFmt(.{ .sqlstate = ..., .detail = ..., .hint = ... }, fmt, args) noreturn`
+  (`ErrorFields`): `raise_error`.
 * `plzig.spi.execute(sql, params: []const ?[]const u8) !Result`;
   `Result.rows`, `Result.columns`, `Result.get(row, col) !?[]const u8`
   (text, copied into the arena), `Result.row(i) !Row` (typed, see below),

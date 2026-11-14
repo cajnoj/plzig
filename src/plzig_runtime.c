@@ -303,7 +303,7 @@ plzig_guest_ptr(void *module_inst, uint32 ptr, uint32 len)
  */
 /* must match plzig_native_symbols in plzig_host.c */
 static const char *const plzig_known_imports[] = {
-	"log", "raise", "panic", "spi_execute", "spi_ncols", "spi_value_len",
+	"log", "raise", "raise_error", "panic", "spi_execute", "spi_ncols", "spi_value_len",
 	"spi_value_copy", "spi_colname_len", "spi_colname_copy",
 	"spi_row_size", "spi_row_read", "spi_prepare", "spi_plan_free",
 	"spi_execute_plan", "spi_cursor_open", "spi_cursor_open_plan",

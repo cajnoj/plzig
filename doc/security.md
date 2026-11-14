@@ -47,7 +47,7 @@ module loader, and §6.2 spells out what B can achieve.
  client SQL ──► backend (trusted C: plzig.so + WAMR)
                  │   ├── guest module (untrusted Wasm code, in-process,
                  │   │     interpreted by WAMR; reaches the backend only
-                 │   │     through 18 host imports)              ◄── boundary 1
+                 │   │     through 19 host imports)              ◄── boundary 1
                  │   ├── $PGDATA/plzig/cache/*.wasm (B can write; every
                  │   │     file is re-validated when loaded)      ◄── boundary 2
                  │   └── fork + execve
@@ -153,7 +153,7 @@ freshly compiled or read from the cache:
   is capped at 1023 MB, WAMR rejects more than 65535 locals anyway, the
   table limit is far above what a Zig module needs);
 * full WAMR validation (`wasm_runtime_load`);
-* every import must be a *function* from module `plzig`, one of the 18
+* every import must be a *function* from module `plzig`, one of the 19
   known names, and linked by WAMR (signature equal to the registered one);
 * a trial instantiation under `plzig.max_memory`, the four exports with
   exactly the right parameter/result types, a linear memory,
@@ -214,13 +214,17 @@ wrong-mode cache files), `test/tap/t/060_environment.pl`, fuzz target
   execution); `DECLARE`/`FETCH`/`MOVE`/`CLOSE` are refused on the raw parse
   tree; PL/Zig's own portals are pinned; no transaction control;
 * text crossing the boundary is checked for the database encoding and NUL
-  bytes; `log`/`raise`/`panic` messages are length-capped.
+  bytes; `log`/`raise`/`raise_error`/`panic` messages are length-capped;
+  `raise_error` raises only `ERROR`, with a well-formed SQLSTATE outside
+  the classes a server condition uses (`00`, `01`, `02`, `08`, `53`, `57`,
+  `58`, `F0`, `XX`), so a function cannot make its failure look like a
+  connection loss, a shutdown or an internal error.
 
 Tests: `test/sql/spi*.sql`, `test/sql/adversarial.sql` (row-level security
 and column privileges through `spi.execute`, prepared statements and
 cursors; a kept plan re-checked after `SET ROLE`; definer/invoker nesting;
 refused identity changes; read-only transactions and data-modifying CTEs),
-`docker/security-checks.sh` (41 hostile-guest calls, forged argument buffers), fuzz target `hostabi`
+`docker/security-checks.sh` (49 hostile-guest calls, forged argument buffers), fuzz target `hostabi`
 (§7), TAP `040_standby.pl` (read-only on a standby).
 
 ### 4.8 The compiler process

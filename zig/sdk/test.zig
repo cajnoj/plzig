@@ -566,6 +566,17 @@ test "print formats into the arena and passes the level" {
     try testing.expect(std.mem.indexOf(u8, env.last_log[0..env.last_log_len], "out of memory") != null);
 }
 
+test "raiseError: the API shape (behaviour: test/sql/errors.sql)" {
+    // noreturn: it cannot run in a unit test; check what user code can write
+    const R = @typeInfo(@TypeOf(plzig.raiseError)).@"fn";
+    try testing.expect(R.return_type.? == noreturn);
+    const r: plzig.ErrorReport = .{ .message = "m" };
+    try testing.expectEqualStrings("P0001", r.sqlstate);
+    try testing.expect(r.detail == null and r.hint == null);
+    const f: plzig.ErrorFields = .{ .sqlstate = "23514", .hint = "h" };
+    try testing.expectEqualStrings("h", f.hint.?);
+}
+
 // ---------------------------------------------------------------------------
 // The SDK root: argument decoding, result encoding, plzig_call
 

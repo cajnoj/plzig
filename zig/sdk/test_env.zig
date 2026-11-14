@@ -199,6 +199,10 @@ pub const host = struct {
         std.debug.panic("plzig.raise in a unit test: {s}", .{ptr[0..len]});
     }
 
+    pub fn raise_error(code_ptr: [*]const u8, code_len: u32, msg_ptr: [*]const u8, msg_len: u32, detail_ptr: [*]const u8, detail_len: u32, hint_ptr: [*]const u8, hint_len: u32) void {
+        std.debug.panic("plzig.raiseError in a unit test: {s} {s} ({s}; {s})", .{ code_ptr[0..code_len], msg_ptr[0..msg_len], detail_ptr[0..detail_len], hint_ptr[0..hint_len] });
+    }
+
     pub fn panic(ptr: [*]const u8, len: u32) void {
         std.debug.panic("plzig panic in a unit test: {s}", .{ptr[0..len]});
     }

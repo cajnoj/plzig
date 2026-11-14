@@ -1,0 +1,273 @@
+--
+-- errors: plzig.raiseError / raiseErrorFmt, an SQL ERROR with a SQLSTATE,
+-- message, detail and hint chosen by the function (PLAN.md section 12,
+-- item 7); refused classes and malformed codes are errors of their own.
+--
+-- non-strict: NULL detail/hint are omitted
+CREATE FUNCTION err_raise(code text, msg text, detail text, hint text) RETURNS int LANGUAGE plzig AS $$
+    plzig.raiseError(.{ .sqlstate = code orelse "P0001", .message = msg orelse "", .detail = detail, .hint = hint });
+$$;
+-- the same with raw bytes (NUL, invalid sequences)
+CREATE FUNCTION err_raise_b(code bytea, msg bytea, detail bytea, hint bytea) RETURNS int LANGUAGE plzig AS $$
+    plzig.raiseError(.{ .sqlstate = code orelse "P0001", .message = msg orelse "", .detail = detail, .hint = hint });
+$$;
+CREATE FUNCTION err_fmt(x int) RETURNS int STRICT LANGUAGE plzig AS $$
+    if (x > 10) plzig.raiseErrorFmt(.{ .sqlstate = "22003", .detail = "The limit is 10.", .hint = "Pass a smaller value." },
+                                    "value {d} is out of range", .{x});
+    return x;
+$$;
+-- what a PL/pgSQL caller sees
+CREATE FUNCTION err_show(q text) RETURNS text LANGUAGE plpgsql AS $d$
+DECLARE s text; m text; d text; h text;
+BEGIN
+  EXECUTE q;
+  RETURN 'no error';
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS s = RETURNED_SQLSTATE, m = MESSAGE_TEXT, d = PG_EXCEPTION_DETAIL, h = PG_EXCEPTION_HINT;
+  RETURN format('%s | %s | %s | %s', s, m, nullif(d, ''), nullif(h, ''));
+END $d$;
+CREATE FUNCTION err_lens(q text) RETURNS text LANGUAGE plpgsql AS $d$
+DECLARE s text; m text; d text; h text;
+BEGIN
+  EXECUTE q;
+  RETURN 'no error';
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS s = RETURNED_SQLSTATE, m = MESSAGE_TEXT, d = PG_EXCEPTION_DETAIL, h = PG_EXCEPTION_HINT;
+  RETURN format('%s | message %s bytes, %s chars | detail %s bytes | hint %s bytes', s,
+                octet_length(m), char_length(m), octet_length(d), octet_length(h));
+END $d$;
+-- every field arrives
+SELECT err_show($$SELECT err_raise('23514', 'value too large', 'The limit is 10.', 'Use a smaller value.')$$);
+                             err_show                              
+-------------------------------------------------------------------
+ 23514 | value too large | The limit is 10. | Use a smaller value.
+(1 row)
+
+SELECT err_show($$SELECT err_raise('P0001', 'only a message', NULL, NULL)$$);
+           err_show           
+------------------------------
+ P0001 | only a message |  | 
+(1 row)
+
+SELECT err_show($$SELECT err_raise('22012', 'detail only', 'some detail', NULL)$$);
+               err_show               
+--------------------------------------
+ 22012 | detail only | some detail | 
+(1 row)
+
+SELECT err_show($$SELECT err_raise('2201B', 'hint only', NULL, 'some hint')$$);
+             err_show             
+----------------------------------
+ 2201B | hint only |  | some hint
+(1 row)
+
+-- empty detail and hint are omitted, an empty message is allowed
+SELECT err_show($$SELECT err_raise('P0001', '', '', '')$$);
+    err_show    
+----------------
+ P0001 |  |  | 
+(1 row)
+
+-- the default SQLSTATE is P0001, like plzig.raise
+SELECT err_show($$SELECT err_raise(NULL, 'default code', NULL, NULL)$$);
+          err_show          
+----------------------------
+ P0001 | default code |  | 
+(1 row)
+
+SELECT err_show($$SELECT err_fmt(5)$$), err_show($$SELECT err_fmt(11)$$);
+ err_show |                                  err_show                                   
+----------+-----------------------------------------------------------------------------
+ no error | 22003 | value 11 is out of range | The limit is 10. | Pass a smaller value.
+(1 row)
+
+-- plzig.raise is unchanged
+CREATE FUNCTION err_plain() RETURNS int LANGUAGE plzig AS $$
+    plzig.raise("plain {s}", .{"raise"});
+$$;
+SELECT err_show('SELECT err_plain()');
+         err_show          
+---------------------------
+ P0001 | plain raise |  | 
+(1 row)
+
+-- as the client sees it
+SELECT err_raise('23514', 'value too large', 'The limit is 10.', 'Use a smaller value.');
+ERROR:  value too large
+DETAIL:  The limit is 10.
+HINT:  Use a smaller value.
+CONTEXT:  PL/Zig function err_raise(text,text,text,text)
+SELECT err_fmt(12);
+ERROR:  value 12 is out of range
+DETAIL:  The limit is 10.
+HINT:  Pass a smaller value.
+CONTEXT:  PL/Zig function err_fmt(integer)
+-- a calling PL/pgSQL function catches it by condition name or SQLSTATE
+CREATE FUNCTION err_catch(code text) RETURNS text LANGUAGE plpgsql AS $d$
+BEGIN
+  PERFORM err_raise(code, 'raised ' || code, NULL, NULL);
+  RETURN 'not raised';
+EXCEPTION
+  WHEN unique_violation THEN RETURN 'unique_violation: ' || SQLERRM;
+  WHEN check_violation THEN RETURN 'check_violation: ' || SQLERRM;
+  WHEN division_by_zero THEN RETURN 'division_by_zero: ' || SQLERRM;
+  WHEN SQLSTATE 'Z9999' THEN RETURN 'SQLSTATE Z9999: ' || SQLERRM;
+  WHEN raise_exception THEN RETURN 'raise_exception: ' || SQLERRM;
+END $d$;
+SELECT err_catch('23514'), err_catch('23505'), err_catch('22012'), err_catch('Z9999'), err_catch('P0001');
+           err_catch           |           err_catch            |           err_catch            |          err_catch           |           err_catch           
+-------------------------------+--------------------------------+--------------------------------+------------------------------+-------------------------------
+ check_violation: raised 23514 | unique_violation: raised 23505 | division_by_zero: raised 22012 | SQLSTATE Z9999: raised Z9999 | raise_exception: raised P0001
+(1 row)
+
+-- not caught by a handler for another condition
+SELECT err_catch('42P01');
+ERROR:  raised 42P01
+CONTEXT:  PL/Zig function err_raise(text,text,text,text)
+SQL statement "SELECT err_raise(code, 'raised ' || code, NULL, NULL)"
+PL/pgSQL function err_catch(text) line 3 at PERFORM
+-- refused classes: an error of its own, naming the code, never a substitution
+SELECT c, err_show(format('SELECT err_raise(%L, %L, NULL, NULL)', c, 'm'))
+  FROM unnest(ARRAY['00000', '01000', '02000', '08006', '53100', '57014', '57P01', '58030', 'F0000', 'XX000', 'XX001']) c;
+   c   |                                                                            err_show                                                                            
+-------+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+ 00000 | 22023 | PL/Zig: SQLSTATE 00000 cannot be raised by a PL/Zig function | Class 00 (successful completion) is reserved for conditions of the server itself. | 
+ 01000 | 22023 | PL/Zig: SQLSTATE 01000 cannot be raised by a PL/Zig function | Class 01 (warning) is reserved for conditions of the server itself. | 
+ 02000 | 22023 | PL/Zig: SQLSTATE 02000 cannot be raised by a PL/Zig function | Class 02 (no data) is reserved for conditions of the server itself. | 
+ 08006 | 22023 | PL/Zig: SQLSTATE 08006 cannot be raised by a PL/Zig function | Class 08 (connection exception) is reserved for conditions of the server itself. | 
+ 53100 | 22023 | PL/Zig: SQLSTATE 53100 cannot be raised by a PL/Zig function | Class 53 (insufficient resources) is reserved for conditions of the server itself. | 
+ 57014 | 22023 | PL/Zig: SQLSTATE 57014 cannot be raised by a PL/Zig function | Class 57 (operator intervention) is reserved for conditions of the server itself. | 
+ 57P01 | 22023 | PL/Zig: SQLSTATE 57P01 cannot be raised by a PL/Zig function | Class 57 (operator intervention) is reserved for conditions of the server itself. | 
+ 58030 | 22023 | PL/Zig: SQLSTATE 58030 cannot be raised by a PL/Zig function | Class 58 (system error) is reserved for conditions of the server itself. | 
+ F0000 | 22023 | PL/Zig: SQLSTATE F0000 cannot be raised by a PL/Zig function | Class F0 (configuration file error) is reserved for conditions of the server itself. | 
+ XX000 | 22023 | PL/Zig: SQLSTATE XX000 cannot be raised by a PL/Zig function | Class XX (internal error) is reserved for conditions of the server itself. | 
+ XX001 | 22023 | PL/Zig: SQLSTATE XX001 cannot be raised by a PL/Zig function | Class XX (internal error) is reserved for conditions of the server itself. | 
+(11 rows)
+
+-- their neighbours are allowed (not P0004, assert_failure: WHEN OTHERS does not catch it)
+SELECT c, err_show(format('SELECT err_raise(%L, %L, NULL, NULL)', c, 'ok'))
+  FROM unnest(ARRAY['03000', '09000', '0A000', '22000', '54000', '55000', '59000', 'F1000', 'XY000', 'P0003', 'ZZZZZ', '99999']) c;
+   c   |     err_show     
+-------+------------------
+ 03000 | 03000 | ok |  | 
+ 09000 | 09000 | ok |  | 
+ 0A000 | 0A000 | ok |  | 
+ 22000 | 22000 | ok |  | 
+ 54000 | 54000 | ok |  | 
+ 55000 | 55000 | ok |  | 
+ 59000 | 59000 | ok |  | 
+ F1000 | F1000 | ok |  | 
+ XY000 | XY000 | ok |  | 
+ P0003 | P0003 | ok |  | 
+ ZZZZZ | ZZZZZ | ok |  | 
+ 99999 | 99999 | ok |  | 
+(12 rows)
+
+-- malformed codes: length, case, other characters, non-ASCII (5 bytes)
+SELECT c, err_show(format('SELECT err_raise(%L, %L, NULL, NULL)', c, 'm'))
+  FROM unnest(ARRAY['', '2351', '235140', 'p0001', '2351a', '23 14', '23-14', '235é', 'é2351', 'P0001 ', ' P0001', '23514235142351423514']) c;
+          c           |                                                                       err_show                                                                        
+----------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------
+                      | 22023 | PL/Zig: invalid SQLSTATE "" | A SQLSTATE consists of exactly five characters, each a digit or an upper-case letter A-Z. | 
+ 2351                 | 22023 | PL/Zig: invalid SQLSTATE "2351" | A SQLSTATE consists of exactly five characters, each a digit or an upper-case letter A-Z. | 
+ 235140               | 22023 | PL/Zig: invalid SQLSTATE "235140" | A SQLSTATE consists of exactly five characters, each a digit or an upper-case letter A-Z. | 
+ p0001                | 22023 | PL/Zig: invalid SQLSTATE "p0001" | A SQLSTATE consists of exactly five characters, each a digit or an upper-case letter A-Z. | 
+ 2351a                | 22023 | PL/Zig: invalid SQLSTATE "2351a" | A SQLSTATE consists of exactly five characters, each a digit or an upper-case letter A-Z. | 
+ 23 14                | 22023 | PL/Zig: invalid SQLSTATE "23 14" | A SQLSTATE consists of exactly five characters, each a digit or an upper-case letter A-Z. | 
+ 23-14                | 22023 | PL/Zig: invalid SQLSTATE "23-14" | A SQLSTATE consists of exactly five characters, each a digit or an upper-case letter A-Z. | 
+ 235é                 | 22023 | PL/Zig: invalid SQLSTATE "235??" | A SQLSTATE consists of exactly five characters, each a digit or an upper-case letter A-Z. | 
+ é2351                | 22023 | PL/Zig: invalid SQLSTATE "??2351" | A SQLSTATE consists of exactly five characters, each a digit or an upper-case letter A-Z. | 
+ P0001                | 22023 | PL/Zig: invalid SQLSTATE "P0001 " | A SQLSTATE consists of exactly five characters, each a digit or an upper-case letter A-Z. | 
+  P0001               | 22023 | PL/Zig: invalid SQLSTATE " P0001" | A SQLSTATE consists of exactly five characters, each a digit or an upper-case letter A-Z. | 
+ 23514235142351423514 | 22023 | PL/Zig: invalid SQLSTATE "2351423514235142..." | A SQLSTATE consists of exactly five characters, each a digit or an upper-case letter A-Z. | 
+(12 rows)
+
+-- NUL and control bytes in the code (shown as ?)
+SELECT err_show($$SELECT err_raise_b('\x3233003134'::bytea, 'm'::bytea, NULL, NULL)$$);
+                                                                err_show                                                                 
+-----------------------------------------------------------------------------------------------------------------------------------------
+ 22023 | PL/Zig: invalid SQLSTATE "23?14" | A SQLSTATE consists of exactly five characters, each a digit or an upper-case letter A-Z. | 
+(1 row)
+
+SELECT err_show($$SELECT err_raise_b('\x0a1b5b3331'::bytea, 'm'::bytea, NULL, NULL)$$);
+                                                                err_show                                                                 
+-----------------------------------------------------------------------------------------------------------------------------------------
+ 22023 | PL/Zig: invalid SQLSTATE "??[31" | A SQLSTATE consists of exactly five characters, each a digit or an upper-case letter A-Z. | 
+(1 row)
+
+-- the code is checked before anything else
+SELECT err_show($$SELECT err_raise_b('XX000'::bytea, '\xff'::bytea, NULL, NULL)$$);
+                                                                       err_show                                                                       
+------------------------------------------------------------------------------------------------------------------------------------------------------
+ 22023 | PL/Zig: SQLSTATE XX000 cannot be raised by a PL/Zig function | Class XX (internal error) is reserved for conditions of the server itself. | 
+(1 row)
+
+-- message, detail and hint: valid in the database encoding, no NUL
+SELECT err_show($$SELECT err_raise_b('23514'::bytea, '\x61ff62'::bytea, NULL, NULL)$$);
+                           err_show                            
+---------------------------------------------------------------
+ 22021 | invalid byte sequence for encoding "UTF8": 0xff |  | 
+(1 row)
+
+SELECT err_show($$SELECT err_raise_b('23514'::bytea, 'm'::bytea, '\x6100'::bytea, NULL)$$);
+                           err_show                            
+---------------------------------------------------------------
+ 22021 | invalid byte sequence for encoding "UTF8": 0x00 |  | 
+(1 row)
+
+SELECT err_show($$SELECT err_raise_b('23514'::bytea, 'm'::bytea, NULL, '\xc3'::bytea)$$);
+                           err_show                            
+---------------------------------------------------------------
+ 22021 | invalid byte sequence for encoding "UTF8": 0xc3 |  | 
+(1 row)
+
+SELECT err_show($$SELECT err_raise_b('23514'::bytea, '\x00'::bytea, NULL, NULL)$$);
+                           err_show                            
+---------------------------------------------------------------
+ 22021 | invalid byte sequence for encoding "UTF8": 0x00 |  | 
+(1 row)
+
+-- multibyte text is fine
+SELECT err_show($$SELECT err_raise('23514', 'grüße', 'détail', 'ヒント')$$);
+            err_show             
+---------------------------------
+ 23514 | grüße | détail | ヒント
+(1 row)
+
+-- control characters become ?, except newline and tab
+SELECT err_show(format('SELECT err_raise(%L, %L, %L, %L)', '23514', E'a\x1b[31mb\rc\x7fd', E'line1\nline2\tx', E'h\x07'));
+          err_show           
+-----------------------------
+ 23514 | a?[31mb?c?d | line1+
+ line2   x | h?
+(1 row)
+
+-- over-long strings are cut at 64 kB, on a character boundary
+SELECT err_lens($$SELECT err_raise('23514', repeat('m', 70000), repeat('d', 65536), repeat('h', 65537))$$);
+                                     err_lens                                     
+----------------------------------------------------------------------------------
+ 23514 | message 65536 bytes, 65536 chars | detail 65536 bytes | hint 65536 bytes
+(1 row)
+
+SELECT err_lens($$SELECT err_raise('23514', 'a' || repeat('é', 40000), 'a' || repeat('é', 40000), repeat('é', 40000))$$);
+                                     err_lens                                     
+----------------------------------------------------------------------------------
+ 23514 | message 65535 bytes, 32768 chars | detail 65535 bytes | hint 65536 bytes
+(1 row)
+
+SELECT err_lens($$SELECT err_raise('23514', repeat('€', 30000), 'x', 'y')$$);
+                                 err_lens                                 
+--------------------------------------------------------------------------
+ 23514 | message 65535 bytes, 21845 chars | detail 1 bytes | hint 1 bytes
+(1 row)
+
+-- the function's instance is discarded like after any error, and the
+-- backend is fine
+SELECT err_fmt(3);
+ err_fmt 
+---------
+       3
+(1 row)
+
+DROP FUNCTION err_raise(text, text, text, text), err_raise_b(bytea, bytea, bytea, bytea), err_fmt(int),
+  err_show(text), err_lens(text), err_plain(), err_catch(text);

@@ -227,6 +227,125 @@ host_raise(wasm_exec_env_t env, uint32 ptr, uint32 len)
 	PG_END_TRY();
 }
 
+/*
+ * SQLSTATE classes raise_error refuses (PLAN.md §12 item 7): not errors (00,
+ * 01, 02), or conditions of the server itself that monitoring, poolers and
+ * drivers act on (connection exception, insufficient resources, operator
+ * intervention, system error, configuration file error, internal error).
+ */
+static const struct
+{
+	char		cls[3];
+	const char *what;
+}			plzig_refused_classes[] = {
+	{"00", "successful completion"},
+	{"01", "warning"},
+	{"02", "no data"},
+	{"08", "connection exception"},
+	{"53", "insufficient resources"},
+	{"57", "operator intervention"},
+	{"58", "system error"},
+	{"F0", "configuration file error"},
+	{"XX", "internal error"},
+};
+
+/* C0 controls except newline and tab, and DEL, become '?' (as compiler output) */
+static void
+neutralise_controls(char *s)
+{
+	for (; *s; s++)
+	{
+		unsigned char c = (unsigned char) *s;
+
+		if ((c < 0x20 && c != '\n' && c != '\t') || c == 0x7f)
+			*s = '?';
+	}
+}
+
+/*
+ * raise_error: ERROR with a SQLSTATE, message, detail and hint chosen by the
+ * function.  Severity is always ERROR.  The SQLSTATE must be five characters
+ * of [0-9A-Z] and not in a refused class; anything else is an error of its
+ * own (never a substitution).  Strings are validated like raise's (database
+ * encoding, no NUL, cut at 64 kB on a character boundary); detail and hint
+ * are omitted when their length is 0.
+ */
+static void
+host_raise_error(wasm_exec_env_t env, uint32 code_ptr, uint32 code_len,
+				 uint32 msg_ptr, uint32 msg_len, uint32 detail_ptr, uint32 detail_len,
+				 uint32 hint_ptr, uint32 hint_len)
+{
+	PlzigCallCtx *ctx = host_ctx(env);
+	MemoryContext oldcxt = CurrentMemoryContext;
+
+	if (ctx == NULL)
+		return;
+	PG_TRY();
+	{
+		char		code[6];
+		char		shown[17];
+		uint32		n = code_len;
+		const char *src;
+		bool		valid = (code_len == 5);
+		char	   *msg;
+		char	   *detail = NULL;
+		char	   *hint = NULL;
+		uint32		i;
+
+		/* at most 16 bytes are looked at (and shown) */
+		if (n > 16)
+			n = 16;
+		src = plzig_guest_ptr(wasm_runtime_get_module_inst(env), code_ptr, n);
+		for (i = 0; i < n; i++)
+		{
+			unsigned char c = (unsigned char) src[i];
+
+			if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z')))
+				valid = false;
+			shown[i] = (c >= 0x20 && c < 0x7f) ? (char) c : '?';
+		}
+		shown[n] = '\0';
+		if (!valid)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("PL/Zig: invalid SQLSTATE \"%s%s\"", shown, code_len > 16 ? "..." : ""),
+					 errdetail("A SQLSTATE consists of exactly five characters, each a digit or an upper-case letter A-Z.")));
+		memcpy(code, src, 5);
+		code[5] = '\0';
+		for (i = 0; i < lengthof(plzig_refused_classes); i++)
+			if (code[0] == plzig_refused_classes[i].cls[0] &&
+				code[1] == plzig_refused_classes[i].cls[1])
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("PL/Zig: SQLSTATE %s cannot be raised by a PL/Zig function", code),
+						 errdetail("Class %s (%s) is reserved for conditions of the server itself.",
+								   plzig_refused_classes[i].cls, plzig_refused_classes[i].what)));
+
+		msg = guest_string(env, msg_ptr, msg_len, PLZIG_MAX_LOG_MSG, "error message", true);
+		neutralise_controls(msg);
+		if (detail_len > 0)
+		{
+			detail = guest_string(env, detail_ptr, detail_len, PLZIG_MAX_LOG_MSG, "error detail", true);
+			neutralise_controls(detail);
+		}
+		if (hint_len > 0)
+		{
+			hint = guest_string(env, hint_ptr, hint_len, PLZIG_MAX_LOG_MSG, "error hint", true);
+			neutralise_controls(hint);
+		}
+		ereport(ERROR,
+				(errcode(MAKE_SQLSTATE(code[0], code[1], code[2], code[3], code[4])),
+				 errmsg_internal("%s", msg),
+				 detail ? errdetail_internal("%s", detail) : 0,
+				 hint ? errhint("%s", hint) : 0));
+	}
+	PG_CATCH();
+	{
+		host_catch(ctx, env, oldcxt);
+	}
+	PG_END_TRY();
+}
+
 static void
 host_panic(wasm_exec_env_t env, uint32 ptr, uint32 len)
 {
@@ -1829,6 +1948,7 @@ static NativeSymbol plzig_native_symbols[] = {
 	{"log", (void *) host_log, "(iii)", NULL},
 	{"raise", (void *) host_raise, "(ii)", NULL},
 	{"panic", (void *) host_panic, "(ii)", NULL},
+	{"raise_error", (void *) host_raise_error, "(iiiiiiii)", NULL},
 	{"spi_execute", (void *) host_spi_execute, "(iiii)I", NULL},
 	{"spi_ncols", (void *) host_spi_ncols, "()i", NULL},
 	{"spi_value_len", (void *) host_spi_value_len, "(ii)i", NULL},
