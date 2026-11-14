@@ -136,6 +136,12 @@ shim_delete_children(ShimContext *c)
 	}
 }
 
+MemoryContext
+MemoryContextGetParent(MemoryContext context)
+{
+	return (MemoryContext) cx(context)->parent;
+}
+
 void
 MemoryContextReset(MemoryContext context)
 {
@@ -285,6 +291,29 @@ pgshim_context_usage(const char *name, Size *bytes, Size *nchunks)
 		return false;
 	*bytes = c->bytes;
 	*nchunks = c->nchunks;
+	return true;
+}
+
+/* number of contexts below the first context named `name` (all levels) */
+static Size
+shim_count_descendants(ShimContext *c)
+{
+	ShimContext *k;
+	Size		n = 0;
+
+	for (k = c->firstchild; k; k = k->nextchild)
+		n += 1 + shim_count_descendants(k);
+	return n;
+}
+
+bool
+pgshim_context_descendants(const char *name, Size *n)
+{
+	ShimContext *c = TopMemoryContext ? shim_find(cx(TopMemoryContext), name) : NULL;
+
+	if (c == NULL)
+		return false;
+	*n = shim_count_descendants(c);
 	return true;
 }
 

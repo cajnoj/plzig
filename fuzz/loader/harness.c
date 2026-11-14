@@ -27,7 +27,8 @@
  *	  sanitizer report, abort (ERROR outside a handler, failed assertion,
  *	  pfree of a foreign pointer), a hang beyond libFuzzer's -timeout, and
  *	  growth of the long-lived "PL/Zig runtime" memory context across
- *	  inputs (a module or instance leaked on some error path).
+ *	  inputs, or a context left below it (a module, instance or call
+ *	  context leaked on some error path).
  *
  *	  A custom mutator keeps the WebAssembly section structure intact most
  *	  of the time (mutate one section's payload and fix its size, drop,
@@ -134,6 +135,7 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	bool		isnull;
 	Size		bytes;
 	Size		chunks;
+	Size		children;
 	uint8		sel = size > 0 ? data[size - 1] : 0;
 
 	if (size > 1024 * 1024)
@@ -205,7 +207,17 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	MemoryContextSwitchTo(old);
 	MemoryContextDelete(cxt);
 
-	/* nothing may stay behind in the long-lived runtime context */
+	/*
+	 * nothing may stay behind in the long-lived runtime context: no chunk,
+	 * and no child context (the per-instance call contexts are deleted with
+	 * their instance)
+	 */
+	if (pgshim_context_descendants("PL/Zig runtime", &children) && children != 0)
+	{
+		fprintf(stderr, "loader harness: %zu memory context(s) left below the PL/Zig runtime context (leak)\n",
+				children);
+		abort();
+	}
 	if (pgshim_context_usage("PL/Zig runtime", &bytes, &chunks))
 	{
 		if (!baseline_set)

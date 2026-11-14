@@ -71,7 +71,7 @@ host_ctx(wasm_exec_env_t env)
 static void
 host_catch(PlzigCallCtx *ctx, wasm_exec_env_t env, MemoryContext oldcxt)
 {
-	MemoryContextSwitchTo(ctx->cxt);
+	MemoryContextSwitchTo(ctx->errcxt);
 	ctx->edata = CopyErrorData();
 	FlushErrorState();
 	MemoryContextSwitchTo(oldcxt);

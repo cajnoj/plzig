@@ -257,8 +257,15 @@ typedef struct PlzigRowBuf PlzigRowBuf;
 struct PlzigCallCtx
 {
 	PlzigInstance *inst;
-	MemoryContext cxt;			/* per-call context */
+	MemoryContext cxt;			/* per-call context (the instance's) */
 	MemoryContext scratch;		/* reset by every SPI import */
+	/*
+	 * Where a stashed error is copied: the caller's context.  It must outlive
+	 * the instance (destroyed, with cxt, before the error is reported), since
+	 * ReThrowError does not copy every string of the ErrorData (filename,
+	 * funcname, domain and message_id stay where CopyErrorData put them).
+	 */
+	MemoryContext errcxt;
 	ErrorData  *edata;			/* stashed error from a host import */
 	bool		read_only;
 	bool		spi_connected;

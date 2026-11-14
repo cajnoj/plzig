@@ -71,6 +71,15 @@ struct PlzigInstance
 	uint32		argbuf_cap;
 	uint32		max_pages;		/* plzig.max_memory at instantiation */
 	PlzigPlanTable plans;		/* prepared statements (plzig_host.c) */
+	/*
+	 * Memory contexts of a call (PlzigCallCtx.cxt and .scratch), children of
+	 * the runtime context, reused by every call of this instance: reset when
+	 * a call ends (and, defensively, when one starts), deleted with the
+	 * instance.  An instance runs at most one call at a time (a recursive
+	 * call gets a temporary instance), so they are never shared.
+	 */
+	MemoryContext call_cxt;
+	MemoryContext scratch_cxt;
 };
 
 #define PLZIG_INTERRUPT_MSG "plzig: interrupted"
@@ -647,6 +656,15 @@ plzig_instance_create(PlzigModule *mod)
 	plzig_runtime_init();
 	pi = MemoryContextAllocZero(plzig_runtime_cxt, sizeof(PlzigInstance));
 	pi->mod = mod;
+	/*
+	 * After a reset an AllocSet keeps only its first block (1 kB with these
+	 * sizes), so an idle instance holds about 2 kB here, however much a
+	 * call used.
+	 */
+	pi->call_cxt = AllocSetContextCreate(plzig_runtime_cxt, "PL/Zig call",
+										 ALLOCSET_SMALL_SIZES);
+	pi->scratch_cxt = AllocSetContextCreate(plzig_runtime_cxt, "PL/Zig SPI scratch",
+											ALLOCSET_SMALL_SIZES);
 
 	memset(&ia, 0, sizeof(ia));
 	ia.default_stack_size = PLZIG_WASM_STACK;
@@ -658,7 +676,7 @@ plzig_instance_create(PlzigModule *mod)
 	pi->inst = wasm_runtime_instantiate_ex(mod->module, &ia, err, sizeof(err));
 	if (pi->inst == NULL)
 	{
-		pfree(pi);
+		plzig_instance_destroy(pi);
 		err[sizeof(err) - 1] = '\0';
 		ereport(ERROR,
 				(errcode(ERRCODE_OUT_OF_MEMORY),
@@ -770,6 +788,8 @@ plzig_instance_memory_size(PlzigInstance *pi)
 void
 plzig_instance_destroy(PlzigInstance *pi)
 {
+	MemoryContext c;
+
 	if (pi == NULL)
 		return;
 	plzig_host_free_plans(&pi->plans);
@@ -777,6 +797,22 @@ plzig_instance_destroy(PlzigInstance *pi)
 		wasm_runtime_destroy_exec_env(pi->env);
 	if (pi->inst)
 		wasm_runtime_deinstantiate(pi->inst);
+
+	/*
+	 * Callers switch back to their own context before an instance is
+	 * destroyed (plzig_instance_call does on every exit).  Never leave
+	 * CurrentMemoryContext pointing into a deleted context anyway.
+	 */
+	for (c = CurrentMemoryContext; c != NULL; c = MemoryContextGetParent(c))
+		if (c == pi->call_cxt || c == pi->scratch_cxt)
+		{
+			MemoryContextSwitchTo(plzig_runtime_cxt);
+			break;
+		}
+	if (pi->call_cxt)
+		MemoryContextDelete(pi->call_cxt);
+	if (pi->scratch_cxt)
+		MemoryContextDelete(pi->scratch_cxt);
 	pfree(pi);
 }
 
@@ -964,7 +1000,6 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 					bool *isnull)
 {
 	PlzigCallCtx ctx;
-	MemoryContext callcxt;
 	MemoryContext oldcxt;
 	const char **bytes;
 	uint32	   *lens;
@@ -976,60 +1011,70 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 	PlzigSlot	result;
 	uint32		off;
 	uint32		status;
-	volatile Datum ret;			/* set inside PG_TRY, read after it */
+	volatile Datum ret = (Datum) 0;	/* set inside PG_TRY, read after it */
 	int			i;
 
 	check_stack_depth();
 
-	callcxt = AllocSetContextCreate(CurrentMemoryContext, "PL/Zig call",
-									ALLOCSET_SMALL_SIZES);
-	oldcxt = MemoryContextSwitchTo(callcxt);
+	/*
+	 * The instance's call contexts.  Normally already empty (reset when the
+	 * previous call ended; an instance whose call failed is destroyed, not
+	 * reused); resetting an empty context costs next to nothing.
+	 */
+	MemoryContextReset(pi->call_cxt);
+	MemoryContextReset(pi->scratch_cxt);
+	oldcxt = MemoryContextSwitchTo(pi->call_cxt);
 
 	memset(&ctx, 0, sizeof(ctx));
 	ctx.inst = pi;
-	ctx.cxt = callcxt;
-	ctx.scratch = AllocSetContextCreate(callcxt, "PL/Zig SPI scratch",
-										ALLOCSET_SMALL_SIZES);
+	ctx.cxt = pi->call_cxt;
+	ctx.scratch = pi->scratch_cxt;
+	ctx.errcxt = oldcxt;
 	ctx.read_only = read_only;
 	ctx.cached_row = -1;
 	ctx.cached_col = -1;
 	ctx.cached_name_col = -1;
 
-	/* prepare argument bytes on the host side first */
-	bytes = palloc0(sizeof(char *) * (nargs + 1));
-	lens = palloc0(sizeof(uint32) * (nargs + 1));
-	total = (uint64) (nargs + 1) * sizeof(PlzigSlot);
-	for (i = 0; i < nargs; i++)
-	{
-		PlzigTypeKind k = argtypes[i].kind;
-
-		if (args[i].isnull)
-			continue;
-		if (k == PLZIG_T_TEXT || k == PLZIG_T_TEXTIO || k == PLZIG_T_BYTEA)
-		{
-			struct varlena *v = PG_DETOAST_DATUM_PACKED(args[i].value);
-
-			bytes[i] = VARDATA_ANY(v);
-			lens[i] = VARSIZE_ANY_EXHDR(v);
-		}
-		else if (k == PLZIG_T_IO)
-		{
-			char	   *s = OutputFunctionCall(&argtypes[i].out_func, args[i].value);
-
-			bytes[i] = s;
-			lens[i] = (uint32) strlen(s);
-		}
-		total += TYPEALIGN(8, (uint64) lens[i]);
-	}
-	if (total > PG_UINT32_MAX - 16)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("PL/Zig: arguments too large")));
-
 	wasm_runtime_set_user_data(pi->env, &ctx);
 
+	/*
+	 * Everything from here on is inside PG_TRY, so that every exit, also by
+	 * an error, restores the caller's memory context: the call contexts are
+	 * deleted when the caller destroys a failed instance.
+	 */
 	PG_TRY();
 	{
+		/* prepare argument bytes on the host side first */
+		bytes = palloc0(sizeof(char *) * (nargs + 1));
+		lens = palloc0(sizeof(uint32) * (nargs + 1));
+		total = (uint64) (nargs + 1) * sizeof(PlzigSlot);
+		for (i = 0; i < nargs; i++)
+		{
+			PlzigTypeKind k = argtypes[i].kind;
+
+			if (args[i].isnull)
+				continue;
+			if (k == PLZIG_T_TEXT || k == PLZIG_T_TEXTIO || k == PLZIG_T_BYTEA)
+			{
+				struct varlena *v = PG_DETOAST_DATUM_PACKED(args[i].value);
+
+				bytes[i] = VARDATA_ANY(v);
+				lens[i] = VARSIZE_ANY_EXHDR(v);
+			}
+			else if (k == PLZIG_T_IO)
+			{
+				char	   *s = OutputFunctionCall(&argtypes[i].out_func, args[i].value);
+
+				bytes[i] = s;
+				lens[i] = (uint32) strlen(s);
+			}
+			total += TYPEALIGN(8, (uint64) lens[i]);
+		}
+		if (total > PG_UINT32_MAX - 16)
+			ereport(ERROR,
+					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+					 errmsg("PL/Zig: arguments too large")));
+
 		/*
 		 * 1. Where the argument block goes: the guest's argument buffer if
 		 * it fits (the arena is then reset inside plzig_call: one guest
@@ -1165,11 +1210,19 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 	PG_FINALLY();
 	{
 		wasm_runtime_set_user_data(pi->env, NULL);
+		MemoryContextSwitchTo(oldcxt);
 	}
 	PG_END_TRY();
 
 	plzig_host_finish_call(&ctx);
+	/* SPI_finish returns to the context SPI_connect was called in */
 	MemoryContextSwitchTo(oldcxt);
-	MemoryContextDelete(callcxt);
+	/*
+	 * Release what the call allocated (cursor tables, row buffers, cached
+	 * values: child contexts are deleted, blocks other than the first freed)
+	 * so an idle instance does not hold it.
+	 */
+	MemoryContextReset(pi->call_cxt);
+	MemoryContextReset(pi->scratch_cxt);
 	return ret;
 }

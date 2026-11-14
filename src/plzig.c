@@ -451,6 +451,7 @@ plzig_function_execute(PlzigFunction *fn, FunctionCallInfo fcinfo)
 	Datum		result;
 	bool		isnull = false;
 	ErrorContextCallback errcb;
+	MemoryContext oldcxt = CurrentMemoryContext;
 
 	errcb.callback = plzig_error_context;
 	errcb.arg = fn->signature;
@@ -485,7 +486,11 @@ plzig_function_execute(PlzigFunction *fn, FunctionCallInfo fcinfo)
 	}
 	PG_CATCH();
 	{
-		/* an instance that trapped or errored is never reused */
+		/*
+		 * An instance that trapped or errored is never reused.  Its call
+		 * contexts go with it: make sure we are not in one of them.
+		 */
+		MemoryContextSwitchTo(oldcxt);
 		if (inst)
 			plzig_instance_destroy(inst);
 		fn->use_count--;
@@ -551,6 +556,7 @@ plzig_inline_handler(PG_FUNCTION_ARGS)
 	PlzigTypeInfo rettype;
 	bool		isnull;
 	ErrorContextCallback errcb;
+	MemoryContext oldcxt = CurrentMemoryContext;
 
 	src = plzig_generate_inline_source(codeblock->source_text, &srclen);
 	/* DO blocks are never cached: compiled, run once, discarded */
@@ -573,6 +579,7 @@ plzig_inline_handler(PG_FUNCTION_ARGS)
 	}
 	PG_FINALLY();
 	{
+		MemoryContextSwitchTo(oldcxt);
 		if (inst)
 			plzig_instance_destroy(inst);
 		if (mod)

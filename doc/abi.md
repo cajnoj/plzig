@@ -121,10 +121,22 @@ trap in `plzig_init` rejects it too. The address need not be aligned.
    non-printable bytes replaced by `?`).
 8. Convert the result (copying out of guest memory); close every cursor
    the guest left open, then `SPI_finish()` if SPI was used
-   (`plzig_host_finish_call`); delete the per-call memory context.
+   (`plzig_host_finish_call`); reset the instance's call contexts.
+
+Host memory of a call lives in two memory contexts that belong to the
+instance (`PL/Zig call`, `PL/Zig SPI scratch`, children of the `PL/Zig
+runtime` context): created with the instance, reset when a call starts and
+when it returns (which deletes their child contexts and frees every block
+but the first, 1 kB each, so an idle instance keeps about 2 kB), deleted
+with the instance. An instance runs one call at a time, so they are never
+shared. Every exit from `plzig_instance_call`, also by an error, switches
+back to the caller's memory context first.
 
 An instance whose call ended in any `ERROR` is destroyed, with its prepared
-statements. Idle instances are
+statements and its call contexts, before the error is reported. So an error
+stashed by a host import is copied into the caller's memory context, not
+into the call contexts (`ReThrowError` does not copy every string of an
+`ErrorData`). Idle instances are
 kept per function (LRU, `plzig.instance_cache_size`); an instance created
 under a different `plzig.max_memory` is not reused. A recursive call into a
 function that is already running uses a temporary second instance.
@@ -255,7 +267,8 @@ name crosses the boundary.
   changes), and permissions are checked at every execution, as the current
   user. A portal opened from a plan holds its own reference to the cached
   plan, so freeing the plan while the cursor is open is safe.
-* **Cursors** live in a per-call table (in the `PL/Zig call` context). The
+* **Cursors** live in a per-call table (in the instance's `PL/Zig call`
+  context, reset at the end of the call). The
   portal is unnamed (`<unnamed portal N>`), pinned (`PinPortal`, so
   `CLOSE`/`CLOSE ALL` from nested code fails with `cannot drop pinned
   portal`), forward-only (`CURSOR_OPT_NO_SCROLL`), not holdable, and looked
@@ -269,8 +282,8 @@ name crosses the boundary.
   (an `SPITupleTable` owned by the call's SPI connection, freed before the
   next fetch, at close, or by `SPI_finish`) and one converted row (per-row
   context); typed rows of the last result use one per-row context too.
-  Per-import temporary data (copied SQL, parameters) lives in a scratch
-  context reset by every SPI import. Host memory therefore does not grow
+  Per-import temporary data (copied SQL, parameters) lives in the scratch
+  context, reset by every SPI import. Host memory therefore does not grow
   with the number of rows or executions.
 
 There are deliberately no imports for time, randomness, environment, files,

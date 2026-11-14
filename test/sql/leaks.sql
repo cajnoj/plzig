@@ -89,6 +89,35 @@ SELECT lk_mem() AS m0 \gset
 SELECT sum(lk_scalar(g)) + sum(lk_text(g)) FROM generate_series(1, 10000) g;
 SELECT lk_mem() - :m0 AS growth_one_statement;
 
+-- the call contexts belong to the instance and are reset when a call
+-- returns: a call that needed megabytes of host memory (a 1 MB value
+-- detoasted for a typed row, the same value through the text interface)
+-- leaves nothing behind in the kept instance
+CREATE FUNCTION lk_callmem() RETURNS bigint LANGUAGE sql AS $$
+  SELECT coalesce(sum(total_bytes), 0)::bigint FROM pg_backend_memory_contexts
+   WHERE name IN ('PL/Zig call', 'PL/Zig SPI scratch', 'PL/Zig row', 'PL/Zig row descriptor', 'PL/Zig cursor')
+$$;
+CREATE TABLE lk_big_t (t text);
+INSERT INTO lk_big_t SELECT repeat('x', 1000000);
+CREATE FUNCTION lk_big(measure bool) RETURNS bigint STRICT LANGUAGE plzig AS $$
+    const r = try plzig.spi.execute("SELECT t FROM lk_big_t", &.{});
+    const row = try r.row(0);
+    const v = try row.get([]const u8, 0);
+    const t = (try r.get(0, 0)).?;
+    if (v.len != t.len) return error.Mismatch;
+    if (!measure) return @intCast(t.len);
+    // host memory of this call, seen while it runs (a cursor does not
+    // replace the last result, so the row and the cached value are alive)
+    var c = try plzig.spi.open("SELECT sum(total_bytes)::int8 FROM pg_backend_memory_contexts WHERE name IN ('PL/Zig call', 'PL/Zig SPI scratch', 'PL/Zig row', 'PL/Zig row descriptor', 'PL/Zig cursor')", &.{});
+    return try (try c.next()).?.get(i64, 0);
+$$;
+SET plzig.instance_cache_max_memory = '64MB';
+SELECT lk_big(false);
+SELECT lk_callmem() AS m0 \gset
+SELECT lk_big(true) - :m0 > 2000000 AS grew_during_call;
+SELECT lk_callmem() - :m0 AS growth_after_big_call;
+RESET plzig.instance_cache_max_memory;
+
 -- the whole backend does not grow either (PL/Zig memory hangs below
 -- TopMemoryContext and the per-query contexts)
 SELECT sum(total_bytes) AS t0 FROM pg_backend_memory_contexts \gset
@@ -96,3 +125,4 @@ SELECT lk_run(f, 3000) FROM unnest(ARRAY['lk_scalar', 'lk_text', 'lk_spi', 'lk_c
 SELECT sum(total_bytes) - :t0 < 256 * 1024 AS backend_flat FROM pg_backend_memory_contexts;
 
 DROP TABLE lk_t CASCADE;
+DROP TABLE lk_big_t;
