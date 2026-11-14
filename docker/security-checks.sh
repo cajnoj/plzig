@@ -144,6 +144,145 @@ if grep -q "could not remove" <<<"$out"; then fail "rmtree: no warnings"; else p
 set_conf compiler_sandbox ""
 set_real
 
+# 9: a hostile guest calling the host imports directly (forged pointers,
+# lengths, handles and values).  The wrapper compiler makes the SDK's import
+# table public; it needs the real compiler, hence no sandbox for this part.
+echo "--- hostile guest"
+mkdir -p "$fakedir/hostile"
+gcc -O2 -static -DREAL_ZIG="\"$PLZIG_TEST_ZIG\"" -o "$fakedir/hostile/zig" /src/docker/fake/hostilezig.c || exit 1
+set_conf compiler_sandbox off
+set_conf zig_path "$fakedir/hostile/zig"
+set_conf zig_lib_dir "$(dirname "$PLZIG_TEST_ZIG")/lib"
+reload
+cat > /tmp/plzig-hostile.sql <<'SQL'
+CREATE OR REPLACE FUNCTION hostile(what int) RETURNS int STRICT LANGUAGE plzig AS $$
+    const h = plzig.host;
+    const P = plzig.rawPtr;
+    const bad: usize = 0x7fff_ff00;           // far beyond the linear memory
+    const sql = "SELECT $1::text";
+    var slots = [1]plzig.Slot{.{ .val = 0, .len = 0, .is_null = 1 }};
+    var vals = [2]plzig.Value{ .{ .val = 1, .len = 0, .kind = 2, .is_null = 0 },
+                               .{ .val = 0, .len = 0, .kind = 8, .is_null = 1 } };
+    var buf: [256]u8 align(8) = undefined;
+    const p2 = try plzig.spi.prepare("SELECT $1::text, $2::text", &.{ .int2, .bytea });
+    switch (what) {
+        1 => _ = h.spi_execute(P([*]const u8, bad), 10, &slots, 0),
+        2 => _ = h.spi_execute(sql.ptr, sql.len, P([*]const plzig.Slot, bad), 1),
+        3 => _ = h.spi_execute(sql.ptr, sql.len, &slots, 70000),
+        4 => _ = h.spi_execute(sql.ptr, sql.len, &slots, 0xffff_ffff),
+        5 => { slots[0] = .{ .val = bad, .len = 5, .is_null = 0 }; _ = h.spi_execute(sql.ptr, sql.len, &slots, 1); },
+        6 => { slots[0] = .{ .val = 1 << 40, .len = 5, .is_null = 0 }; _ = h.spi_execute(sql.ptr, sql.len, &slots, 1); },
+        7 => { const s = "\xff\xfe"; slots[0] = .{ .val = plzig.addrOf(s), .len = 2, .is_null = 0 }; _ = h.spi_execute(sql.ptr, sql.len, &slots, 1); },
+        8 => { const s = "a\x00b"; slots[0] = .{ .val = plzig.addrOf(s), .len = 3, .is_null = 0 }; _ = h.spi_execute(sql.ptr, sql.len, &slots, 1); },
+        9 => _ = h.spi_prepare(sql.ptr, sql.len, P([*]const u32, bad), 2),
+        10 => _ = h.spi_prepare(sql.ptr, sql.len, P([*]const u32, 8), 100000),
+        11 => { const k = [1]u32{9}; _ = h.spi_prepare(sql.ptr, sql.len, &k, 1); },
+        12 => { vals[0].val = 40000; _ = h.spi_execute_plan(p2.handle, &vals, 2); },
+        13 => { vals[0].val = @bitCast(@as(i64, -40000)); _ = h.spi_execute_plan(p2.handle, &vals, 2); },
+        14 => { vals[0].is_null = 7; _ = h.spi_execute_plan(p2.handle, &vals, 2); },
+        15 => { vals[0].kind = 99; _ = h.spi_execute_plan(p2.handle, &vals, 2); },
+        16 => { vals[1] = .{ .val = plzig.addrOf(&buf), .len = 0xffff_ffff, .kind = 8, .is_null = 0 }; _ = h.spi_execute_plan(p2.handle, &vals, 2); },
+        17 => { vals[1] = .{ .val = bad, .len = 16, .kind = 8, .is_null = 0 }; _ = h.spi_execute_plan(p2.handle, &vals, 2); },
+        18 => { vals[1] = .{ .val = 1 << 33, .len = 4, .kind = 8, .is_null = 0 }; _ = h.spi_execute_plan(p2.handle, &vals, 2); },
+        19 => _ = h.spi_execute_plan(p2.handle, P([*]const plzig.Value, bad), 2),
+        20 => _ = h.spi_execute_plan(p2.handle, &vals, 0x7fff_ffff),
+        21 => { const pb = try plzig.spi.prepare("SELECT $1", &.{.boolean}); vals[0] = .{ .val = 2, .len = 0, .kind = 1, .is_null = 0 }; _ = h.spi_execute_plan(pb.handle, &vals, 1); },
+        22 => { const pf = try plzig.spi.prepare("SELECT $1", &.{.float4}); vals[0] = .{ .val = 1 << 40, .len = 0, .kind = 5, .is_null = 0 }; _ = h.spi_execute_plan(pf.handle, &vals, 1); },
+        23 => { const pt = try plzig.spi.prepare("SELECT $1", &.{.text}); const s = "\xc3"; vals[0] = .{ .val = plzig.addrOf(s), .len = 1, .kind = 7, .is_null = 0 }; _ = h.spi_execute_plan(pt.handle, &vals, 1); },
+        24, 25, 26, 27, 28 => {
+            const q = "SELECT 'abc'::text, 42";
+            const c = h.spi_cursor_open(q.ptr, q.len, &slots, 0);
+            if (what == 26) _ = h.spi_cursor_read(c, &buf, buf.len);
+            const n: u32 = @intCast(h.spi_cursor_next(c));
+            switch (what) {
+                24 => _ = h.spi_cursor_read(c, P([*]u8, bad), n),
+                25 => _ = h.spi_cursor_read(c, &buf, n - 1),
+                27 => { _ = h.spi_cursor_next(c); _ = h.spi_cursor_read(c, &buf, buf.len); },
+                28 => _ = h.spi_cursor_read(c, P([*]u8, 0xffff_fff8), n),
+                else => {},
+            }
+        },
+        29 => _ = h.spi_row_size(0),
+        30, 31 => {
+            _ = try plzig.spi.execute("SELECT 'x'::text", &.{});
+            if (what == 30) _ = h.spi_row_read(0, P([*]u8, bad), 1000) else _ = h.spi_row_read(5, &buf, buf.len);
+        },
+        32 => { _ = try plzig.spi.execute("SELECT 'x'::text", &.{}); _ = h.spi_value_copy(0, 0, P([*]u8, bad), 10); },
+        33 => { h.spi_plan_free(p2.handle); h.spi_plan_free(p2.handle); },
+        34 => { const c = h.spi_cursor_open(sql.ptr, 6, &slots, 0); h.spi_cursor_close(c); h.spi_cursor_close(c); },
+        35 => { _ = try plzig.spi.execute("SELECT 'x'::text", &.{}); _ = h.spi_colname_copy(0, P([*]u8, bad), 10); },
+        36 => h.log(9, sql.ptr, sql.len),
+        37 => h.raise(P([*]const u8, bad), 10),
+        38 => _ = h.spi_execute(sql.ptr, 0xffff_fff0, &slots, 0),
+        39 => _ = h.spi_cursor_open_plan(p2.handle ^ (1 << 20), &vals, 2),
+        40 => { const pc = try plzig.spi.prepare("SELECT 1", &.{}); const c = h.spi_cursor_open_plan(pc.handle, &vals, 0);
+                _ = h.spi_cursor_next(c); _ = h.spi_cursor_read(c ^ 1, &buf, buf.len); },
+        else => return 0,
+    }
+    return 1;
+$$;
+SQL
+out=$(psqlq -f /tmp/plzig-hostile.sql)
+if grep -qx "CREATE FUNCTION" <<<"$out" || [ -z "$out" ]; then pass "hostile guest: module with direct host calls loads"; else fail "hostile guest: module with direct host calls loads"; echo "$out" | sed 's/^/         /'; fi
+n=0
+while IFS='|' read -r what needle; do
+    [ -z "$what" ] && continue
+    out=$(psqlq -c "SELECT hostile($what);")
+    if grep -qF -- "$needle" <<<"$out"; then
+        n=$((n + 1))
+    else
+        fail "hostile guest case $what: expected \"$needle\""; echo "$out" | sed 's/^/         /'
+    fi
+done <<'CASES'
+1|guest passed an invalid memory range
+2|guest passed an invalid memory range
+3|too many SPI parameters
+4|too many SPI parameters
+5|guest passed an invalid memory range
+6|invalid SPI parameter pointer
+7|invalid byte sequence for encoding
+8|invalid byte sequence for encoding "UTF8": 0x00
+9|guest passed an invalid memory range
+10|too many SPI parameters
+11|invalid type code 9 for parameter $1
+12|value of parameter $1 is out of range for type smallint
+13|value of parameter $1 is out of range for type smallint
+14|invalid NULL flag in parameter $1
+15|parameter $1 of the prepared statement is of type smallint, but a value of kind invalid was passed
+16|SPI parameter is too long
+17|guest passed an invalid memory range
+18|invalid SPI parameter pointer
+19|guest passed an invalid memory range
+20|the prepared statement has 2 parameter(s), but 2147483647 were passed
+21|value of parameter $1 is out of range for type boolean
+22|value of parameter $1 is out of range for type real
+23|invalid byte sequence for encoding
+24|guest passed an invalid memory range
+25|row buffer is too small
+26|there is no current row
+27|there is no current row
+28|guest passed an invalid memory range
+29|no SPI result available
+30|guest passed an invalid memory range
+31|SPI result row 5 is out of range
+32|guest passed an invalid memory range
+33|invalid prepared statement handle
+34|invalid cursor handle
+35|guest passed an invalid memory range
+36|invalid log level 9
+37|guest passed an invalid memory range
+38|SQL statement is too long
+39|invalid prepared statement handle
+40|invalid cursor handle
+0|0
+CASES
+if [ "$n" -eq 41 ]; then pass "hostile guest: all 40 forged calls end in a clean ERROR"; fi
+expect "hostile guest: backend still healthy" "4242" "SELECT 4242;"
+if grep -qE "terminated by signal|server process .* was terminated" /tmp/server.log; then fail "hostile guest: no backend crash in the server log"; else pass "hostile guest: no backend crash in the server log"; fi
+psqlq -c "DROP FUNCTION hostile(int); SELECT plzig_cache_clear();" >/dev/null
+set_conf compiler_sandbox ""
+set_real
+
 # ---- the external toolchain (plzig.zig_path, zig_lib_dir, zig_sha256) ----
 echo "--- toolchain checks"
 

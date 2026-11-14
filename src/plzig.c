@@ -45,6 +45,8 @@ int			plzig_instance_cache_size = 64;
 int			plzig_instance_cache_max_memory = 4096;
 int			plzig_max_module_size = 2048;
 int			plzig_cache_size_limit = 256;
+int			plzig_max_prepared_plans = 64;
+int			plzig_max_open_cursors = 16;
 
 /* ---------------------------------------------------------------------
  * Function cache
@@ -200,6 +202,23 @@ _PG_init(void)
 							256, 64, 1024 * 1024,
 							PGC_SIGHUP,
 							GUC_UNIT_MB | GUC_DISALLOW_IN_AUTO_FILE,
+							NULL, NULL, NULL);
+	/* exceeding either cap is an error, never an eviction */
+	DefineCustomIntVariable("plzig.max_prepared_plans",
+							"Maximum number of live prepared statements per PL/Zig function instance.",
+							NULL,
+							&plzig_max_prepared_plans,
+							64, 0, 10000,
+							PGC_SUSET,
+							0,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("plzig.max_open_cursors",
+							"Maximum number of simultaneously open cursors per PL/Zig function call.",
+							NULL,
+							&plzig_max_open_cursors,
+							16, 0, 1000,
+							PGC_SUSET,
+							0,
 							NULL, NULL, NULL);
 #if PG_VERSION_NUM >= 150000
 	MarkGUCPrefixReserved("plzig");

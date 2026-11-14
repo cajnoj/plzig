@@ -14,7 +14,8 @@ The Zig code is **not** compiled to native code. It is compiled to a
 `wasm32-freestanding` WebAssembly module and executed by an embedded,
 interpreter-only WebAssembly runtime (WAMR) inside the backend. Guest code
 has its own linear memory, cannot make system calls, and can only call the
-small host API PL/Zig provides (logging, errors, SPI). The design and the
+small host API PL/Zig provides (logging, errors, SPI: queries, prepared
+statements, cursors). The design and the
 reasoning behind every decision are in [PLAN.md](PLAN.md); the host/guest
 interface is in [doc/abi.md](doc/abi.md).
 
@@ -108,7 +109,9 @@ then `docker/test-in-container.sh` starts a scratch cluster with
 `test/`) and `docker/security-checks.sh` (checks that need
 `postgresql.conf` changes: compiler path, ownership, version and checksum
 checks, a decoy `zig` on the server's `PATH`, fake compilers that emit
-modules with forbidden imports, a sandbox probe, the recursive delete
+modules with forbidden imports, a hostile guest calling the host imports
+directly with forged pointers, handles and values, a sandbox probe, the
+recursive delete
 against planted symbolic links, cache eviction and tampering, messages to
 unprivileged users, the `make install` file list, leftover processes). The
 suite needs Landlock ABI 6 or later and the seccomp filter (the default
@@ -202,6 +205,14 @@ affected either way.
 
 ### SPI
 
+Three ways to run SQL. All of them run with the privileges of the current
+user, exactly like PL/pgSQL (`SECURITY DEFINER` works as usual); SPI is
+read-only unless the function is `VOLATILE`; any SQL error aborts the whole
+call and cannot be caught in Zig; there is no transaction control.
+
+**`spi.execute`** — one statement, text parameters, the whole result
+materialised:
+
 ```sql
 CREATE FUNCTION price_of(item text) RETURNS numeric STRICT LANGUAGE plzig AS $$
     const r = try plzig.spi.execute(
@@ -212,13 +223,84 @@ $$;
 ```
 
 * Parameters are text (`null` for SQL NULL); cast them in SQL (`$1::int`).
-* Results come back as text copied into the arena (`get` returns `null` for
-  SQL NULL); `r.rows`, `r.columns`, `r.columnName(i)`.
-* Statements run with the privileges of the current user, exactly like
-  PL/pgSQL (`SECURITY DEFINER` works as usual). SPI is read-only unless the
-  function is `VOLATILE`.
-* Any SQL error aborts the whole call; it cannot be caught in Zig.
-* All result rows are materialised in backend memory (no cursors yet).
+* `r.get(row, col)` returns the value's text representation copied into the
+  arena (`null` for SQL NULL); `r.rows`, `r.columns`, `r.columnName(i)`.
+* `r.row(i)` gives typed access to a row (see *Typed rows*).
+* Only the most recent result is accessible.
+
+**Prepared statements** — parsed and planned once, kept for the lifetime of
+the function instance, executed with typed (binary) parameters:
+
+```sql
+CREATE FUNCTION order_total(customer int) RETURNS float8 STRICT LANGUAGE plzig AS $$
+    const S = struct { var plan: ?plzig.spi.Plan = null; };   // kept between calls
+    if (S.plan == null)
+        S.plan = try plzig.spi.prepare(
+            "SELECT sum(amount)::float8 FROM orders WHERE customer = $1 AND note <> $2",
+            &.{ .int4, .text });
+    const r = try S.plan.?.execute(.{ customer, "test" });
+    return try (try r.row(0)).get(?f64, 0);
+$$;
+```
+
+* Parameter types: `.boolean`, `.int2`, `.int4`, `.int8`, `.float4`,
+  `.float8`, `.text`, `.bytea`. Other types: declare `.text` and cast in SQL.
+* Arguments are a tuple whose element types must match exactly: `bool`,
+  `i16`, `i32`, `i64`, `f32`, `f64`, byte slices and string literals
+  (`text`), `plzig.bytea(bytes)` (`bytea`), optionals of these, or `null`.
+  Untyped numeric literals do not compile (write `@as(i32, 5)`); a type or
+  count mismatch is an `ERROR`.
+* A `Plan` belongs to the instance that prepared it (globals persist per
+  function per session; an instance that raised an error starts over, and
+  its plans are freed). At most `plzig.max_prepared_plans` (default 64)
+  plans per instance; exceeding it is an error, not an eviction;
+  `plan.free()` releases one.
+* Plans are revalidated by PostgreSQL's plan cache after DDL or
+  `search_path` changes (or fail cleanly if the query no longer makes
+  sense); permissions are checked at every execution, as the current user.
+  Read-only is decided at every execution from the function's volatility.
+
+**Cursors** — rows one at a time, so large results do not have to fit in
+memory:
+
+```sql
+CREATE FUNCTION big_sum() RETURNS bigint LANGUAGE plzig AS $$
+    var cur = try plzig.spi.open("SELECT n, label FROM big WHERE n > $1::int", &.{"0"});
+    defer cur.close();
+    var sum: i64 = 0;
+    while (try cur.next()) |row| {
+        sum += try row.get(i32, 0);
+        const label = try row.get(?[]const u8, 1);   // valid until the next next()
+        _ = label;
+    }
+    return sum;
+$$;
+```
+
+* `plzig.spi.open(sql, text_params)` or `plan.open(args)`; forward only,
+  no scrolling, never `WITH HOLD`.
+* **A Row and every slice obtained from it are invalid after the next
+  `next()`** (the row lives in a per-cursor scratch buffer that is reused);
+  copy what you need to keep (`plzig.allocator.dupe`).
+* Cursors never outlive the call: every cursor still open when the call
+  returns or fails is closed. Reaching the end closes the cursor; `close()`
+  may be called again; `next()` after `close()` is `error.CursorClosed`.
+* At most `plzig.max_open_cursors` (default 16) open cursors per call.
+* The backend fetches 50 rows at a time from the portal.
+
+**Typed rows** (`Result.row(i)`, `Cursor.next()`): `row.get(T, col)` with
+`T` = `bool`, `i16`, `i32`, `i64`, `f32`, `f64` (the column type must be
+exactly `boolean`, `smallint`, `integer`, `bigint`, `real`, `double
+precision`), or `[]const u8` (`text`/`varchar`/`char(n)` bytes, `bytea`
+bytes, or the text representation of any other type, e.g. `numeric` or a
+domain), or `?T` to accept NULL. Nothing is converted: a different column
+type is `error.TypeMismatch`, NULL into a non-optional
+`error.UnexpectedNull`, a bad column `error.ColumnOutOfRange` (cast in SQL
+instead: `count(*)::int4`). `row.kind(col)`, `row.isNull(col)`,
+`row.len()`. A Row from `Result.row` is valid until the next `Result.row`.
+
+The cursor commands `DECLARE`, `FETCH`, `MOVE` and `CLOSE` are refused in
+SQL run by PL/Zig functions (use `plzig.spi.open`).
 
 ### Procedures and DO
 
@@ -264,6 +346,8 @@ from guest code (use SQL through SPI: `SELECT now()`).
 | `plzig.max_memory` | superuser | `64MB` | Linear memory cap per function instance (max 1023 MB). Lowering it retires cached instances. |
 | `plzig.instance_cache_size` | superuser | `64` | Idle instances kept per backend (0 = none). |
 | `plzig.instance_cache_max_memory` | superuser | `4MB` | An instance whose linear memory grew beyond this (guest memory never shrinks) is destroyed after the call instead of being kept idle; its globals start over next time. |
+| `plzig.max_prepared_plans` | superuser | `64` | Live prepared statements per function instance (0–10000). Preparing more is an error (no eviction). Lowering it does not free existing plans. |
+| `plzig.max_open_cursors` | superuser | `16` | Simultaneously open cursors per function call (0–1000). Opening more is an error. |
 
 "`postgresql.conf` only" means: not `SET`, not `ALTER ROLE/DATABASE ...
 SET`, not `ALTER SYSTEM`; the value is hidden from non-superusers.
@@ -460,9 +544,13 @@ path goes to the server log only.
   `plzig.instance_cache_max_memory` (default: at most 64 × 4 MB per
   backend between statements).
 * Runtime resource use is bounded per instance (`plzig.max_memory`), but a
-  function recursing through SPI creates one instance per level, and SPI
-  results are fully materialised; like PL/pgSQL, a determined user can use
-  a lot of backend memory and CPU within `statement_timeout`.
+  function recursing through SPI creates one instance per level, and
+  `spi.execute` results are fully materialised (cursors are not: at most 50
+  rows per cursor are held); like PL/pgSQL, a determined user can use a lot
+  of backend memory and CPU within `statement_timeout`. Prepared statements
+  are kept in backend memory for the life of their instance (up to
+  `plzig.max_prepared_plans` per instance, and `plzig.instance_cache_size`
+  idle instances).
 * Guest code can write to the server log via `plzig.print(.log, …)`, like
   `RAISE LOG` in PL/pgSQL.
 * WAMR is a large C code base running in the backend; a bug in its

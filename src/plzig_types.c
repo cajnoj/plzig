@@ -101,3 +101,95 @@ plzig_type_info_init(PlzigTypeInfo *ti, Oid typid, bool for_result,
 		fmgr_info_cxt(outfunc, &ti->out_func, mcxt);
 	}
 }
+
+/*
+ * Kind of a result column of type typid, as reported to the guest
+ * (PLZIG_KIND_*).  Exact type OIDs only, like plzig_type_kind: a domain over
+ * integer is reported as PLZIG_KIND_OTHER (text representation).
+ */
+uint16
+plzig_value_kind(Oid typid)
+{
+	switch (plzig_type_kind(typid))
+	{
+		case PLZIG_T_BOOL:
+			return PLZIG_KIND_BOOL;
+		case PLZIG_T_INT2:
+			return PLZIG_KIND_INT2;
+		case PLZIG_T_INT4:
+			return PLZIG_KIND_INT4;
+		case PLZIG_T_INT8:
+			return PLZIG_KIND_INT8;
+		case PLZIG_T_FLOAT4:
+			return PLZIG_KIND_FLOAT4;
+		case PLZIG_T_FLOAT8:
+			return PLZIG_KIND_FLOAT8;
+		case PLZIG_T_TEXT:
+		case PLZIG_T_TEXTIO:
+			return PLZIG_KIND_TEXT;
+		case PLZIG_T_BYTEA:
+			return PLZIG_KIND_BYTEA;
+		case PLZIG_T_VOID:
+		case PLZIG_T_IO:
+			break;
+	}
+	return PLZIG_KIND_OTHER;
+}
+
+/*
+ * The parameter type a guest may declare for a prepared statement: only
+ * these kinds, mapped to fixed OIDs (the guest never supplies an OID).
+ * InvalidOid for anything else.
+ */
+Oid
+plzig_param_kind_oid(uint32 kind)
+{
+	switch (kind)
+	{
+		case PLZIG_KIND_BOOL:
+			return BOOLOID;
+		case PLZIG_KIND_INT2:
+			return INT2OID;
+		case PLZIG_KIND_INT4:
+			return INT4OID;
+		case PLZIG_KIND_INT8:
+			return INT8OID;
+		case PLZIG_KIND_FLOAT4:
+			return FLOAT4OID;
+		case PLZIG_KIND_FLOAT8:
+			return FLOAT8OID;
+		case PLZIG_KIND_TEXT:
+			return TEXTOID;
+		case PLZIG_KIND_BYTEA:
+			return BYTEAOID;
+		default:
+			return InvalidOid;
+	}
+}
+
+/* Inverse of plzig_param_kind_oid; PLZIG_KIND_NULL for any other OID. */
+uint16
+plzig_param_oid_kind(Oid typid)
+{
+	switch (typid)
+	{
+		case BOOLOID:
+			return PLZIG_KIND_BOOL;
+		case INT2OID:
+			return PLZIG_KIND_INT2;
+		case INT4OID:
+			return PLZIG_KIND_INT4;
+		case INT8OID:
+			return PLZIG_KIND_INT8;
+		case FLOAT4OID:
+			return PLZIG_KIND_FLOAT4;
+		case FLOAT8OID:
+			return PLZIG_KIND_FLOAT8;
+		case TEXTOID:
+			return PLZIG_KIND_TEXT;
+		case BYTEAOID:
+			return PLZIG_KIND_BYTEA;
+		default:
+			return PLZIG_KIND_NULL;
+	}
+}

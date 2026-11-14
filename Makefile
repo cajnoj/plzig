@@ -25,7 +25,7 @@ OBJS = src/plzig.o src/plzig_source.o src/plzig_build.o src/plzig_spawn.o \
 DATA = sql/plzig--1.0.sql
 PGFILEDESC = "PL/Zig - procedural language"
 
-REGRESS = setup basics types spi sandbox resources lifecycle
+REGRESS = setup basics types spi spi_prepared spi_cursor sandbox resources lifecycle
 REGRESS_OPTS = --inputdir=test --load-extension=plzig
 
 PG_CONFIG ?= pg_config

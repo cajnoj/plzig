@@ -61,6 +61,8 @@ SET plzig.max_source_size = '3MB';
 SET plzig.max_module_size = '16MB';
 SET plzig.instance_cache_max_memory = '1GB';
 SET plzig.cache_size_limit = '1TB';
+SET plzig.max_prepared_plans = 10000;
+SET plzig.max_open_cursors = 1000;
 RESET ROLE;
 
 -- the toolchain and sandbox settings are config-file only, even for superusers:

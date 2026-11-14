@@ -950,3 +950,81 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       default 4 MB): an instance whose linear memory exceeds it is destroyed
       after the call instead of being cached.
     - The validator is built with `-mcpu baseline`.
+23. **§12 items 1–3 implemented (prepared statements, binary passing,
+    cursors), 2026-11-14.** SDK ABI version 2 (part of the cache key, so
+    every module is recompiled); 10 new host imports (19 in total, listed
+    in `doc/abi.md`); new superuser GUCs `plzig.max_prepared_plans`
+    (default 64, per instance) and `plzig.max_open_cursors` (default 16, per
+    call), both an error when exceeded, never an eviction. Tests:
+    `test/sql/spi_prepared.sql`, `test/sql/spi_cursor.sql`, and a hostile-
+    guest section in `docker/security-checks.sh`. Implemented as written,
+    except:
+    - *Names.* `plzig.spi.prepare` (the bullet said `plzig.prepare`),
+      `Plan.execute/open/free`, `plzig.spi.open`, `Cursor.next/close`,
+      `Row.get(T, col)`. Added `spi_plan_free` (`Plan.free()`), so a
+      function can stay under the cap; a freed handle is stale.
+    - *Handles* are `serial << 16 | index`; the serial (the "generation")
+      comes from a per-backend counter with a random start and is stored in
+      the table entry. Plan tables belong to the instance, cursor tables to
+      the call, so a forged handle can at most name the caller's own
+      objects; a stale or foreign one never matches.
+    - *Typed parameters only for prepared statements.* `spi.execute` and
+      `spi.open(sql, ...)` keep text parameters; binary parameters need
+      declared types, which only `prepare` has. Results are typed
+      everywhere (`Result.row`, cursor rows). Parameter types are the eight
+      native kinds; `varchar`/`char(n)`/other types are passed as `.text`
+      and cast in SQL. Result columns of type `varchar`/`bpchar` are kind
+      `text`; domains (exact-OID matching, as for function arguments) and
+      all other types are kind `other` (text representation). The guest
+      also tags each parameter with its kind and the host requires it to
+      equal the plan's parameter type (or 0 for NULL), so mismatches are
+      reported, never converted; values must be in range for the type.
+    - *`[]const u8` getter* accepts text, bytea and other (like function
+      arguments, where bytea is `[]const u8` too); numeric getters require
+      the exact column type (no widening). Column names are not exposed for
+      cursor rows (cut: not needed for the requirements; `Result.columnName`
+      still exists).
+    - *Cursor commands refused in guest SQL* (new restriction, also for the
+      existing `spi.execute`): `DECLARE` (incl. `WITH HOLD`), `FETCH`,
+      `MOVE`, `CLOSE` are rejected on the raw parse tree before SPI sees
+      the statement. Otherwise SQL could create cursors that outlive the
+      call or close/advance portals of PL/Zig cursors. Code in other
+      languages called from the guest can still run them; that is why
+      PL/Zig's own portals are additionally **pinned** (`CLOSE ALL` in
+      nested code fails with "cannot drop pinned portal") and looked up by
+      name and pointer on every use (never a stale pointer).
+    - *Plans are prepared with `CURSOR_OPT_NO_SCROLL`* (all PL/Zig cursors
+      are forward-only, including those opened from a plan) and without
+      `CURSOR_OPT_PARALLEL_OK` (no parallel query for prepared statements;
+      conservative, can be revisited). Ad-hoc `spi.execute` is unchanged.
+    - *Exhausted cursors*: the host closes the portal when `next` reaches
+      the end; the SDK then frees the handle, so exhausted cursors do not
+      count toward `plzig.max_open_cursors`. `next()` after `close()` is
+      `error.CursorClosed`; `close()` is idempotent in the SDK.
+    - *When plans are freed*: always in `plzig_instance_destroy()`. For a
+      replaced or dropped function that is at the next PL/Zig call in the
+      session (the existing invalidation sweep), and after a
+      `plzig.max_memory` change at the next call of that function (existing
+      instance retirement), not at the moment of the DDL/`SET`. On error the
+      plans are freed while the portals of the failed call still exist
+      (until the abort); this is safe because a portal holds its own
+      reference to the cached plan and copies of the query string and
+      parameters (verified by a test that frees a plan with its cursor
+      open).
+    - *Scratch memory*: per cursor, a guest buffer that grows to the
+      largest row seen (bump arena: old buffers are reclaimed only if they
+      are the most recent allocation, so worst case about twice the largest
+      row); `Result.row` shares one buffer, valid until the next
+      `Result.row`. `Plan.execute` encodes parameters on the guest stack and
+      `spi.execute` frees its parameter array, so repeated executions do not
+      grow the arena. Host side: a scratch context reset by every SPI
+      import, a per-row context reset for every row. Verified in the
+      regression suite with `pg_backend_memory_contexts` (100k cursor rows,
+      10k prepared executions within one call, 5000 calls).
+    - *Hostile-guest test*: user code cannot call imports directly, so
+      `docker/security-checks.sh` uses a wrapper compiler
+      (`docker/fake/hostilezig.c`, `plzig.compiler_sandbox = off` for that
+      part only) that makes the SDK's import table public and calls every
+      new import with forged pointers, lengths, handles, kinds and values
+      (40 cases, each must be a clean `ERROR`).
+    - Item 5 (benchmarks) is not part of this change.

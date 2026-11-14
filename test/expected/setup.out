@@ -80,11 +80,13 @@ SELECT name,
  plzig.instance_cache_size       | 64      |      | superuser | 64
  plzig.max_memory                | 64      | MB   | superuser | 64
  plzig.max_module_size           | 2048    | kB   | superuser | 2048
+ plzig.max_open_cursors          | 16      |      | superuser | 16
+ plzig.max_prepared_plans        | 64      |      | superuser | 64
  plzig.max_source_size           | 1024    | kB   | superuser | 1024
  plzig.zig_lib_dir               | (empty) |      | sighup    | 
  plzig.zig_path                  | (set)   |      | sighup    | 
  plzig.zig_sha256                | (empty) |      | sighup    | 
-(12 rows)
+(14 rows)
 
 SET ROLE regress_plzig_dev;
 SET plzig.max_memory = '512MB';
@@ -111,6 +113,10 @@ SET plzig.instance_cache_max_memory = '1GB';
 ERROR:  permission denied to set parameter "plzig.instance_cache_max_memory"
 SET plzig.cache_size_limit = '1TB';
 ERROR:  parameter "plzig.cache_size_limit" cannot be changed now
+SET plzig.max_prepared_plans = 10000;
+ERROR:  permission denied to set parameter "plzig.max_prepared_plans"
+SET plzig.max_open_cursors = 1000;
+ERROR:  permission denied to set parameter "plzig.max_open_cursors"
 RESET ROLE;
 -- the toolchain and sandbox settings are config-file only, even for superusers:
 -- not per session, role or database, not ALTER SYSTEM

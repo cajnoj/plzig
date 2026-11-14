@@ -64,6 +64,7 @@ struct PlzigInstance
 	wasm_function_inst_t f_alloc;
 	wasm_function_inst_t f_call;
 	uint32		max_pages;		/* plzig.max_memory at instantiation */
+	PlzigPlanTable plans;		/* prepared statements (plzig_host.c) */
 };
 
 #define PLZIG_INTERRUPT_MSG "plzig: interrupted"
@@ -281,9 +282,13 @@ plzig_guest_ptr(void *module_inst, uint32 ptr, uint32 len)
  * Modules
  * ---------------------------------------------------------------------
  */
+/* must match plzig_native_symbols in plzig_host.c */
 static const char *const plzig_known_imports[] = {
 	"log", "raise", "panic", "spi_execute", "spi_ncols", "spi_value_len",
-	"spi_value_copy", "spi_colname_len", "spi_colname_copy", NULL
+	"spi_value_copy", "spi_colname_len", "spi_colname_copy",
+	"spi_row_size", "spi_row_read", "spi_prepare", "spi_plan_free",
+	"spi_execute_plan", "spi_cursor_open", "spi_cursor_open_plan",
+	"spi_cursor_next", "spi_cursor_read", "spi_cursor_close", NULL
 };
 
 static bool
@@ -496,6 +501,20 @@ plzig_instance_create(PlzigModule *mod)
 	return pi;
 }
 
+/* The instance's prepared-statement table (used by plzig_host.c only). */
+PlzigPlanTable *
+plzig_instance_plans(PlzigInstance *pi)
+{
+	return &pi->plans;
+}
+
+/* Long-lived context of the runtime (instances, plan tables). */
+MemoryContext
+plzig_runtime_context(void)
+{
+	return plzig_runtime_cxt;
+}
+
 /* Was this instance created under the current plzig.max_memory? */
 bool
 plzig_instance_current(PlzigInstance *pi)
@@ -514,11 +533,19 @@ plzig_instance_memory_size(PlzigInstance *pi)
 	return wasm_memory_get_cur_page_count(mem) * wasm_memory_get_bytes_per_page(mem);
 }
 
+/*
+ * Destroy an instance and everything it owns.  Used on every path that ends
+ * an instance (error/trap, LRU eviction, instance_cache_max_memory, function
+ * replaced or dropped, plzig.max_memory changed, DO block end), so its
+ * prepared statements are freed here and can never outlive it.  Must not
+ * throw: it runs in PG_CATCH blocks.
+ */
 void
 plzig_instance_destroy(PlzigInstance *pi)
 {
 	if (pi == NULL)
 		return;
+	plzig_host_free_plans(&pi->plans);
 	if (pi->env)
 		wasm_runtime_destroy_exec_env(pi->env);
 	if (pi->inst)
@@ -703,6 +730,8 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 	memset(&ctx, 0, sizeof(ctx));
 	ctx.inst = pi;
 	ctx.cxt = callcxt;
+	ctx.scratch = AllocSetContextCreate(callcxt, "PL/Zig SPI scratch",
+										ALLOCSET_SMALL_SIZES);
 	ctx.read_only = read_only;
 	ctx.cached_row = -1;
 	ctx.cached_col = -1;

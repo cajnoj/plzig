@@ -17,7 +17,7 @@
 #include "lib/stringinfo.h"
 
 #define PLZIG_VERSION_STR		"1.0"
-#define PLZIG_ABI_VERSION		1
+#define PLZIG_ABI_VERSION		2
 /*
  * The Zig version the source validator was built with, from the Makefile
  * (ZIG_VERSION).  The backend runs only a compiler reporting exactly this.
@@ -33,6 +33,9 @@
 #define PLZIG_WASM_STACK		(512 * 1024)	/* interpreter operand/frame stack */
 #define PLZIG_MAX_LOG_MSG		(64 * 1024)
 #define PLZIG_MAX_ERROR_NAME	256
+#define PLZIG_CURSOR_BATCH		50	/* rows fetched from a portal at a time */
+#define PLZIG_MAX_SPI_PARAMS	65535
+#define PLZIG_MAX_ROW_SIZE		((uint64) MaxAllocSize)	/* encoded row (doc/abi.md) */
 
 /* Compiler sandbox modes (plzig.compiler_sandbox) */
 typedef enum PlzigSandboxMode
@@ -55,6 +58,8 @@ extern int	plzig_instance_cache_size;
 extern int	plzig_instance_cache_max_memory;	/* kB */
 extern int	plzig_max_module_size;	/* kB */
 extern int	plzig_cache_size_limit; /* MB */
+extern int	plzig_max_prepared_plans;	/* per instance */
+extern int	plzig_max_open_cursors; /* per call */
 
 /* ---------------------------------------------------------------------
  * Types (plzig_types.c)
@@ -92,7 +97,36 @@ typedef struct PlzigSlot
 	uint32		is_null;
 } PlzigSlot;
 
+/*
+ * Value kinds of the typed SPI interface (doc/abi.md, "Value"): the kind of
+ * a result column is derived by the host from the tuple descriptor; the kind
+ * of a prepared-statement parameter is one of KIND_BOOL..KIND_BYTEA, chosen
+ * by the guest at prepare time and mapped to a fixed type OID by the host.
+ */
+#define PLZIG_KIND_NULL		0		/* parameter only: NULL of any type */
+#define PLZIG_KIND_BOOL		1
+#define PLZIG_KIND_INT2		2
+#define PLZIG_KIND_INT4		3
+#define PLZIG_KIND_INT8		4
+#define PLZIG_KIND_FLOAT4	5
+#define PLZIG_KIND_FLOAT8	6
+#define PLZIG_KIND_TEXT		7		/* text, varchar, bpchar: the value's bytes */
+#define PLZIG_KIND_BYTEA	8
+#define PLZIG_KIND_OTHER	9		/* result only: text representation */
+
+/* Typed value (params of prepared statements, result rows), 16 bytes */
+typedef struct PlzigValue
+{
+	uint64		val;
+	uint32		len;
+	uint16		kind;
+	uint16		is_null;
+} PlzigValue;
+
 extern PlzigTypeKind plzig_type_kind(Oid typid);
+extern uint16 plzig_value_kind(Oid typid);
+extern Oid	plzig_param_kind_oid(uint32 kind);
+extern uint16 plzig_param_oid_kind(Oid typid);
 extern const char *plzig_zig_type_name(PlzigTypeKind kind);
 extern void plzig_type_info_init(PlzigTypeInfo *ti, Oid typid, bool for_result,
 								 MemoryContext mcxt);
@@ -189,7 +223,18 @@ typedef struct PlzigCallCtx PlzigCallCtx;
 
 extern PlzigModule *plzig_module_load(const char *wasm, uint32 len);
 extern void plzig_module_unload(PlzigModule *mod);
+/* Prepared statements of one instance (owned by it, see plzig_host.c) */
+typedef struct PlzigPlanEntry PlzigPlanEntry;
+typedef struct PlzigPlanTable
+{
+	PlzigPlanEntry *entries;	/* in the PL/Zig runtime context */
+	int			size;			/* allocated entries */
+	int			nlive;
+} PlzigPlanTable;
+
 extern PlzigInstance *plzig_instance_create(PlzigModule *mod);
+extern PlzigPlanTable *plzig_instance_plans(PlzigInstance *inst);
+extern MemoryContext plzig_runtime_context(void);
 extern void plzig_instance_destroy(PlzigInstance *inst);
 extern bool plzig_instance_current(PlzigInstance *inst);
 extern uint64 plzig_instance_memory_size(PlzigInstance *inst);
@@ -203,15 +248,23 @@ extern Datum plzig_instance_call(PlzigInstance *inst, PlzigTypeInfo *argtypes,
  * Host imports (plzig_host.c)
  * ---------------------------------------------------------------------
  */
+typedef struct PlzigCursor PlzigCursor;
+typedef struct PlzigRowBuf PlzigRowBuf;
+
 struct PlzigCallCtx
 {
 	PlzigInstance *inst;
 	MemoryContext cxt;			/* per-call context */
+	MemoryContext scratch;		/* reset by every SPI import */
 	ErrorData  *edata;			/* stashed error from a host import */
 	bool		read_only;
 	bool		spi_connected;
 	void	   *tuptable;		/* SPITupleTable * of the last spi_execute */
 	uint64		ntuples;
+	PlzigRowBuf *result_row;	/* typed access to the last result */
+	PlzigCursor *cursors;		/* per-call cursor table (in cxt) */
+	int			ncursors;		/* allocated entries */
+	int			nopen;			/* entries in use */
 	/* one-entry cache for spi_value_len/spi_value_copy */
 	int64		cached_row;
 	int			cached_col;
@@ -222,6 +275,7 @@ struct PlzigCallCtx
 
 extern void *plzig_host_symbols(int *n);
 extern void plzig_host_finish_call(PlzigCallCtx *ctx);
+extern void plzig_host_free_plans(PlzigPlanTable *plans);
 
 /* runtime helpers used by the host imports */
 extern bool plzig_guest_range(void *module_inst, uint32 ptr, uint32 len);
