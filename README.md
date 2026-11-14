@@ -108,13 +108,18 @@ then `docker/test-in-container.sh` starts a scratch cluster with
 `test/`) and `docker/security-checks.sh` (checks that need
 `postgresql.conf` changes: compiler path, ownership, version and checksum
 checks, a decoy `zig` on the server's `PATH`, fake compilers that emit
-modules with forbidden imports, a Landlock probe, cache tampering, the
-`make install` file list, leftover processes). The suite needs Landlock
-(the default `plzig.compiler_sandbox = require`); the summary shows how
-the compiler was confined. A second container per version runs with a
-seccomp profile that blocks Landlock (`docker/seccomp-no-landlock.json`)
-and checks that `require` refuses to compile and `try` compiles
-(`docker/no-landlock-checks.sh`). Logs go to `build/test-logs/`.
+modules with forbidden imports, a sandbox probe, the recursive delete
+against planted symbolic links, cache eviction and tampering, messages to
+unprivileged users, the `make install` file list, leftover processes). The
+suite needs Landlock ABI 6 or later and the seccomp filter (the default
+`plzig.compiler_sandbox = require`); the summary shows how the compiler was
+confined. Two more containers per version run with seccomp profiles that
+block Landlock (`docker/seccomp-no-landlock.json`) or the installation of
+seccomp filters (`docker/seccomp-no-seccomp.json`), and check that
+`require` refuses to compile, `try` compiles and logs what is missing, and
+(without seccomp) what Landlock alone enforces
+(`docker/no-landlock-checks.sh`, `docker/no-seccomp-checks.sh`). Logs go to
+`build/test-logs/`.
 
 To run the regression suite against an existing installation:
 `make installcheck` (the `setup` test reconnects as a test role with `\c`, so
@@ -227,6 +232,7 @@ DO $$ plzig.notice("hi", .{}); $$ LANGUAGE plzig;
 ```
 
 Transaction control (`COMMIT`/`ROLLBACK`) inside procedures is not supported.
+A `DO` block is compiled every time it runs; its module is never cached.
 
 ### Session state
 
@@ -249,19 +255,31 @@ from guest code (use SQL through SPI: `SELECT now()`).
 | `plzig.zig_path` | `postgresql.conf` only | *(none)* | Absolute path of the Zig 0.17.1 compiler. Required for compiling; `PATH` is never searched. |
 | `plzig.zig_lib_dir` | `postgresql.conf` only | *(detect)* | Zig's `lib/` directory. Empty: `<compiler dir>/lib` (tarball layout) or `<compiler dir>/../lib/zig` (FHS layout, e.g. `/usr/bin/zig` + `/usr/lib/zig`). |
 | `plzig.zig_sha256` | `postgresql.conf` only | *(empty)* | If set, the SHA-256 the compiler binary must have (hex). Covers the binary only, not `lib/`. |
-| `plzig.compiler_sandbox` | `postgresql.conf` / reload | `require` | Landlock confinement of the compiler: `require` (refuse to compile without it), `try` (use it if available, otherwise compile unconfined and log once per backend), `off`. Set only in `postgresql.conf` (not `SET`, `ALTER SYSTEM`, per role or per database). Any other value, including the former `on`, boolean spellings and other letter case, makes every compilation fail until it is corrected. |
-| `plzig.compile_timeout` | superuser | `300s` | Wall-clock limit per compiler run (min 100 ms). |
+| `plzig.compiler_sandbox` | `postgresql.conf` / reload | `require` | Confinement of the compiler (see *Security model*): `require` (refuse to compile unless Landlock ABI 6 or later **and** the seccomp filter are available), `try` (apply whatever is available and log once per backend exactly what is missing), `off` (neither). Set only in `postgresql.conf` (not `SET`, `ALTER SYSTEM`, per role or per database). Any other value, including the former `on`, boolean spellings and other letter case, makes every compilation fail until it is corrected. There is deliberately no setting to lower the required Landlock ABI. |
+| `plzig.compile_timeout` | superuser | `30s` | Wall-clock limit per child run: version check, validator, compiler (min 100 ms, max 1 h). A cold first compile takes 2–3 s. |
 | `plzig.compile_memory_limit` | superuser | `4GB` | `RLIMIT_AS` of the compiler (0 = none). Zig 0.17.1 needs about 1 GB. |
 | `plzig.max_source_size` | superuser | `1MB` | Maximum function body size (max 3 MB). |
+| `plzig.max_module_size` | superuser | `2MB` | Maximum size of a compiled module (16 kB – 16 MB); larger ones are rejected with `the compiled module is too large`. Applies to new compilations; large constant data is what makes modules big. |
+| `plzig.cache_size_limit` | `postgresql.conf` / reload | `256MB` | Total size of `$PGDATA/plzig/cache/` (min 64 MB). Before a new module is stored, least recently used modules are evicted until it fits. |
 | `plzig.max_memory` | superuser | `64MB` | Linear memory cap per function instance (max 1023 MB). Lowering it retires cached instances. |
 | `plzig.instance_cache_size` | superuser | `64` | Idle instances kept per backend (0 = none). |
+| `plzig.instance_cache_max_memory` | superuser | `4MB` | An instance whose linear memory grew beyond this (guest memory never shrinks) is destroyed after the call instead of being kept idle; its globals start over next time. |
 
 "`postgresql.conf` only" means: not `SET`, not `ALTER ROLE/DATABASE ...
 SET`, not `ALTER SYSTEM`; the value is hidden from non-superusers.
 
 `plzig_sandbox_status()` (superuser only) tells how the last compilation in
-the session was confined, e.g. `enforced (landlock ABI 6)` or
-`unavailable (landlock_create_ruleset returned -38)`.
+the session was confined and what was missing, e.g.
+`enforced (landlock ABI 10, seccomp)`,
+`enforced (landlock ABI 6, seccomp; missing: Landlock ABI 6 lacks restrictions on pathname UNIX sockets and UDP)`,
+`partial (no landlock, seccomp; missing: Landlock is not available (landlock_create_ruleset returned -38): no filesystem confinement)`
+or `off (plzig.compiler_sandbox = off)`. `enforced` means what `require`
+insists on.
+
+`plzig_cache_clear()` (superuser only; `EXECUTE` revoked from `PUBLIC`)
+removes every compiled module from the cache under the compile lock and
+returns the number of files removed. Functions already loaded in a backend
+keep running; everything else is recompiled on next use.
 
 ## Security model
 
@@ -291,16 +309,58 @@ so `USAGE` on the language is revoked from `PUBLIC` and should be granted
 deliberately. The compiler runs as a child process: `execve` with a fixed
 argv (no shell, user text never on a command line or in a path), clean
 environment, new session, all other descriptors closed, `no_new_privs`,
-`RLIMIT_CORE=0`, CPU/file-size/address-space limits, a wall-clock timeout,
-and Landlock (required by default): execute+read only on the compiler
-binary and the validator binary themselves (file rules, not their
-directories), read-only on the Zig `lib/` directory (passed explicitly
-with `--zig-lib-dir`), read-write only on its private build directory and
-the shared Zig cache, no TCP, no signals or abstract sockets outside its
-domain.
-It is killed (whole process group) and reaped on every exit path, including
-cancel, `ERROR` and backend exit. Compilations are serialised cluster-wide
-with a file lock.
+`RLIMIT_CORE=0`, CPU/file-size/address-space limits and a wall-clock
+timeout. It is killed (whole process group) and reaped on every exit path,
+including cancel, `ERROR` and backend exit, and gets `SIGKILL` if the
+backend dies (`PR_SET_PDEATHSIG`). Compilations are serialised
+cluster-wide with a file lock. Two independent mechanisms confine it, and
+`require` (the default) insists on both:
+
+* **Landlock** (kernel feature, by ABI version):
+  * ABI 1+: execute+read only on the compiler binary and the validator
+    binary themselves (file rules, not their directories), read-only on
+    the Zig `lib/` directory (passed explicitly with `--zig-lib-dir`),
+    read-write only on its private build directory and the shared Zig
+    cache — create/remove regular files and directories, but no symbolic
+    links, sockets, FIFOs or device nodes; `/dev/null` read/write;
+    nothing else in the filesystem;
+  * ABI 2+: renames across directories are allowed within those
+    directories (ABI 1 refuses them all, which breaks Zig's cache); ABI 3+:
+    truncating files elsewhere is denied; ABI 4+: no TCP bind/connect;
+    ABI 5+: no device ioctls; ABI 6+: no signals to, and no abstract UNIX
+    sockets of, processes outside the sandbox; ABI 9+: no connections to
+    pathname UNIX sockets created outside it (e.g. the server's own
+    socket); ABI 10+: no UDP bind/send. ABIs 7 and 8 add no access rights.
+  * `require` needs ABI 6 or later. Below ABI 3, `truncate(2)` by path is
+    **not** mediated by Landlock: a compromised compiler could truncate
+    any file the server OS user can write, data files included.
+* **seccomp filter** (installed in the child before `execve`, x86_64 and
+  aarch64 only; other architectures count as "unavailable"): denied with
+  `EPERM` are all socket calls (`socket`, `socketpair`, `connect`, `bind`,
+  `listen`, `accept*`, `send*`/`recv*`, socket options), `ptrace`,
+  `process_vm_readv/writev`, `kcmp`, `pidfd_open/getfd/send_signal`,
+  `process_madvise`, `setsid`, `setpgid`, System V IPC (`shm*`, `sem*`,
+  `msg*`), `mount`, `umount2`, `pivot_root`, `chroot`, the new mount API,
+  `unshare`, `setns`, `clone` with namespace flags or `CLONE_PARENT`,
+  `bpf`, `perf_event_open`, `io_uring_*`, `userfaultfd`, `keyctl`,
+  `add_key`, `request_key`, `kexec_*`, `init_module`, `finit_module`,
+  `delete_module`, `open_by_handle_at`, `personality`, and
+  `fcntl(F_SETOWN/F_SETOWN_EX/F_SETSIG)`; `kill`, `tkill`, `tgkill`,
+  `rt_sigqueueinfo`, `rt_tgsigqueueinfo` only towards the compiler's own
+  pid; `clone3` fails with `ENOSYS` (callers fall back to `clone`, whose
+  flags can be checked); system calls of another architecture or ABI
+  (x32, i386) are denied. Because `setsid`/`setpgid` are denied, no
+  descendant can leave the process group the backend kills.
+
+What remains uncovered even with both: the compiler can still read
+everything under the Zig `lib/` directory, read and write the shared Zig
+cache (see below), use CPU and memory up to the limits, and fork and
+re-execute itself (it runs its own linker that way); it can learn its own
+build directory path. The kernel interfaces that stay allowed (file I/O in
+the allowed directories, `mmap`, threads, futexes, pipes) are the
+compiler's attack surface on the kernel. A worker thread of the compiler
+that aborts ends with `SIGSEGV` instead of `SIGABRT` (Zig's `abort` falls
+back to a null write when `tkill` towards its own thread id is refused).
 
 **The toolchain checks.** Before the configured compiler is run for the
 first time in a backend (and again whenever a setting or the identity of
@@ -335,19 +395,51 @@ across toolchain changes only for the same version.
 
 **Files.** Everything lives in `$PGDATA/plzig/` (0700, owner and
 symlink-checked before each use): `cache/<sha256>.wasm` (0600, content
-addressed, written via `O_EXCL` temp file + fsync + `durable_rename`),
-`pgsql_tmp.zig-cache/` (the compiler's cache; skipped by base backups) and
-short-lived `pgsql_tmp.build.<pid>.<n>/` directories. Modules read from the
+addressed, written via `O_EXCL` temp file + fsync + `durable_rename`; the
+temp file is removed on every failure), `pgsql_tmp.zig-cache/` (the
+compiler's cache; skipped by base backups) and short-lived
+`pgsql_tmp.build.<pid>.<n>.<random>/` directories. Modules read from the
 cache must be regular 0600 files owned by the server user and opened with
 `O_NOFOLLOW`; they are re-validated (imports, exports, ABI) on every load.
 
+The cache is bounded by `plzig.cache_size_limit`. When a module is stored
+(under the compile lock), leftover temp files are removed and the least
+recently used modules are evicted until the new one fits; a cache hit
+refreshes the file's modification time (at most once a minute), which is
+what "recently used" means — a function that stays loaded in a long-lived
+backend is not re-read, so it can be evicted and is then recompiled by the
+next backend that needs it. Only regular files directly in `cache/` whose
+names match the cache patterns are ever removed. Rolled-back
+`CREATE FUNCTION`s and dropped functions still leave their module until it
+is evicted; `DO` blocks never write to the cache.
+
+Build directories are removed with a descriptor-relative walk that never
+follows symbolic links or crosses into another file system. Leftover build
+directories (from a backend that died, or whose cleanup failed) are removed
+by the next compilation: every compilation holds the cluster-wide compile
+lock from creating its build directory to removing it, so with the lock
+held any other build directory is stale, whatever its pid.
+
+Messages that can reach a client never contain the data directory: paths
+under it are shown relative to it (e.g. `plzig/cache/…`), and the full
+path goes to the server log only.
+
 **Limits — read these.**
 
-* If Landlock is unavailable (old kernel, or blocked by a seccomp profile),
-  the default `require` refuses every compile (cached modules keep
-  running). `try` then runs the compiler **without filesystem
-  confinement**: a compiler exploit would run with the full rights of the
-  `postgres` OS user. Check `plzig_sandbox_status()`.
+* If Landlock is unavailable or older than ABI 6, or the seccomp filter
+  cannot be installed (other architecture, kernel without
+  `CONFIG_SECCOMP_FILTER`, or a container profile that forbids it), the
+  default `require` refuses every compile and says what is missing (cached
+  modules keep running). `try` then compiles with what is available and
+  logs once per backend what is missing. Without Landlock the compiler has
+  **no filesystem confinement**: a compiler exploit could read and write
+  every file of the `postgres` OS user (the seccomp filter still blocks
+  networking, signals to other processes and the other calls listed
+  above). Without seccomp, Landlock below ABI 9/10 leaves pathname UNIX
+  sockets (the server's own socket: `peer`/`trust` authentication would
+  make that a superuser connection) and UDP open, and nothing then stops
+  System V IPC, `setsid` or namespace creation. Check
+  `plzig_sandbox_status()`.
 * Even with Landlock, the Zig cache directory is shared by all
   compilations. A malicious input that exploits the compiler could poison
   it and thereby alter modules later compiled for *other* users' functions,
@@ -359,7 +451,14 @@ cache must be regular 0600 files owned by the server user and opened with
   intended. The boundary is the WebAssembly sandbox plus the import check.
 * Compile-time resource use is bounded only by the timeout, CPU/AS rlimits
   and the cluster-wide lock (one compile at a time): a user with `USAGE`
-  can keep the compiler busy.
+  can keep the compiler busy. Disk use is bounded by
+  `plzig.max_module_size` per module, `plzig.cache_size_limit` for the
+  cache and the 256 MB file-size limit per file written by a running
+  compile; the Zig cache does not grow per distinct function (it holds
+  the standard library's compiled forms, about 45 MB).
+* Idle cached instances are bounded by `plzig.instance_cache_size` and
+  `plzig.instance_cache_max_memory` (default: at most 64 × 4 MB per
+  backend between statements).
 * Runtime resource use is bounded per instance (`plzig.max_memory`), but a
   function recursing through SPI creates one instance per level, and SPI
   results are fully materialised; like PL/pgSQL, a determined user can use

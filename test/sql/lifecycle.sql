@@ -75,7 +75,7 @@ ALTER FUNCTION lc_ins() STABLE;
 SELECT lc_ins();
 
 -- the compiler sandbox status is visible to superusers (value depends on the host kernel)
-SELECT plzig_sandbox_status() ~ '^(enforced \(landlock ABI [0-9]+\)|unavailable|off)' AS status_known;
+SELECT plzig_sandbox_status() ~ '^(enforced|partial|none) \((landlock ABI [0-9]+|no landlock), (seccomp|no seccomp)[;)]' AS status_known;
 
 -- cleanup of cluster-wide objects
 DROP OWNED BY regress_plzig_dev;

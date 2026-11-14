@@ -70,7 +70,7 @@ CREATE FUNCTION s_asm() RETURNS int LANGUAGE plzig AS $$
 $$;
 ERROR:  PL/Zig source rejected by policy
 DETAIL:  line 2, column 5: keyword not allowed in PL/Zig 'asm'
-line 2, column 9: keyword not allowed in PL/Zig 'volatile'
+  line 2, column 9: keyword not allowed in PL/Zig 'volatile'
 CREATE FUNCTION s_callconv() RETURNS int LANGUAGE plzig AS $$
     return 1;
 }
@@ -121,7 +121,7 @@ CREATE FUNCTION s_extern_builtin() RETURNS int LANGUAGE plzig AS $$
 $$;
 ERROR:  PL/Zig source rejected by policy
 DETAIL:  line 2, column 15: builtin not allowed in PL/Zig '@extern'
-line 2, column 36: keyword not allowed in PL/Zig 'callconv'
+  line 2, column 36: keyword not allowed in PL/Zig 'callconv'
 CREATE FUNCTION s_export_builtin() RETURNS int LANGUAGE plzig AS $$
     @export(&s_export_builtin, .{ .name = "x" });
     return 1;
@@ -188,9 +188,9 @@ CREATE FUNCTION s_many() RETURNS int LANGUAGE plzig AS $$
 $$;
 ERROR:  PL/Zig source rejected by policy
 DETAIL:  line 2, column 15: only @import("plzig") is allowed; use plzig.std
-line 3, column 15: builtin not allowed in PL/Zig '@embedFile'
-line 4, column 5: keyword not allowed in PL/Zig 'asm'
-line 4, column 9: keyword not allowed in PL/Zig 'volatile'
+  line 3, column 15: builtin not allowed in PL/Zig '@embedFile'
+  line 4, column 5: keyword not allowed in PL/Zig 'asm'
+  line 4, column 9: keyword not allowed in PL/Zig 'volatile'
 -- nothing was created
 SELECT count(*) FROM pg_proc WHERE proname LIKE 's\_%' AND prolang = (SELECT oid FROM pg_language WHERE lanname = 'plzig');
  count 
@@ -205,8 +205,23 @@ CREATE FUNCTION s_typo() RETURNS int LANGUAGE plzig AS $$
 $$;
 ERROR:  PL/Zig compilation failed
 DETAIL:  line 3, column 16: error: use of undeclared identifier 'undefined_name'
-    return x + undefined_name;
-               ^~~~~~~~~~~~~~
+      return x + undefined_name;
+                 ^~~~~~~~~~~~~~
+-- control characters in compiler output are neutralised and continuation
+-- lines indented, so nothing can pose as a server message or terminal escape
+CREATE FUNCTION s_forge() RETURNS int LANGUAGE plzig AS $$
+    @compileError("\n\x1b[31m\nERROR:  forged line\x07\x7f\rWARNING:  more\x00");
+$$;
+ERROR:  PL/Zig compilation failed
+DETAIL:  line 2, column 5: error: 
+                           ?[31m
+                           ERROR:  forged line???WARNING:  more
+      @compileError("\n\x1b[31m\nERROR:  forged line\x07\x7f\rWARNING:  more\x00");
+      ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  referenced by:
+      plzig_call: sdk/root.zig:90:19
+      plzig_call: sdk/root.zig:82:1
+      4 reference(s) hidden; use '-freference-trace=6' to see all references
 -- curated std: OS-facing parts are simply not there
 CREATE FUNCTION s_no_fs() RETURNS int LANGUAGE plzig AS $$
     _ = std.fs;
@@ -214,15 +229,15 @@ CREATE FUNCTION s_no_fs() RETURNS int LANGUAGE plzig AS $$
 $$;
 ERROR:  PL/Zig compilation failed
 DETAIL:  line 2, column 12: error: struct 'plzig.std' has no member named 'fs'
-    _ = std.fs;
-        ~~~^~~
-sdk/plzig.zig:16:17: note: struct declared here
-pub const std = struct {
-                ^~~~~~
-referenced by:
-    plzig_call: sdk/root.zig:90:19
-    plzig_call: sdk/root.zig:82:1
-    4 reference(s) hidden; use '-freference-trace=6' to see all references
+      _ = std.fs;
+          ~~~^~~
+  sdk/plzig.zig:16:17: note: struct declared here
+  pub const std = struct {
+                  ^~~~~~
+  referenced by:
+      plzig_call: sdk/root.zig:90:19
+      plzig_call: sdk/root.zig:82:1
+      4 reference(s) hidden; use '-freference-trace=6' to see all references
 \set VERBOSITY terse
 --
 -- Runtime faults become ordinary errors, and the backend survives each one.

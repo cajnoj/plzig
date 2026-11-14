@@ -80,7 +80,7 @@ $(WAMR_LIB): $(WAMR_BUILD_SRC)/.stamp third_party/wamr/CMakeLists.txt
 
 $(VALIDATOR): zig/validate/main.zig third_party/check-zig.sh
 	sh third_party/check-zig.sh "$(ZIG)" "$(ZIG_VERSION)"
-	"$(ZIG)" build-exe -O ReleaseSafe -fstrip \
+	"$(ZIG)" build-exe -O ReleaseSafe -fstrip -mcpu baseline \
 	    --global-cache-dir $(BUILD_DIR)/zig-cache-host \
 	    --cache-dir $(BUILD_DIR)/zig-cache-local \
 	    zig/validate/main.zig --name plzig-validate -femit-bin=$@

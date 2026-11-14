@@ -503,6 +503,17 @@ plzig_instance_current(PlzigInstance *pi)
 	return pi->max_pages == (uint32) plzig_max_memory * 16;
 }
 
+/* Current size of the instance's linear memory in bytes. */
+uint64
+plzig_instance_memory_size(PlzigInstance *pi)
+{
+	wasm_memory_inst_t mem = wasm_runtime_get_default_memory(pi->inst);
+
+	if (mem == NULL)
+		return 0;
+	return wasm_memory_get_cur_page_count(mem) * wasm_memory_get_bytes_per_page(mem);
+}
+
 void
 plzig_instance_destroy(PlzigInstance *pi)
 {

@@ -2,8 +2,10 @@
 # Checks for a system without Landlock (run by test-in-container.sh when the
 # container's seccomp profile blocks the Landlock syscalls):
 #   - default plzig.compiler_sandbox = require refuses every compile with an
-#     actionable error, while functions with cached modules keep running;
-#   - try compiles unconfined and logs that once.
+#     actionable error naming what is missing, while functions with cached
+#     modules keep running;
+#   - try compiles with what is available (the seccomp filter) and logs once
+#     exactly what is missing.
 set -u
 fails=0
 pass() { echo "  ok   - $1"; }
@@ -27,12 +29,12 @@ expect "default is require" "require" "LOAD 'plzig'; SHOW plzig.compiler_sandbox
 
 out=$(psqlq -c "CREATE FUNCTION nl1() RETURNS int LANGUAGE plzig AS \$\$ return 1; \$\$;")
 if grep -qF "Landlock is not available, and plzig.compiler_sandbox = require" <<<"$out" &&
-   grep -qF "landlock_create_ruleset returned -38" <<<"$out" &&
+   grep -qF "Missing: Landlock is not available (landlock_create_ruleset returned -38): no filesystem confinement." <<<"$out" &&
    grep -qF "plzig.compiler_sandbox = try" <<<"$out" &&
-   grep -qF "full rights of the server's operating-system user" <<<"$out"; then
-    pass "require refuses to compile without Landlock, with reason and hint"
+   grep -qF "every file the server's operating-system user can" <<<"$out"; then
+    pass "require refuses to compile without Landlock, with what is missing and a hint"
 else
-    fail "require refuses to compile without Landlock, with reason and hint"; echo "$out" | sed 's/^/         /'
+    fail "require refuses to compile without Landlock, with what is missing and a hint"; echo "$out" | sed 's/^/         /'
 fi
 
 set_sandbox try
@@ -44,12 +46,20 @@ SELECT 'status: ' || plzig_sandbox_status();
 SQL
 )
 if grep -qx "4711" <<<"$out"; then pass "try compiles without Landlock"; else fail "try compiles without Landlock"; echo "$out" | sed 's/^/         /'; fi
-if grep -qF "status: unavailable (landlock_create_ruleset returned -38)" <<<"$out"; then pass "status reports unavailable"; else fail "status reports unavailable"; fi
-if tail -c +"$((logpos + 1))" /tmp/server.log | grep -qF "Landlock is not available (landlock_create_ruleset returned -38); the compiler runs without filesystem confinement"; then
-    pass "try logs the unconfined compile"
+if grep -qF "status: partial (no landlock, seccomp; missing: Landlock is not available (landlock_create_ruleset returned -38)" <<<"$out"; then
+    pass "status: seccomp only, Landlock missing"
 else
-    fail "try logs the unconfined compile"
+    fail "status: seccomp only, Landlock missing"; echo "$out" | sed 's/^/         /'
 fi
+log=$(tail -c +"$((logpos + 1))" /tmp/server.log)
+if grep -qF "the compiler sandbox is incomplete, compiling anyway because plzig.compiler_sandbox = try; missing: Landlock is not available (landlock_create_ruleset returned -38): no filesystem confinement" <<<"$log"; then
+    pass "try logs what is missing"
+else
+    fail "try logs what is missing"; grep -F "PL/Zig" <<<"$log" | sed 's/^/         /'
+fi
+psqlq -c "CREATE FUNCTION nl4() RETURNS int LANGUAGE plzig AS \$\$ return 4; \$\$;" >/dev/null
+n=$(tail -c +"$((logpos + 1))" /tmp/server.log | grep -c "the compiler sandbox is incomplete")
+if [ "$n" -eq 2 ]; then pass "logged once per backend (two sessions, two lines)"; else fail "logged once per backend ($n lines)"; fi
 
 set_sandbox ""
 expect "back to require: cached module still runs" "4711" "SELECT nl2();"

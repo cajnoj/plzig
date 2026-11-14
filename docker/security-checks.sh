@@ -54,9 +54,11 @@ compile_sql() {   # a function body that is certainly not cached yet
 echo "--- security checks"
 fakedir=/tmp/plzig-fake
 mkdir -p "$fakedir"
-for m in 1 2 3 4 5; do
+canary=/tmp/plzig-canary
+for m in 1 2 3 4 5 7; do
     mkdir -p "$fakedir/m$m"
-    gcc -O2 -static -DMODE=$m -DPGDATA="\"$PGDATA\"" -o "$fakedir/m$m/zig" /src/docker/fake/fakezig.c || exit 1
+    gcc -O2 -static -DMODE=$m -DPGDATA="\"$PGDATA\"" -DPGSOCK="\"$PGHOST/.s.PGSQL.5432\"" \
+        -DCANARY_DIR="\"$canary\"" -o "$fakedir/m$m/zig" /src/docker/fake/fakezig.c || exit 1
 done
 # m6: a compiler reporting another version
 mkdir -p "$fakedir/m6"
@@ -84,9 +86,11 @@ SELECT 'status: ' || plzig_sandbox_status();
 SQL
 )
 status=$(sed -n 's/^status: //p' <<<"$out")
-echo "$out" | sed -n 's/^/         /p' | grep -E "open|tcp|signal|zig lib|compiler|exec"
+echo "         sandbox status: $status"
+echo "$out" | sed -n 's/^/         /p' | grep -E "open|tcp|udp|unix|socket|signal|ptrace|shmget|setsid|setpgid|symlink|zig lib|compiler|exec"
 if grep -qF "zig-lib-dir=$fakedir/lib" <<<"$out"; then pass "--zig-lib-dir passed to the compiler"; else fail "--zig-lib-dir passed to the compiler"; fi
-if [[ "$status" == enforced* ]]; then
+if [[ "$status" == "enforced (landlock ABI "*", seccomp"* ]]; then
+    # Landlock (filesystem)
     for needle in "open /etc/passwd: Permission denied" \
                   "postgresql.conf: Permission denied" \
                   "planted.wasm: Permission denied" \
@@ -97,16 +101,47 @@ if [[ "$status" == enforced* ]]; then
                   "write compiler dir: Permission denied" \
                   "read other file near compiler: Permission denied" \
                   "exec /bin/true: Permission denied" \
-                  "signal parent: Operation not permitted"; do
+                  "symlink in build dir: Permission denied"; do
         if grep -qF "$needle" <<<"$out"; then pass "landlock: $needle"; else fail "landlock: $needle"; fi
     done
-    abi=$(sed -n 's/.*ABI \([0-9]*\).*/\1/p' <<<"$status")
-    if [ "${abi:-0}" -ge 4 ]; then
-        if grep -qF "tcp connect 127.0.0.1:5432: Permission denied" <<<"$out"; then pass "landlock: TCP connect denied"; else fail "landlock: TCP connect denied"; fi
-    fi
+    # seccomp (and Landlock scoping for the signal); EPERM = Operation not permitted
+    for needle in "inet socket: Operation not permitted" \
+                  "tcp connect 127.0.0.1:5432: no socket (Operation not permitted)" \
+                  "udp socket: Operation not permitted" \
+                  "udp send 127.0.0.1:5432: no socket (Operation not permitted)" \
+                  "unix socket: Operation not permitted" \
+                  "unix connect server socket: no socket (Operation not permitted)" \
+                  "signal parent: Operation not permitted" \
+                  "ptrace attach parent: Operation not permitted" \
+                  "shmget: Operation not permitted" \
+                  "setsid in child: Operation not permitted" \
+                  "setpgid in child: Operation not permitted" \
+                  "signal self: ALLOWED"; do
+        if grep -qF "$needle" <<<"$out"; then pass "sandbox: $needle"; else fail "sandbox: $needle"; fi
+    done
 else
-    fail "Landlock not enforced ($status)"
+    fail "sandbox not enforced ($status)"
 fi
+abi=$(sed -n 's/.*landlock ABI \([0-9]*\).*/\1/p' <<<"$status")
+if [ "${abi:-0}" -ge 10 ]; then
+    if [[ "$status" == "enforced (landlock ABI $abi, seccomp)" ]]; then pass "status lists nothing missing at ABI $abi"; else fail "status lists nothing missing at ABI $abi ($status)"; fi
+elif [ "${abi:-0}" -ge 6 ]; then
+    if grep -qF "missing: Landlock ABI $abi lacks restrictions on" <<<"$status"; then pass "status lists what Landlock ABI $abi lacks"; else fail "status lists what Landlock ABI $abi lacks ($status)"; fi
+fi
+
+# 7: the recursive delete never follows symbolic links (compiler leaves traps).
+# Without the sandbox, so that the fake compiler can create symbolic links.
+rm -rf "$canary"; mkdir -p "$canary"; echo "keep me" > "$canary/canary"
+set_conf compiler_sandbox off
+set_fake "$fakedir/m7/zig"
+out=$(psqlq -c "CREATE FUNCTION traps() RETURNS int LANGUAGE plzig AS \$\$ return $RANDOM; \$\$;")
+echo "$out" | grep -E "escape|hardlink|deep" | sed 's/^/         /'
+if grep -qF "escape-dir: ALLOWED" <<<"$out" && grep -qF "deep tree: 50 levels" <<<"$out"; then pass "rmtree: traps planted"; else fail "rmtree: traps planted"; echo "$out" | sed 's/^/         /'; fi
+left=$(find "$PGDATA/plzig" -maxdepth 1 -name 'pgsql_tmp.build.*' | wc -l)
+if [ "$left" -eq 0 ]; then pass "rmtree: build directory with symlinks and a 50-level tree removed"; else fail "rmtree: build directory removed ($left left)"; fi
+if [ "$(cat "$canary/canary" 2>/dev/null)" = "keep me" ] && [ -d "$canary" ]; then pass "rmtree: canary outside the build directory intact"; else fail "rmtree: canary outside the build directory intact"; fi
+if grep -q "could not remove" <<<"$out"; then fail "rmtree: no warnings"; else pass "rmtree: no warnings"; fi
+set_conf compiler_sandbox ""
 set_real
 
 # ---- the external toolchain (plzig.zig_path, zig_lib_dir, zig_sha256) ----
@@ -239,6 +274,95 @@ for v in on true 1 REQUIRE Try; do
 done
 set_conf compiler_sandbox ""; reload
 expect "plzig.compiler_sandbox default is require" "require" "LOAD 'plzig'; SHOW plzig.compiler_sandbox;"
+
+# ---- build directories (pid reuse, stale directories) ----
+echo "--- build directories"
+# a leftover directory in the current naming scheme whose pid is alive (the
+# shell's, standing in for a reused pid), and one in the old scheme
+mkdir -p "$PGDATA/plzig/pgsql_tmp.build.$$.1.0123456789abcdef/sub" "$PGDATA/plzig/pgsql_tmp.build.1.1"
+echo x > "$PGDATA/plzig/pgsql_tmp.build.$$.1.0123456789abcdef/sub/file"
+expect "compile with leftover build directories present" "CREATE FUNCTION" "$(compile_sql) SELECT 'CREATE FUNCTION';"
+left=$(find "$PGDATA/plzig" -maxdepth 1 -name 'pgsql_tmp.build.*' | wc -l)
+if [ "$left" -eq 0 ]; then pass "leftover build directories swept (live pid too)"; else fail "leftover build directories swept ($left left)"; fi
+
+# ---- module cache: size limit, LRU eviction, temp files, plzig_cache_clear ----
+echo "--- module cache"
+cachedir="$PGDATA/plzig/cache"
+set_conf cache_size_limit "64MB"; reload
+expect "plzig.cache_size_limit set from postgresql.conf" "64MB" "SHOW plzig.cache_size_limit;"
+psqlq -c "CREATE OR REPLACE FUNCTION cache_a() RETURNS int LANGUAGE plzig AS \$\$ return 4100 + $RANDOM; \$\$;" >/dev/null
+fa=$(ls -t "$cachedir"/*.wasm | head -1)
+touch -d '3 days ago' "$fa"
+# a cache hit in a new session refreshes the module's time
+psqlq -c "SELECT cache_a();" >/dev/null
+if [ "$(stat -c %Y "$fa")" -gt "$(date -d '1 hour ago' +%s)" ]; then pass "cache hit refreshes the module's mtime"; else fail "cache hit refreshes the module's mtime"; fi
+hex() { head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+p1="$cachedir/$(hex).wasm"; p2="$cachedir/$(hex).wasm"; p3="$cachedir/$(hex).wasm"; p4="$cachedir/$(hex).wasm"
+# 4 x 25 MB: with up to 14 MB of real modules, exactly the two oldest must go
+for f in "$p1" "$p2" "$p3" "$p4"; do truncate -s 25M "$f"; chmod 600 "$f"; done
+touch -d '4 days ago' "$p1"; touch -d '2 days ago' "$p2"; touch -d '1 day ago' "$p3"; touch -d '1 hour ago' "$p4"
+ptmp="$cachedir/$(hex).wasm.tmp.99999"; echo junk > "$ptmp"
+other="$cachedir/not-a-module"; truncate -s 20M "$other"; touch -d '5 days ago' "$other"
+plink="$cachedir/$(hex).wasm"; echo "keep me" > "$canary/target"; ln -s "$canary/target" "$plink"; touch -h -d '6 days ago' "$plink"
+pdir="$cachedir/$(hex).wasm"; mkdir "$pdir"; touch -d '6 days ago' "$pdir"
+expect "compile with an over-full cache" "CREATE FUNCTION" \
+    "CREATE OR REPLACE FUNCTION cache_b() RETURNS int LANGUAGE plzig AS \$\$ return 4200 + $RANDOM; \$\$; SELECT 'CREATE FUNCTION';"
+if [ ! -e "$p1" ] && [ ! -e "$p2" ] && [ -e "$p3" ] && [ -e "$p4" ]; then pass "LRU eviction removed the two oldest modules only"; else fail "LRU eviction removed the two oldest modules only"; ls -la --time-style=+%F "$cachedir" | sed 's/^/         /'; fi
+if [ -e "$fa" ]; then pass "recently used module kept"; else fail "recently used module kept"; fi
+if [ ! -e "$ptmp" ]; then pass "stale temp file removed"; else fail "stale temp file removed"; fi
+if [ -e "$other" ] && [ -L "$plink" ] && [ -d "$pdir" ] && [ "$(cat "$canary/target")" = "keep me" ]; then
+    pass "eviction leaves non-matching names, symlinks and directories alone"
+else
+    fail "eviction leaves non-matching names, symlinks and directories alone"
+fi
+total=$(find "$cachedir" -maxdepth 1 -type f -name '*.wasm' -printf '%s\n' | awk '{ s += $1 } END { print s + 0 }')
+if [ "$total" -le $((64 * 1024 * 1024)) ]; then pass "cache within plzig.cache_size_limit ($total bytes)"; else fail "cache within plzig.cache_size_limit ($total bytes)"; fi
+out=$(psqlq -c "LOAD 'plzig'" -c "ALTER SYSTEM SET plzig.cache_size_limit = '1TB';")
+if grep -qF 'parameter "plzig.cache_size_limit" cannot be changed' <<<"$out"; then pass "ALTER SYSTEM cannot set plzig.cache_size_limit"; else fail "ALTER SYSTEM cannot set plzig.cache_size_limit"; echo "$out" | sed 's/^/         /'; fi
+expect "SET cannot set plzig.cache_size_limit" "cannot be changed now" "LOAD 'plzig'; SET plzig.cache_size_limit = '1TB';"
+# plzig_cache_clear: removes the cache files (and only those), loaded modules keep running
+nmods() { find "$cachedir" -maxdepth 1 -type f -printf '%f\n' | grep -cE '^[0-9a-f]{64}\.wasm$'; }
+nmod=$(nmods)
+out=$(psqlq <<'SQL'
+SELECT cache_a() > 0 AS loaded;
+SELECT 'cleared: ' || plzig_cache_clear();
+SELECT cache_a() > 0 AS still_runs;
+SQL
+)
+if grep -qx "cleared: $nmod" <<<"$out"; then pass "plzig_cache_clear() returns the number of files removed ($nmod)"; else fail "plzig_cache_clear() returns the number of files removed ($nmod)"; echo "$out" | sed 's/^/         /'; fi
+left=$(nmods)
+if [ "$left" -eq 0 ] && [ "$(grep -c '^t$' <<<"$out")" -eq 2 ]; then pass "cache empty, loaded function still runs"; else fail "cache empty, loaded function still runs (left=$left)"; fi
+if [ -e "$other" ] && [ -L "$plink" ] && [ -d "$pdir" ]; then pass "plzig_cache_clear leaves foreign entries alone"; else fail "plzig_cache_clear leaves foreign entries alone"; fi
+expect "after plzig_cache_clear a new session recompiles" "t" "SELECT cache_a() > 0;"
+rm -f "$other" "$plink"; rmdir "$pdir"
+set_conf cache_size_limit ""; reload
+
+# ---- no data directory paths in messages to unprivileged users ----
+echo "--- messages to unprivileged users"
+psqlq -c "DROP ROLE IF EXISTS plzig_sec; CREATE ROLE plzig_sec LOGIN; GRANT USAGE ON LANGUAGE plzig TO plzig_sec; GRANT CREATE ON SCHEMA public TO plzig_sec;" >/dev/null
+psqlq -c "CREATE OR REPLACE FUNCTION leak_probe() RETURNS int LANGUAGE plzig AS \$\$ return 5150; \$\$;" >/dev/null
+lf=$(ls -t "$cachedir"/*.wasm | head -1)
+asuser() { PGOPTIONS="-c client_min_messages=log" psql -X -q -At -v VERBOSITY=verbose -U plzig_sec "$@" 2>&1; }
+noleak() {   # noleak <description> <needle> <output>
+    if ! grep -qF "$2" <<<"$3"; then fail "$1 (expected \"$2\")"; echo "$3" | sed 's/^/         /'
+    elif grep -qF "$PGDATA" <<<"$3"; then fail "$1: data directory shown"; echo "$3" | sed 's/^/         /'
+    else pass "$1, without the data directory"; fi
+}
+chmod 0644 "$lf"
+noleak "unprivileged: cache file with wrong permissions" "wrong owner or permissions" "$(asuser -c 'SELECT leak_probe();')"
+chmod 0600 "$lf"
+mv "$lf" "$lf.orig"; ln -s /etc/passwd "$lf"
+noleak "unprivileged: symlinked cache file" "could not open file \"plzig/cache/" "$(asuser -c 'SELECT leak_probe();')"
+rm -f "$lf"; mv "$lf.orig" "$lf"
+chmod 0750 "$PGDATA/plzig"
+noleak "unprivileged: plzig directory with group permissions" "has group or other permissions" "$(asuser -c 'SELECT leak_probe();')"
+chmod 0700 "$PGDATA/plzig"
+noleak "unprivileged: compile error" "undeclared identifier" \
+    "$(asuser -c "CREATE FUNCTION leak2() RETURNS int LANGUAGE plzig AS \$\$ return nope$RANDOM; \$\$;")"
+noleak "unprivileged: module too large" "the compiled module is too large" \
+    "$(asuser -c "CREATE FUNCTION leak3(i int) RETURNS int STRICT LANGUAGE plzig AS \$\$ return @as(i32, big[@intCast(i)]) + $RANDOM; } const big: [3 << 20]u8 = @splat(7); fn unused() void { \$\$;")"
+expect "works again after repair" "5150" "SELECT leak_probe();"
+psqlq -c "DROP OWNED BY plzig_sec; DROP ROLE plzig_sec;" >/dev/null
 
 # make install puts no Zig files anywhere
 dest=/tmp/plzig-destdir

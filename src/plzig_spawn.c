@@ -7,8 +7,8 @@
  * before execve: new session, default signal dispositions, empty signal
  * mask, stdin from a file (or /dev/null), stdout+stderr to a pipe, every
  * other descriptor closed, chdir, umask 077, rlimits, no_new_privs,
- * Landlock.  The child reports sandbox status (or a setup failure) over a
- * close-on-exec status pipe.
+ * Landlock, seccomp filter.  The child reports sandbox status (or a setup
+ * failure) over a close-on-exec status pipe.
  *
  * The parent waits with WaitLatchOrSocket() so query cancel and
  * pg_terminate_backend work, enforces a wall-clock timeout, and always
@@ -137,6 +137,7 @@ child_main(const char *prog, char *const argv[], char *const envp[],
 	int			sig;
 	int			abi_used = 0;
 	int			ll;
+	int			sc;
 	char		errbuf[128];
 	char		msg[32];
 
@@ -195,8 +196,16 @@ child_main(const char *prog, char *const argv[], char *const envp[],
 	if (sb->mode == PLZIG_SANDBOX_REQUIRE && ll != 1)
 		child_fail(status_fd, "landlock unavailable");
 
-	/* report: "S<abi>" (0 = not sandboxed) */
-	snprintf(msg, sizeof(msg), "S%d;", ll == 1 ? abi_used : 0);
+	/* last: the filter denies nothing the steps above still need */
+	errbuf[0] = '\0';
+	sc = plzig_seccomp_apply_in_child(sb, errbuf, sizeof(errbuf));
+	if (sc < 0 && sb->mode == PLZIG_SANDBOX_REQUIRE)
+		child_fail(status_fd, errbuf);
+	if (sb->mode == PLZIG_SANDBOX_REQUIRE && sc != 1)
+		child_fail(status_fd, "seccomp unavailable");
+
+	/* report: "S<abi>,<seccomp>;" (abi 0 = no Landlock) */
+	snprintf(msg, sizeof(msg), "S%d,%d;", ll == 1 ? abi_used : 0, sc == 1 ? 1 : 0);
 	child_write(status_fd, msg);
 
 	execve(prog, argv, envp);
@@ -252,7 +261,7 @@ plzig_spawn(const char *prog, char *const argv[], char *const envp[],
 		ereport(ERROR,
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m",
-						stdin_path ? stdin_path : "/dev/null")));
+						stdin_path ? plzig_display_path(stdin_path) : "/dev/null")));
 
 	if (pipe(out_pipe) != 0 || pipe(status_pipe) != 0)
 	{
@@ -430,13 +439,16 @@ plzig_spawn(const char *prog, char *const argv[], char *const envp[],
 				 errmsg("PL/Zig compilation timed out"),
 				 errdetail("plzig.compile_timeout is %d ms.", timeout_ms)));
 
-	/* status protocol: "S<abi>;" then optionally "E<message>" */
+	/* status protocol: "S<abi>,<seccomp>;" then optionally "E<message>" */
 	if (status_buf[0] == 'S')
 	{
 		char	   *semi = strchr(status_buf, ';');
+		char	   *comma = strchr(status_buf, ',');
 
 		res->landlock_abi = atoi(status_buf + 1);
 		res->sandboxed = res->landlock_abi > 0;
+		res->seccomp = (comma != NULL && (semi == NULL || comma < semi) &&
+						comma[1] == '1');
 		if (semi && semi[1] == 'E')
 			ereport(ERROR,
 					(errcode(ERRCODE_SYSTEM_ERROR),

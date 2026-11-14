@@ -4,16 +4,22 @@
  *	  Compile pipeline: content-addressed cache, compile lock, private build
  *	  directory, policy validator, compiler, install into the cache.
  *
- * Every path is built from fixed names, the backend pid, a counter and hex
- * digests; nothing comes from user input.  Files are opened with O_NOFOLLOW
- * through PostgreSQL's transient-file wrappers (closed automatically on
- * ERROR); the recursive delete never follows symlinks.
+ * Every path is built from fixed names, the backend pid, a counter, random
+ * hex and hex digests; nothing comes from user input.  Files are opened with
+ * O_NOFOLLOW through PostgreSQL's transient-file wrappers (closed
+ * automatically on ERROR); the recursive delete works relative to directory
+ * descriptors and never follows symlinks or crosses file systems.
+ *
+ * Messages that can reach the client never contain the data directory:
+ * paths under it are shown relative to it (the backend's working
+ * directory), the full path goes to the server log only (errdetail_log).
  *
  *-------------------------------------------------------------------------
  */
 #include "plzig.h"
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -21,6 +27,7 @@
 #include <stdlib.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "common/cryptohash.h"
@@ -42,9 +49,13 @@
 #define PLZIG_BUILD_PREFIX	"pgsql_tmp.build."
 #define PLZIG_LOCK_NAME		"compile.lock"
 
-static char plzig_sandbox_status[160] = "no compilation in this session";
+/* recursive delete: deepest directory level descended into */
+#define PLZIG_RMTREE_MAX_DEPTH	64
+/* a cache hit refreshes the module's mtime (LRU) if older than this */
+#define PLZIG_CACHE_TOUCH_SECS	60
+
+static char plzig_sandbox_status[512] = "no compilation in this session";
 static bool plzig_sandbox_logged = false;
-static bool plzig_swept = false;
 static bool plzig_exit_registered = false;
 static unsigned int plzig_build_counter = 0;
 static char plzig_current_build_dir[MAXPGPATH] = "";
@@ -104,6 +115,8 @@ static const char *const plzig_zig_flags[] = {
 	NULL
 };
 
+static bool plzig_realpath(const char *path, char *out);
+
 const char *
 plzig_sandbox_status_string(void)
 {
@@ -114,6 +127,21 @@ plzig_sandbox_status_string(void)
  * Paths and directories
  * ---------------------------------------------------------------------
  */
+/*
+ * How a path is shown in messages that may reach the client: paths inside
+ * the data directory relative to it (it is the backend's working directory,
+ * like PostgreSQL's own "base/16384/..."), anything else unchanged.
+ */
+const char *
+plzig_display_path(const char *path)
+{
+	size_t		n = strlen(DataDir);
+
+	if (n > 0 && strncmp(path, DataDir, n) == 0 && path[n] == '/')
+		return path + n + 1;
+	return path;
+}
+
 static void
 plzig_path(char *dst, const char *fmt,...) pg_attribute_printf(2, 3);
 
@@ -140,34 +168,41 @@ static void
 plzig_ensure_private_dir(const char *path)
 {
 	struct stat st;
+	const char *shown = plzig_display_path(path);
 
 	if (lstat(path, &st) != 0)
 	{
 		if (errno != ENOENT)
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not stat directory \"%s\": %m", path)));
+					 errmsg("could not stat directory \"%s\": %m", shown),
+					 errdetail_log("Full path: \"%s\".", path)));
 		if (mkdir(path, S_IRWXU) != 0 && errno != EEXIST)
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not create directory \"%s\": %m", path)));
+					 errmsg("could not create directory \"%s\": %m", shown),
+					 errdetail_log("Full path: \"%s\".", path)));
 		if (lstat(path, &st) != 0)
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not stat directory \"%s\": %m", path)));
+					 errmsg("could not stat directory \"%s\": %m", shown),
+					 errdetail_log("Full path: \"%s\".", path)));
 	}
 	if (!S_ISDIR(st.st_mode))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("PL/Zig: \"%s\" is not a directory (or is a symbolic link)", path)));
+				 errmsg("PL/Zig: \"%s\" is not a directory (or is a symbolic link)", shown),
+				 errdetail_log("Full path: \"%s\".", path)));
 	if (st.st_uid != geteuid())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("PL/Zig: directory \"%s\" is not owned by the server user", path)));
+				 errmsg("PL/Zig: directory \"%s\" is not owned by the server user", shown),
+				 errdetail_log("Full path: \"%s\".", path)));
 	if ((st.st_mode & (S_IRWXG | S_IRWXO)) != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("PL/Zig: directory \"%s\" has group or other permissions", path),
+				 errmsg("PL/Zig: directory \"%s\" has group or other permissions", shown),
+				 errdetail_log("Full path: \"%s\".", path),
 				 errhint("Permissions should be u=rwx (0700).")));
 }
 
@@ -182,107 +217,253 @@ plzig_dirs(char *root, char *cache, char *zigcache)
 	plzig_ensure_private_dir(zigcache);
 }
 
-/* Recursive delete that never follows symbolic links. */
-static void
-plzig_rmtree(const char *path, int depth)
+/*
+ * Recursive delete.
+ *
+ * A child process that survived (or a compromised compiler, while it ran)
+ * may rename entries and swap a directory for a symbolic link at any
+ * moment, so nothing is resolved by path: each directory is opened relative
+ * to its parent's descriptor with O_NOFOLLOW|O_DIRECTORY, checked to be on
+ * the same file system as the top directory, read with fdopendir() and its
+ * entries removed with unlinkat().  A symbolic link is only ever unlinked
+ * itself.  Depth is bounded.
+ *
+ * Raw descriptors are open during the walk, so it never raises an error and
+ * never allocates: the first problem is remembered, everything is closed,
+ * and only then is it reported at `elevel` (WARNING or LOG).  It is safe in
+ * PG_FINALLY blocks and in the exit callback.
+ */
+typedef struct PlzigRmState
 {
-	DIR		   *dir;
-	struct dirent *de;
-	struct stat st;
+	dev_t		dev;			/* file system of the top directory */
+	int			err;			/* first errno seen, 0 = none */
+	const char *what;			/* the operation that failed */
+	bool		too_deep;
+	bool		other_fs;
+} PlzigRmState;
 
-	if (depth > 64)
+static void
+plzig_rm_fail(PlzigRmState *st, const char *what, int err)
+{
+	if (st->err == 0)
 	{
-		elog(WARNING, "PL/Zig: directory tree too deep, not removing \"%s\"", path);
-		return;
+		st->err = err != 0 ? err : EIO;
+		st->what = what;
 	}
-	if (lstat(path, &st) != 0)
-		return;
-	if (!S_ISDIR(st.st_mode))
-	{
-		(void) unlink(path);
-		return;
-	}
-	dir = AllocateDir(path);
-	if (dir == NULL)
-	{
-		elog(WARNING, "PL/Zig: could not open directory \"%s\": %m", path);
-		return;
-	}
-	while ((de = ReadDirExtended(dir, path, WARNING)) != NULL)
-	{
-		char		child[MAXPGPATH];
-		int			n;
-
-		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
-			continue;
-		n = snprintf(child, sizeof(child), "%s/%s", path, de->d_name);
-		if (n < 0 || n >= (int) sizeof(child))
-			continue;
-		if (lstat(child, &st) != 0)
-			continue;
-		if (S_ISDIR(st.st_mode))
-			plzig_rmtree(child, depth + 1);
-		else
-			(void) unlink(child);
-	}
-	FreeDir(dir);
-	if (rmdir(path) != 0 && errno != ENOENT)
-		elog(WARNING, "PL/Zig: could not remove directory \"%s\": %m", path);
 }
 
-/* Remove build directories (and temp cache files) left by dead backends. */
+/* remove `name` (any type) from the directory open as dfd */
 static void
-plzig_sweep_stale(const char *root, const char *cache)
+plzig_rm_at(int dfd, const char *name, int depth, PlzigRmState *st)
+{
+	int			attempt;
+
+	/* a few attempts in case the entry is swapped while we look at it */
+	for (attempt = 0; attempt < 4; attempt++)
+	{
+		struct stat sb;
+		struct dirent *de;
+		DIR		   *d;
+		int			fd;
+		int			pass;
+		int			uerr;
+
+		/* anything but a directory, including a symbolic link, goes now */
+		if (unlinkat(dfd, name, 0) == 0 || errno == ENOENT)
+			return;
+		uerr = errno;
+		if (uerr != EISDIR && uerr != EPERM)
+		{
+			plzig_rm_fail(st, "unlink", uerr);
+			return;
+		}
+
+		if (depth >= PLZIG_RMTREE_MAX_DEPTH)
+		{
+			st->too_deep = true;
+			return;
+		}
+		if (!AcquireExternalFD())
+		{
+			plzig_rm_fail(st, "open directory", EMFILE);
+			return;
+		}
+		fd = openat(dfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+		if (fd < 0)
+		{
+			int			save = errno;
+
+			ReleaseExternalFD();
+			if (save == ENOENT)
+				return;
+			if ((save == ELOOP || save == ENOTDIR) && uerr == EISDIR)
+				continue;		/* no longer a directory: unlink it */
+			if (save == ELOOP || save == ENOTDIR)
+				save = uerr;	/* not a directory, and unlink refused */
+			plzig_rm_fail(st, "open directory", save);
+			return;
+		}
+		if (fstat(fd, &sb) != 0 || !S_ISDIR(sb.st_mode))
+		{
+			plzig_rm_fail(st, "stat directory", errno);
+			close(fd);
+			ReleaseExternalFD();
+			return;
+		}
+		if (sb.st_dev != st->dev)
+		{
+			/* a mount point: never descend into another file system */
+			st->other_fs = true;
+			close(fd);
+			ReleaseExternalFD();
+			return;
+		}
+		d = fdopendir(fd);
+		if (d == NULL)
+		{
+			plzig_rm_fail(st, "open directory", errno);
+			close(fd);
+			ReleaseExternalFD();
+			return;
+		}
+
+		/* entries may be added while we work: rescan a few times */
+		for (pass = 0; pass < 3; pass++)
+		{
+			rewinddir(d);
+			while ((de = readdir(d)) != NULL)
+			{
+				if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+					continue;
+				plzig_rm_at(dirfd(d), de->d_name, depth + 1, st);
+			}
+			/*
+			 * If `name` was meanwhile replaced, this removes (only) whatever
+			 * empty directory now has that name, or fails harmlessly.
+			 */
+			if (unlinkat(dfd, name, AT_REMOVEDIR) == 0 || errno == ENOENT)
+				break;
+			if (errno != ENOTEMPTY && errno != EEXIST)
+			{
+				plzig_rm_fail(st, "remove directory", errno);
+				break;
+			}
+			if (st->too_deep || st->other_fs || st->err != 0)
+				break;			/* rescanning will not help */
+		}
+		if (pass == 3)
+			plzig_rm_fail(st, "remove directory", ENOTEMPTY);
+		closedir(d);
+		ReleaseExternalFD();
+		return;
+	}
+	plzig_rm_fail(st, "unlink", ELOOP);
+}
+
+/*
+ * Remove path (a build directory directly inside $PGDATA/plzig) and
+ * everything below it.  Problems are reported at elevel, never as ERROR.
+ */
+static void
+plzig_rmtree(const char *path, int elevel)
+{
+	char		parent[MAXPGPATH];
+	const char *leaf;
+	char	   *slash;
+	PlzigRmState st;
+	struct stat sb;
+	int			pfd;
+
+	memset(&st, 0, sizeof(st));
+	if (strlcpy(parent, path, sizeof(parent)) >= sizeof(parent))
+		return;
+	slash = strrchr(parent, '/');
+	if (slash == NULL || slash == parent || slash[1] == '\0')
+		return;
+	*slash = '\0';
+	leaf = path + (slash - parent) + 1;
+
+	if (!AcquireExternalFD())
+	{
+		errno = EMFILE;
+		ereport(elevel,
+				(errcode_for_file_access(),
+				 errmsg("PL/Zig: could not remove \"%s\": %m", plzig_display_path(path)),
+				 errdetail_log("Full path: \"%s\".", path)));
+		return;
+	}
+	pfd = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+	if (pfd < 0 || fstat(pfd, &sb) != 0)
+	{
+		int			save = errno;
+
+		if (pfd >= 0)
+			close(pfd);
+		ReleaseExternalFD();
+		errno = save;
+		ereport(elevel,
+				(errcode_for_file_access(),
+				 errmsg("PL/Zig: could not remove \"%s\": %m", plzig_display_path(path)),
+				 errdetail_log("Full path: \"%s\".", path)));
+		return;
+	}
+	st.dev = sb.st_dev;
+	plzig_rm_at(pfd, leaf, 0, &st);
+	close(pfd);
+	ReleaseExternalFD();
+
+	/* all descriptors are closed: now it is safe to report */
+	if (st.too_deep)
+		ereport(elevel,
+				(errmsg("PL/Zig: directory tree too deep, could not remove \"%s\" completely",
+						plzig_display_path(path)),
+				 errdetail_log("Full path: \"%s\".", path)));
+	if (st.other_fs)
+		ereport(elevel,
+				(errmsg("PL/Zig: \"%s\" contains a mount point, which was not removed",
+						plzig_display_path(path)),
+				 errdetail_log("Full path: \"%s\".", path)));
+	if (st.err != 0)
+	{
+		errno = st.err;
+		ereport(elevel,
+				(errcode_for_file_access(),
+				 errmsg("PL/Zig: could not remove \"%s\" completely (%s failed): %m",
+						plzig_display_path(path), st.what),
+				 errdetail_log("Full path: \"%s\".", path)));
+	}
+}
+
+/*
+ * Remove leftover build directories.  Called with the compile lock held,
+ * before our own build directory is created.  Every compilation runs under
+ * that lock from mkdir to rmtree, so while we hold it no other build
+ * directory can be in use: whatever exists was left behind by a backend
+ * that died, or whose cleanup failed (its pid may be alive or reused).
+ * Pid liveness is therefore not consulted at all.
+ */
+static void
+plzig_sweep_build_dirs(const char *root)
 {
 	DIR		   *dir;
 	struct dirent *de;
 
 	dir = AllocateDir(root);
-	if (dir != NULL)
+	if (dir == NULL)
+		return;
+	while ((de = ReadDirExtended(dir, plzig_display_path(root), WARNING)) != NULL)
 	{
-		while ((de = ReadDirExtended(dir, root, WARNING)) != NULL)
-		{
-			int			pid;
-			unsigned int cnt;
-			char		path[MAXPGPATH];
+		char		path[MAXPGPATH];
 
-			if (strncmp(de->d_name, PLZIG_BUILD_PREFIX, strlen(PLZIG_BUILD_PREFIX)) != 0)
-				continue;
-			if (sscanf(de->d_name + strlen(PLZIG_BUILD_PREFIX), "%d.%u", &pid, &cnt) != 2)
-				continue;
-			if (pid == MyProcPid || pid <= 0)
-				continue;
-			if (kill(pid, 0) == 0 || errno != ESRCH)
-				continue;		/* still alive (or not ours to judge) */
-			if (snprintf(path, sizeof(path), "%s/%s", root, de->d_name) >= (int) sizeof(path))
-				continue;
-			plzig_rmtree(path, 0);
-		}
-		FreeDir(dir);
+		if (strncmp(de->d_name, PLZIG_BUILD_PREFIX, strlen(PLZIG_BUILD_PREFIX)) != 0)
+			continue;
+		if (snprintf(path, sizeof(path), "%s/%s", root, de->d_name) >= (int) sizeof(path))
+			continue;
+		if (strcmp(path, plzig_current_build_dir) == 0)
+			continue;
+		plzig_rmtree(path, WARNING);
 	}
-
-	dir = AllocateDir(cache);
-	if (dir != NULL)
-	{
-		while ((de = ReadDirExtended(dir, cache, WARNING)) != NULL)
-		{
-			const char *t = strstr(de->d_name, ".wasm.tmp.");
-			char		path[MAXPGPATH];
-			int			pid;
-
-			if (t == NULL)
-				continue;
-			pid = atoi(t + strlen(".wasm.tmp."));
-			if (pid <= 0 || pid == MyProcPid)
-				continue;
-			if (kill(pid, 0) == 0 || errno != ESRCH)
-				continue;
-			if (snprintf(path, sizeof(path), "%s/%s", cache, de->d_name) >= (int) sizeof(path))
-				continue;
-			(void) unlink(path);
-		}
-		FreeDir(dir);
-	}
+	FreeDir(dir);
 }
 
 static void
@@ -297,7 +478,7 @@ plzig_build_atexit(void)
 	plzig_spawn_atexit();
 	if (plzig_current_build_dir[0] != '\0')
 	{
-		plzig_rmtree(plzig_current_build_dir, 0);
+		plzig_rmtree(plzig_current_build_dir, LOG);
 		plzig_current_build_dir[0] = '\0';
 	}
 }
@@ -311,13 +492,15 @@ plzig_write_file(const char *path, const char *data, size_t len, bool sync)
 {
 	int			fd;
 	size_t		off = 0;
+	const char *shown = plzig_display_path(path);
 
 	fd = OpenTransientFilePerm(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | PG_BINARY,
 							   S_IRUSR | S_IWUSR);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
-				 errmsg("could not create file \"%s\": %m", path)));
+				 errmsg("could not create file \"%s\": %m", shown),
+				 errdetail_log("Full path: \"%s\".", path)));
 	while (off < len)
 	{
 		ssize_t		n = write(fd, data + off, len - off);
@@ -328,32 +511,47 @@ plzig_write_file(const char *path, const char *data, size_t len, bool sync)
 				continue;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not write file \"%s\": %m", path)));
+					 errmsg("could not write file \"%s\": %m", shown),
+					 errdetail_log("Full path: \"%s\".", path)));
 		}
 		off += (size_t) n;
 	}
 	if (sync && pg_fsync(fd) != 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
-				 errmsg("could not fsync file \"%s\": %m", path)));
+				 errmsg("could not fsync file \"%s\": %m", shown),
+				 errdetail_log("Full path: \"%s\".", path)));
 	if (CloseTransientFile(fd) != 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
-				 errmsg("could not close file \"%s\": %m", path)));
+				 errmsg("could not close file \"%s\": %m", shown),
+				 errdetail_log("Full path: \"%s\".", path)));
 }
+
+/* what plzig_read_file reads, for its checks and messages */
+typedef enum PlzigFileKind
+{
+	PLZIG_FILE_PLAIN,			/* SDK file */
+	PLZIG_FILE_CACHED,			/* cache entry: private, refresh LRU time */
+	PLZIG_FILE_COMPILED			/* fresh compiler output, size checked
+								 * against plzig.max_module_size */
+} PlzigFileKind;
 
 /*
  * Read a whole file. Returns NULL if it does not exist (and missing_ok).
- * If private_check, the file must be a regular file owned by us, mode 0600.
+ * A cached module must be a regular file owned by us, mode 0600; reading it
+ * refreshes its mtime (at most every PLZIG_CACHE_TOUCH_SECS), which is what
+ * cache eviction orders by.
  */
 static char *
 plzig_read_file(const char *path, size_t maxlen, size_t *len, bool missing_ok,
-				bool private_check)
+				PlzigFileKind kind)
 {
 	int			fd;
 	struct stat st;
 	char	   *buf;
 	size_t		off = 0;
+	const char *shown = plzig_display_path(path);
 
 	/* O_NONBLOCK: a FIFO planted by a compromised compiler must not hang us */
 	fd = OpenTransientFile(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | PG_BINARY);
@@ -363,25 +561,37 @@ plzig_read_file(const char *path, size_t maxlen, size_t *len, bool missing_ok,
 			return NULL;
 		ereport(ERROR,
 				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\": %m", path)));
+				 errmsg("could not open file \"%s\": %m", shown),
+				 errdetail_log("Full path: \"%s\".", path)));
 	}
 	if (fstat(fd, &st) != 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
-				 errmsg("could not stat file \"%s\": %m", path)));
+				 errmsg("could not stat file \"%s\": %m", shown),
+				 errdetail_log("Full path: \"%s\".", path)));
 	if (!S_ISREG(st.st_mode))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("PL/Zig: \"%s\" is not a regular file", path)));
-	if (private_check &&
+				 errmsg("PL/Zig: \"%s\" is not a regular file", shown),
+				 errdetail_log("Full path: \"%s\".", path)));
+	if (kind == PLZIG_FILE_CACHED &&
 		(st.st_uid != geteuid() || (st.st_mode & (S_IRWXG | S_IRWXO)) != 0))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("PL/Zig: file \"%s\" has wrong owner or permissions", path)));
+				 errmsg("PL/Zig: file \"%s\" has wrong owner or permissions", shown),
+				 errdetail_log("Full path: \"%s\".", path)));
+	if (kind == PLZIG_FILE_COMPILED && (size_t) st.st_size > maxlen)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("PL/Zig: the compiled module is too large"),
+				 errdetail("The module has %lld bytes; plzig.max_module_size is %d kB.",
+						   (long long) st.st_size, plzig_max_module_size),
+				 errhint("Large constant data in the function body ends up in the module.")));
 	if ((size_t) st.st_size > maxlen)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("PL/Zig: file \"%s\" is too large", path)));
+				 errmsg("PL/Zig: file \"%s\" is too large", shown),
+				 errdetail_log("Full path: \"%s\".", path)));
 
 	buf = palloc((size_t) st.st_size + 1);
 	while (off < (size_t) st.st_size)
@@ -394,12 +604,17 @@ plzig_read_file(const char *path, size_t maxlen, size_t *len, bool missing_ok,
 				continue;
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not read file \"%s\": %m", path)));
+					 errmsg("could not read file \"%s\": %m", shown),
+					 errdetail_log("Full path: \"%s\".", path)));
 		}
 		if (n == 0)
 			break;
 		off += (size_t) n;
 	}
+	/* LRU: best effort, an old timestamp only makes eviction likelier */
+	if (kind == PLZIG_FILE_CACHED &&
+		st.st_mtime < time(NULL) - PLZIG_CACHE_TOUCH_SECS)
+		(void) futimens(fd, NULL);
 	CloseTransientFile(fd);
 	buf[off] = '\0';
 	*len = off;
@@ -466,9 +681,11 @@ plzig_load_sdk(void)
 	get_share_path(my_exec_path, share);
 	old = MemoryContextSwitchTo(TopMemoryContext);
 	plzig_path(path, "%s/plzig/sdk/plzig.zig", share);
-	plzig_sdk_plzig = plzig_read_file(path, 1024 * 1024, &plzig_sdk_plzig_len, false, false);
+	plzig_sdk_plzig = plzig_read_file(path, 1024 * 1024, &plzig_sdk_plzig_len, false,
+									  PLZIG_FILE_PLAIN);
 	plzig_path(path, "%s/plzig/sdk/root.zig", share);
-	plzig_sdk_root = plzig_read_file(path, 1024 * 1024, &plzig_sdk_root_len, false, false);
+	plzig_sdk_root = plzig_read_file(path, 1024 * 1024, &plzig_sdk_root_len, false,
+									 PLZIG_FILE_PLAIN);
 	MemoryContextSwitchTo(old);
 
 	parts[0] = plzig_sdk_plzig;
@@ -522,7 +739,8 @@ plzig_lock(const char *root)
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\": %m", path)));
+				 errmsg("could not open file \"%s\": %m", plzig_display_path(path)),
+				 errdetail_log("Full path: \"%s\".", path)));
 	for (;;)
 	{
 		if (flock(fd, LOCK_EX | LOCK_NB) == 0)
@@ -530,7 +748,8 @@ plzig_lock(const char *root)
 		if (errno != EWOULDBLOCK && errno != EINTR)
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not lock file \"%s\": %m", path)));
+					 errmsg("could not lock file \"%s\": %m", plzig_display_path(path)),
+					 errdetail_log("Full path: \"%s\".", path)));
 		(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
 						 100L, PG_WAIT_EXTENSION);
 		ResetLatch(MyLatch);
@@ -568,17 +787,25 @@ plzig_replace_all(const char *s, const char *from, const char *to)
 
 /*
  * Make compiler/validator output presentable: strip the build directory and
- * install paths, map user.zig line numbers to function body lines, and make
- * sure the result is valid in the database encoding.
+ * other server paths, map user.zig line numbers to function body lines, and
+ * neutralise anything that could be mistaken for terminal control or for a
+ * server message.  The text is user-influenced (e.g. @compileError), so:
+ *   - every C0 control character except newline and tab, and DEL, becomes
+ *     '?' (always, not only when the encoding check fails);
+ *   - bytes >= 0x80 become '?' too if the result is not valid in the
+ *     database encoding;
+ *   - continuation lines are indented by two spaces, so no line of the
+ *     DETAIL starts in column 0 like "ERROR:  ..." would.
  */
 static char *
 plzig_format_output(const char *raw, int rawlen, const char *builddir,
 					bool validator)
 {
 	StringInfoData b;
+	StringInfoData out;
 	char	   *s;
-	char	   *tmp;
 	char		prefix[MAXPGPATH + 2];
+	char		path[MAXPGPATH];
 	const char *p;
 	const char *marker = validator ? "" : "src/user.zig:";
 	size_t		ml = strlen(marker);
@@ -592,14 +819,22 @@ plzig_format_output(const char *raw, int rawlen, const char *builddir,
 		if (s[i] == '\0')
 			s[i] = '?';
 
+	/* longest paths first */
 	snprintf(prefix, sizeof(prefix), "%s/", builddir);
-	tmp = plzig_replace_all(s, prefix, "");
-	s = plzig_replace_all(tmp, pkglib_path, "$libdir");
+	s = plzig_replace_all(s, prefix, "");
+	s = plzig_replace_all(s, builddir, ".");
+	if (snprintf(path, sizeof(path), "%s/%s/%s", DataDir, PLZIG_DIR_NAME,
+				 PLZIG_ZIGCACHE_NAME) < (int) sizeof(path))
+		s = plzig_replace_all(s, path, "<zig cache>");
+	s = plzig_replace_all(s, pkglib_path, "$libdir");
 	if (plzig_tc.lib[0] != '\0')
 	{
 		snprintf(prefix, sizeof(prefix), "%s/", plzig_tc.lib);
 		s = plzig_replace_all(s, prefix, "<zig lib>/");
 	}
+	s = plzig_replace_all(s, DataDir, "<data directory>");
+	if (plzig_realpath(DataDir, path) && strcmp(path, DataDir) != 0)
+		s = plzig_replace_all(s, path, "<data directory>");
 
 	initStringInfo(&b);
 	p = s;
@@ -640,17 +875,28 @@ plzig_format_output(const char *raw, int rawlen, const char *builddir,
 	while (b.len > 0 && isspace((unsigned char) b.data[b.len - 1]))
 		b.data[--b.len] = '\0';
 
+	for (i = 0; i < b.len; i++)
+	{
+		unsigned char c = (unsigned char) b.data[i];
+
+		if ((c < 0x20 && c != '\n' && c != '\t') || c == 0x7f)
+			b.data[i] = '?';
+	}
 	if (!pg_verifymbstr(b.data, b.len, true))
 	{
 		for (i = 0; i < b.len; i++)
-		{
-			unsigned char c = (unsigned char) b.data[i];
-
-			if (c >= 0x80 || (c < 0x20 && c != '\n' && c != '\t'))
+			if ((unsigned char) b.data[i] >= 0x80)
 				b.data[i] = '?';
-		}
 	}
-	return b.data;
+
+	initStringInfo(&out);
+	for (i = 0; i < b.len; i++)
+	{
+		appendStringInfoChar(&out, b.data[i]);
+		if (b.data[i] == '\n')
+			appendStringInfoString(&out, "  ");
+	}
+	return out.data;
 }
 
 /* ---------------------------------------------------------------------
@@ -1055,27 +1301,121 @@ plzig_sandbox_mode(void)
 	return PLZIG_SANDBOX_REQUIRE;	/* keep compiler quiet */
 }
 
+/*
+ * Append to buf what the compiler sandbox lacks; nothing if it is complete.
+ * abi: Landlock ABI in use (> 0), or the probe's negative errno, or 0 for
+ * "available but not applied".  seccomp: 0 = in use, negative errno from the
+ * probe, or 1 for "available but not installed".
+ */
+static void
+plzig_sandbox_missing(StringInfo buf, int abi, int seccomp)
+{
+	if (abi < 0)
+		appendStringInfo(buf, "Landlock is not available (landlock_create_ruleset returned %d): no filesystem confinement",
+						 abi);
+	else if (abi == 0)
+		appendStringInfoString(buf, "Landlock was not applied: no filesystem confinement");
+	else
+	{
+		const char *gaps[8];
+		int			n = 0;
+		int			i;
+
+		if (abi < 3)
+			gaps[n++] = "file truncation";
+		if (abi < 4)
+			gaps[n++] = "TCP";
+		if (abi < 5)
+			gaps[n++] = "device ioctl";
+		if (abi < 6)
+			gaps[n++] = "signals and abstract UNIX sockets";
+		if (abi < 9)
+			gaps[n++] = "pathname UNIX sockets";
+		if (abi < 10)
+			gaps[n++] = "UDP";
+		if (n > 0)
+		{
+			appendStringInfo(buf, "Landlock ABI %d lacks restrictions on ", abi);
+			for (i = 0; i < n; i++)
+				appendStringInfo(buf, "%s%s",
+								 i == 0 ? "" : i == n - 1 ? " and " : ", ", gaps[i]);
+		}
+	}
+
+	if (seccomp != 0)
+	{
+		if (buf->len > 0)
+			appendStringInfoString(buf, "; ");
+		if (seccomp == -ENOSYS)
+			appendStringInfoString(buf, "no seccomp filter (not supported on this architecture)");
+		else if (seccomp > 0)
+			appendStringInfoString(buf, "the seccomp filter was not installed");
+		else
+		{
+			errno = -seccomp;
+			appendStringInfo(buf, "no seccomp filter (the kernel refused filter mode: %m)");
+		}
+	}
+}
+
 static void
 plzig_setup_sandbox(PlzigSandbox *sb, const char *builddir, const char *zigcache,
 					const char *validator, const char *zigbin, const char *ziglib)
 {
 	memset(sb, 0, sizeof(*sb));
 	sb->mode = plzig_sandbox_mode();
-	sb->landlock_abi = (sb->mode == PLZIG_SANDBOX_OFF) ? 0 : plzig_landlock_probe();
-
-	if (sb->mode == PLZIG_SANDBOX_REQUIRE && sb->landlock_abi <= 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("PL/Zig: Landlock is not available, and plzig.compiler_sandbox = require"),
-				 errdetail("landlock_create_ruleset returned %d; functions whose modules are already cached still run.",
-						   sb->landlock_abi),
-				 errhint("An administrator can set plzig.compiler_sandbox = try in postgresql.conf to compile without confinement; the compiler then runs with the full rights of the server's operating-system user.")));
-	if (sb->mode == PLZIG_SANDBOX_TRY && sb->landlock_abi <= 0 && !plzig_sandbox_logged)
+	if (sb->mode == PLZIG_SANDBOX_OFF)
 	{
-		ereport(LOG,
-				(errmsg("PL/Zig: Landlock is not available (landlock_create_ruleset returned %d); the compiler runs without filesystem confinement",
-						sb->landlock_abi)));
-		plzig_sandbox_logged = true;
+		sb->landlock_abi = 0;
+		sb->seccomp = -EPERM;	/* not used */
+	}
+	else
+	{
+		StringInfoData missing;
+
+		sb->landlock_abi = plzig_landlock_probe();
+		sb->seccomp = plzig_seccomp_probe();
+		initStringInfo(&missing);
+		plzig_sandbox_missing(&missing, sb->landlock_abi, sb->seccomp);
+
+		/* require: Landlock ABI >= 6 and the seccomp filter, nothing less */
+		if (sb->mode == PLZIG_SANDBOX_REQUIRE &&
+			(sb->landlock_abi < PLZIG_LANDLOCK_MIN_REQUIRED_ABI || sb->seccomp != 0))
+		{
+			const char *hint = sb->landlock_abi <= 0 ?
+				"An administrator can set plzig.compiler_sandbox = try in postgresql.conf to compile with only the protections that are available; without Landlock the compiler can read and write every file the server's operating-system user can." :
+				"An administrator can set plzig.compiler_sandbox = try in postgresql.conf to compile with only the protections that are available.";
+
+			if (sb->landlock_abi <= 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("PL/Zig: Landlock is not available, and plzig.compiler_sandbox = require"),
+						 errdetail("Missing: %s. Landlock ABI %d or later and the seccomp filter are required; functions whose modules are already cached still run.",
+								   missing.data, PLZIG_LANDLOCK_MIN_REQUIRED_ABI),
+						 errhint("%s", hint)));
+			if (sb->landlock_abi < PLZIG_LANDLOCK_MIN_REQUIRED_ABI)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("PL/Zig: Landlock ABI %d is too old for plzig.compiler_sandbox = require",
+								sb->landlock_abi),
+						 errdetail("Missing: %s. Landlock ABI %d or later and the seccomp filter are required; functions whose modules are already cached still run.",
+								   missing.data, PLZIG_LANDLOCK_MIN_REQUIRED_ABI),
+						 errhint("%s", hint)));
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("PL/Zig: the seccomp filter is not available, and plzig.compiler_sandbox = require"),
+					 errdetail("Missing: %s. Landlock ABI %d or later and the seccomp filter are required; functions whose modules are already cached still run.",
+							   missing.data, PLZIG_LANDLOCK_MIN_REQUIRED_ABI),
+					 errhint("%s", hint)));
+		}
+		if (sb->mode == PLZIG_SANDBOX_TRY && missing.len > 0 && !plzig_sandbox_logged)
+		{
+			ereport(LOG,
+					(errmsg("PL/Zig: the compiler sandbox is incomplete, compiling anyway because plzig.compiler_sandbox = try; missing: %s",
+							missing.data)));
+			plzig_sandbox_logged = true;
+		}
+		pfree(missing.data);
 	}
 
 	/* executables: rules on the files themselves; the Zig lib: read only */
@@ -1107,18 +1447,45 @@ plzig_setup_sandbox(PlzigSandbox *sb, const char *builddir, const char *zigcache
 	}
 }
 
+/*
+ * Remember how the last child was confined, for plzig_sandbox_status():
+ * "enforced" = what require insists on (Landlock >= ABI 6 and seccomp),
+ * "partial" = something was applied, "none", or "off".
+ */
 static void
 plzig_record_sandbox(const PlzigSpawnResult *res, const PlzigSandbox *sb)
 {
-	if (res->sandboxed)
-		snprintf(plzig_sandbox_status, sizeof(plzig_sandbox_status),
-				 "enforced (landlock ABI %d)", res->landlock_abi);
-	else if (sb->mode == PLZIG_SANDBOX_OFF)
+	StringInfoData missing;
+	const char *state;
+
+	if (sb->mode == PLZIG_SANDBOX_OFF)
+	{
 		snprintf(plzig_sandbox_status, sizeof(plzig_sandbox_status),
 				 "off (plzig.compiler_sandbox = off)");
+		return;
+	}
+	initStringInfo(&missing);
+	plzig_sandbox_missing(&missing,
+						  res->sandboxed ? res->landlock_abi :
+						  (sb->landlock_abi < 0 ? sb->landlock_abi : 0),
+						  res->seccomp ? 0 : (sb->seccomp < 0 ? sb->seccomp : 1));
+	if (res->sandboxed && res->landlock_abi >= PLZIG_LANDLOCK_MIN_REQUIRED_ABI && res->seccomp)
+		state = "enforced";
+	else if (res->sandboxed || res->seccomp)
+		state = "partial";
+	else
+		state = "none";
+	if (res->sandboxed)
+		snprintf(plzig_sandbox_status, sizeof(plzig_sandbox_status),
+				 "%s (landlock ABI %d, %s%s%s)", state, res->landlock_abi,
+				 res->seccomp ? "seccomp" : "no seccomp",
+				 missing.len > 0 ? "; missing: " : "", missing.data);
 	else
 		snprintf(plzig_sandbox_status, sizeof(plzig_sandbox_status),
-				 "unavailable (landlock_create_ruleset returned %d)", sb->landlock_abi);
+				 "%s (no landlock, %s%s%s)", state,
+				 res->seccomp ? "seccomp" : "no seccomp",
+				 missing.len > 0 ? "; missing: " : "", missing.data);
+	pfree(missing.data);
 }
 
 /*
@@ -1209,12 +1576,32 @@ plzig_compile(const char *root, const char *zigcache, const char *src, size_t sr
 	need_version = plzig_check_toolchain(zigbin, ziglib);
 	plzig_path(validator, "%s/plzig/plzig-validate", pkglib_path);
 
-	plzig_path(builddir, "%s/%s%d.%u", root, PLZIG_BUILD_PREFIX, MyProcPid,
-			   ++plzig_build_counter);
-	if (mkdir(builddir, S_IRWXU) != 0)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not create directory \"%s\": %m", builddir)));
+	/*
+	 * pgsql_tmp.build.<pid>.<counter>.<random>: the random part makes a
+	 * name left behind by a dead backend whose pid was reused harmless, and
+	 * on the off chance that the name exists anyway another one is drawn.
+	 */
+	for (i = 0;; i++)
+	{
+		uint8		rnd[8];
+		char		rhex[17];
+
+		if (!pg_strong_random(rnd, sizeof(rnd)))
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("PL/Zig: could not generate random bytes")));
+		plzig_hex(rnd, sizeof(rnd), rhex);
+		plzig_path(builddir, "%s/%s%d.%u.%s", root, PLZIG_BUILD_PREFIX, MyProcPid,
+				   ++plzig_build_counter, rhex);
+		if (mkdir(builddir, S_IRWXU) == 0)
+			break;
+		if (errno != EEXIST || i >= 10)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not create directory \"%s\": %m",
+							plzig_display_path(builddir)),
+					 errdetail_log("Full path: \"%s\".", builddir)));
+	}
 	strlcpy(plzig_current_build_dir, builddir, sizeof(plzig_current_build_dir));
 
 	PG_TRY();
@@ -1311,11 +1698,12 @@ plzig_compile(const char *root, const char *zigcache, const char *src, size_t sr
 
 		/* 3. collect the module */
 		plzig_path(path, "%s/out.wasm", builddir);
-		wasm = plzig_read_file(path, PLZIG_MAX_WASM_SIZE, &len, false, false);
+		wasm = plzig_read_file(path, (size_t) plzig_max_module_size * 1024, &len,
+							   false, PLZIG_FILE_COMPILED);
 	}
 	PG_FINALLY();
 	{
-		plzig_rmtree(builddir, 0);
+		plzig_rmtree(builddir, WARNING);
 		plzig_current_build_dir[0] = '\0';
 	}
 	PG_END_TRY();
@@ -1324,12 +1712,189 @@ plzig_compile(const char *root, const char *zigcache, const char *src, size_t sr
 	return wasm;
 }
 
+/* ---------------------------------------------------------------------
+ * Module cache
+ * ---------------------------------------------------------------------
+ */
+#define PLZIG_CACHE_FILE_MODULE	1	/* <64 hex>.wasm */
+#define PLZIG_CACHE_FILE_TEMP	2	/* <64 hex>.wasm.tmp.<pid> */
+
+/* Which kind of cache file is `name`?  0 = not one of ours: never touched. */
+static int
+plzig_cache_file_kind(const char *name)
+{
+	int			i;
+
+	for (i = 0; i < 64; i++)
+		if (!((name[i] >= '0' && name[i] <= '9') || (name[i] >= 'a' && name[i] <= 'f')))
+			return 0;
+	if (strcmp(name + 64, ".wasm") == 0)
+		return PLZIG_CACHE_FILE_MODULE;
+	if (strncmp(name + 64, ".wasm.tmp.", 10) == 0 && name[74] != '\0')
+	{
+		for (i = 74; name[i] != '\0'; i++)
+			if (!isdigit((unsigned char) name[i]) || i >= 74 + 10)
+				return 0;
+		return PLZIG_CACHE_FILE_TEMP;
+	}
+	return 0;
+}
+
+typedef struct PlzigCacheEntry
+{
+	char		name[72];		/* 64 hex + ".wasm" */
+	struct timespec mtime;
+	uint64		size;
+} PlzigCacheEntry;
+
+static int
+plzig_cache_entry_cmp(const void *a, const void *b)
+{
+	const PlzigCacheEntry *x = (const PlzigCacheEntry *) a;
+	const PlzigCacheEntry *y = (const PlzigCacheEntry *) b;
+
+	if (x->mtime.tv_sec != y->mtime.tv_sec)
+		return x->mtime.tv_sec < y->mtime.tv_sec ? -1 : 1;
+	if (x->mtime.tv_nsec != y->mtime.tv_nsec)
+		return x->mtime.tv_nsec < y->mtime.tv_nsec ? -1 : 1;
+	return strcmp(x->name, y->name);
+}
+
 /*
- * Return the compiled module for src (palloc'd), compiling it if it is not
- * in the cache.
+ * Cache maintenance, called with the compile lock held.  Only regular files
+ * directly in cache/ whose names match the cache patterns are considered;
+ * anything else is left alone.
+ *
+ *  - Temporary files (<key>.wasm.tmp.<pid>) are always removed: one exists
+ *    only while its writer holds the compile lock, so with the lock held
+ *    every one we see is a leftover of a failed or killed writer.
+ *  - clear_all: every module is removed (plzig_cache_clear()).
+ *  - Otherwise modules are evicted, least recently used (oldest mtime)
+ *    first, until `incoming` more bytes fit in plzig.cache_size_limit.
+ *
+ * Eviction is safe: the cache is content-addressed and a miss recompiles;
+ * a backend that already read or loaded a module is not affected by its
+ * removal.  Returns the number of files removed.
+ */
+static int64
+plzig_cache_maintain(const char *cache, uint64 incoming, bool clear_all)
+{
+	const char *shown = plzig_display_path(cache);
+	DIR		   *dir;
+	struct dirent *de;
+	PlzigCacheEntry *ents = NULL;
+	int			nents = 0;
+	int			maxents = 0;
+	uint64		total = 0;
+	uint64		limit = (uint64) plzig_cache_size_limit * 1024 * 1024;
+	int64		removed = 0;
+	int			dfd;
+	int			i;
+
+	dir = AllocateDir(cache);
+	if (dir == NULL)
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open directory \"%s\": %m", shown),
+				 errdetail_log("Full path: \"%s\".", cache)));
+	dfd = dirfd(dir);
+	while ((de = ReadDirExtended(dir, shown, WARNING)) != NULL)
+	{
+		int			kind = plzig_cache_file_kind(de->d_name);
+		struct stat st;
+
+		if (kind == 0)
+			continue;
+		if (fstatat(dfd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0 ||
+			!S_ISREG(st.st_mode))
+			continue;
+		if (kind == PLZIG_CACHE_FILE_TEMP || clear_all)
+		{
+			if (unlinkat(dfd, de->d_name, 0) == 0)
+				removed++;
+			else if (errno != ENOENT)
+				ereport(WARNING,
+						(errcode_for_file_access(),
+						 errmsg("could not remove file \"%s/%s\": %m", shown, de->d_name)));
+			continue;
+		}
+		if (nents >= maxents)
+		{
+			maxents = maxents == 0 ? 256 : maxents * 2;
+			ents = ents == NULL ? palloc(sizeof(PlzigCacheEntry) * maxents) :
+				repalloc(ents, sizeof(PlzigCacheEntry) * maxents);
+		}
+		strlcpy(ents[nents].name, de->d_name, sizeof(ents[nents].name));
+		ents[nents].mtime = st.st_mtim;
+		/* sparse or not, count what the file could occupy */
+		ents[nents].size = Max((uint64) st.st_size, (uint64) st.st_blocks * 512);
+		total += ents[nents].size;
+		nents++;
+	}
+
+	if (!clear_all && total + incoming > limit && nents > 0)
+	{
+		qsort(ents, nents, sizeof(PlzigCacheEntry), plzig_cache_entry_cmp);
+		for (i = 0; i < nents && total + incoming > limit; i++)
+		{
+			struct stat st;
+
+			/* still the regular file we saw? */
+			if (fstatat(dfd, ents[i].name, &st, AT_SYMLINK_NOFOLLOW) != 0 ||
+				!S_ISREG(st.st_mode))
+				continue;
+			if (unlinkat(dfd, ents[i].name, 0) == 0)
+			{
+				removed++;
+				total -= ents[i].size;
+			}
+			else if (errno != ENOENT)
+				ereport(WARNING,
+						(errcode_for_file_access(),
+						 errmsg("could not remove file \"%s/%s\": %m", shown, ents[i].name)));
+		}
+	}
+	FreeDir(dir);
+	if (ents)
+		pfree(ents);
+	return removed;
+}
+
+/*
+ * Write a module to its temp name, fsync, and rename it into place; the
+ * temp file is removed again on every failure.
+ */
+static void
+plzig_cache_install(const char *tmp, const char *final, const char *wasm, size_t len)
+{
+	PG_TRY();
+	{
+		plzig_write_file(tmp, wasm, len, true);
+		/* relative paths: fd.c's messages must not show $PGDATA */
+		if (durable_rename(plzig_display_path(tmp), plzig_display_path(final), ERROR) != 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not rename file \"%s\": %m", plzig_display_path(tmp))));
+	}
+	PG_CATCH();
+	{
+		(void) unlink(tmp);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+}
+
+/*
+ * Return the compiled module for src (palloc'd).
+ *
+ * use_cache: look it up in the content-addressed cache and store it there
+ * after compiling (functions).  Without it (DO blocks) the module is always
+ * compiled, returned straight from the build directory and never written to
+ * the cache: a DO block is run once, and caching it would let every
+ * distinct block leave a file behind.
  */
 char *
-plzig_get_wasm(const char *src, size_t srclen, uint32 *wasm_len)
+plzig_get_wasm(const char *src, size_t srclen, uint32 *wasm_len, bool use_cache)
 {
 	char		root[MAXPGPATH];
 	char		cache[MAXPGPATH];
@@ -1337,8 +1902,8 @@ plzig_get_wasm(const char *src, size_t srclen, uint32 *wasm_len)
 	char		key[65];
 	char		final[MAXPGPATH];
 	char		tmp[MAXPGPATH];
-	char	   *wasm;
-	size_t		len;
+	char	   *wasm = NULL;
+	size_t		len = 0;
 	int			lockfd;
 
 	if (!plzig_exit_registered)
@@ -1352,46 +1917,46 @@ plzig_get_wasm(const char *src, size_t srclen, uint32 *wasm_len)
 	plzig_dirs(root, cache, zigcache);
 	plzig_path(final, "%s/%s.wasm", cache, key);
 
-	wasm = plzig_read_file(final, PLZIG_MAX_WASM_SIZE, &len, true, true);
-	if (wasm != NULL)
+	if (use_cache)
 	{
-		*wasm_len = (uint32) len;
-		return wasm;
+		wasm = plzig_read_file(final, PLZIG_MAX_WASM_SIZE, &len, true, PLZIG_FILE_CACHED);
+		if (wasm != NULL)
+		{
+			*wasm_len = (uint32) len;
+			return wasm;
+		}
 	}
 
 	lockfd = plzig_lock(root);
 	PG_TRY();
 	{
 		/* somebody else may have compiled it while we waited */
-		wasm = plzig_read_file(final, PLZIG_MAX_WASM_SIZE, &len, true, true);
+		if (use_cache)
+			wasm = plzig_read_file(final, PLZIG_MAX_WASM_SIZE, &len, true,
+								   PLZIG_FILE_CACHED);
 		if (wasm == NULL)
 		{
 			uint32		wlen;
-			PlzigModule *mod;
 
-			if (!plzig_swept)
-			{
-				plzig_sweep_stale(root, cache);
-				plzig_swept = true;
-			}
+			plzig_sweep_build_dirs(root);
 
 			wasm = plzig_compile(root, zigcache, src, srclen, &wlen);
 			len = wlen;
 
-			/* load-validate (imports, exports, ABI version) before caching */
-			mod = plzig_module_load(wasm, wlen);
-			plzig_module_unload(mod);
+			if (use_cache)
+			{
+				PlzigModule *mod;
 
-			plzig_path(tmp, "%s/%s.wasm.tmp.%d", cache, key, MyProcPid);
-			if (unlink(tmp) != 0 && errno != ENOENT)
-				ereport(ERROR,
-						(errcode_for_file_access(),
-						 errmsg("could not remove file \"%s\": %m", tmp)));
-			plzig_write_file(tmp, wasm, len, true);
-			if (durable_rename(tmp, final, ERROR) != 0)
-				ereport(ERROR,
-						(errcode_for_file_access(),
-						 errmsg("could not rename file \"%s\": %m", tmp)));
+				/* load-validate (imports, exports, ABI version) before caching */
+				mod = plzig_module_load(wasm, wlen);
+				plzig_module_unload(mod);
+
+				/* make room (and drop stale temp files) before writing */
+				(void) plzig_cache_maintain(cache, TYPEALIGN(4096, (uint64) len), false);
+
+				plzig_path(tmp, "%s/%s.wasm.tmp.%d", cache, key, MyProcPid);
+				plzig_cache_install(tmp, final, wasm, len);
+			}
 		}
 	}
 	PG_FINALLY();
@@ -1402,4 +1967,31 @@ plzig_get_wasm(const char *src, size_t srclen, uint32 *wasm_len)
 
 	*wasm_len = (uint32) len;
 	return wasm;
+}
+
+/*
+ * plzig_cache_clear(): remove every module (and leftover temp file) from the
+ * cache, under the compile lock.  Returns the number of files removed.
+ */
+int64
+plzig_cache_clear_files(void)
+{
+	char		root[MAXPGPATH];
+	char		cache[MAXPGPATH];
+	char		zigcache[MAXPGPATH];
+	int64		removed = 0;
+	int			lockfd;
+
+	plzig_dirs(root, cache, zigcache);
+	lockfd = plzig_lock(root);
+	PG_TRY();
+	{
+		removed = plzig_cache_maintain(cache, 0, true);
+	}
+	PG_FINALLY();
+	{
+		CloseTransientFile(lockfd);
+	}
+	PG_END_TRY();
+	return removed;
 }

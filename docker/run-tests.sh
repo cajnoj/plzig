@@ -7,9 +7,11 @@
 # Environment:
 #   PLZIG_PARALLEL=1           build/test versions concurrently
 #
-# Each version runs twice: the full suite (which needs Landlock, since
-# plzig.compiler_sandbox defaults to require), and the no-Landlock checks in
-# a container whose seccomp profile blocks the Landlock syscalls.
+# Each version runs three times: the full suite (which needs Landlock and
+# the seccomp filter, since plzig.compiler_sandbox defaults to require), the
+# no-Landlock checks in a container whose seccomp profile blocks the Landlock
+# syscalls, and the no-seccomp checks in a container whose profile makes
+# installing a seccomp filter fail.
 #
 # Prints a per-version PASS/FAIL summary, including whether the compiler was
 # Landlock-confined; exits non-zero on any failure.
@@ -35,6 +37,7 @@ run_one() {
                 -t "$tag" . ; then
             echo "RESULT: FAIL (build)"
             echo "NOLANDLOCK: FAIL (build)"
+            echo "NOSECCOMP: FAIL (build)"
             return 1
         fi
         echo "### testing"
@@ -43,6 +46,10 @@ run_one() {
         docker run --rm -e PLZIG_NO_LANDLOCK=1 \
             --security-opt "seccomp=$PWD/docker/seccomp-no-landlock.json" "$tag" |
             sed 's/^RESULT:/NOLANDLOCK:/'
+        echo "### testing without seccomp filters"
+        docker run --rm -e PLZIG_NO_SECCOMP=1 \
+            --security-opt "seccomp=$PWD/docker/seccomp-no-seccomp.json" "$tag" |
+            sed 's/^RESULT:/NOSECCOMP:/'
     } >"$log" 2>&1
 }
 
@@ -69,15 +76,19 @@ for v in "${versions[@]}"; do
     log="$logdir/$v.log"
     result=$(grep -a '^RESULT:' "$log" | tail -1)
     nolandlock=$(grep -a '^NOLANDLOCK:' "$log" | tail -1)
+    noseccomp=$(grep -a '^NOSECCOMP:' "$log" | tail -1)
     counts=$(grep -aoE '(All [0-9]+ tests passed|[0-9]+ of [0-9]+ tests failed)' "$log" | tail -1)
     [ -z "$result" ] && result="RESULT: FAIL (no result line)"
     [ -z "$nolandlock" ] && nolandlock="NOLANDLOCK: FAIL (no result line)"
+    [ -z "$noseccomp" ] && noseccomp="NOSECCOMP: FAIL (no result line)"
     if [ "${status[$v]}" != 0 ] || [[ "$result" != "RESULT: PASS"* ]] ||
-       [[ "$nolandlock" != "NOLANDLOCK: PASS"* ]]; then
+       [[ "$nolandlock" != "NOLANDLOCK: PASS"* ]] ||
+       [[ "$noseccomp" != "NOSECCOMP: PASS"* ]]; then
         fail=1
     fi
     printf '%-8s %s  %s\n' "$v" "${result#RESULT: }" "$counts"
     printf '%-8s no-Landlock run: %s\n' "" "${nolandlock#NOLANDLOCK: }"
+    printf '%-8s no-seccomp run: %s\n' "" "${noseccomp#NOSECCOMP: }"
 done
 echo "logs: $logdir/<version>.log"
 exit $fail

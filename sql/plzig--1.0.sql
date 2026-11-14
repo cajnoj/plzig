@@ -25,8 +25,13 @@ CREATE FUNCTION plzig_sandbox_status() RETURNS text
     STRICT VOLATILE AS 'MODULE_PATHNAME' LANGUAGE C;
 REVOKE ALL ON FUNCTION plzig_sandbox_status() FROM PUBLIC;
 
+CREATE FUNCTION plzig_cache_clear() RETURNS bigint
+    STRICT VOLATILE AS 'MODULE_PATHNAME' LANGUAGE C;
+REVOKE ALL ON FUNCTION plzig_cache_clear() FROM PUBLIC;
+
 COMMENT ON LANGUAGE plzig IS 'PL/Zig procedural language (sandboxed WebAssembly)';
 COMMENT ON FUNCTION plzig_call_handler() IS 'PL/Zig call handler';
 COMMENT ON FUNCTION plzig_inline_handler(internal) IS 'PL/Zig anonymous code block handler';
 COMMENT ON FUNCTION plzig_validator(oid) IS 'PL/Zig function validator';
 COMMENT ON FUNCTION plzig_sandbox_status() IS 'How the last PL/Zig compilation in this session was confined';
+COMMENT ON FUNCTION plzig_cache_clear() IS 'Remove all compiled PL/Zig modules from the cache; returns the number of files removed';

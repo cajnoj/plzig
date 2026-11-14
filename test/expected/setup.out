@@ -51,10 +51,16 @@ DROP FUNCTION regress_plzig_open.ok();
 DO $$ $$ LANGUAGE plzig;
 ERROR:  permission denied for language plzig
 RESET ROLE;
--- the diagnostics function is not executable by PUBLIC
+-- the diagnostics and cache functions are not executable by PUBLIC
 SET ROLE regress_plzig_nobody;
 SELECT plzig_sandbox_status();
 ERROR:  permission denied for function plzig_sandbox_status
+SELECT plzig_cache_clear();
+ERROR:  permission denied for function plzig_cache_clear
+RESET ROLE;
+SET ROLE regress_plzig_dev;
+SELECT plzig_cache_clear();
+ERROR:  permission denied for function plzig_cache_clear
 RESET ROLE;
 -- GUCs exist, and the security-relevant ones cannot be changed by ordinary users
 -- (the toolchain paths are site-specific; zig_path must be set for this suite)
@@ -64,18 +70,21 @@ SELECT name,
             ELSE setting END AS setting,
        unit, context, boot_val
   FROM pg_settings WHERE name LIKE 'plzig.%' ORDER BY name;
-            name            | setting | unit |  context  | boot_val 
-----------------------------+---------+------+-----------+----------
- plzig.compile_memory_limit | 4096    | MB   | superuser | 4096
- plzig.compile_timeout      | 300000  | ms   | superuser | 300000
- plzig.compiler_sandbox     | require |      | sighup    | require
- plzig.instance_cache_size  | 64      |      | superuser | 64
- plzig.max_memory           | 64      | MB   | superuser | 64
- plzig.max_source_size      | 1024    | kB   | superuser | 1024
- plzig.zig_lib_dir          | (empty) |      | sighup    | 
- plzig.zig_path             | (set)   |      | sighup    | 
- plzig.zig_sha256           | (empty) |      | sighup    | 
-(9 rows)
+              name               | setting | unit |  context  | boot_val 
+---------------------------------+---------+------+-----------+----------
+ plzig.cache_size_limit          | 256     | MB   | sighup    | 256
+ plzig.compile_memory_limit      | 4096    | MB   | superuser | 4096
+ plzig.compile_timeout           | 30000   | ms   | superuser | 30000
+ plzig.compiler_sandbox          | require |      | sighup    | require
+ plzig.instance_cache_max_memory | 4096    | kB   | superuser | 4096
+ plzig.instance_cache_size       | 64      |      | superuser | 64
+ plzig.max_memory                | 64      | MB   | superuser | 64
+ plzig.max_module_size           | 2048    | kB   | superuser | 2048
+ plzig.max_source_size           | 1024    | kB   | superuser | 1024
+ plzig.zig_lib_dir               | (empty) |      | sighup    | 
+ plzig.zig_path                  | (set)   |      | sighup    | 
+ plzig.zig_sha256                | (empty) |      | sighup    | 
+(12 rows)
 
 SET ROLE regress_plzig_dev;
 SET plzig.max_memory = '512MB';
@@ -96,6 +105,12 @@ SET plzig.instance_cache_size = 1000;
 ERROR:  permission denied to set parameter "plzig.instance_cache_size"
 SET plzig.max_source_size = '3MB';
 ERROR:  permission denied to set parameter "plzig.max_source_size"
+SET plzig.max_module_size = '16MB';
+ERROR:  permission denied to set parameter "plzig.max_module_size"
+SET plzig.instance_cache_max_memory = '1GB';
+ERROR:  permission denied to set parameter "plzig.instance_cache_max_memory"
+SET plzig.cache_size_limit = '1TB';
+ERROR:  parameter "plzig.cache_size_limit" cannot be changed now
 RESET ROLE;
 -- the toolchain and sandbox settings are config-file only, even for superusers:
 -- not per session, role or database, not ALTER SYSTEM
@@ -107,6 +122,8 @@ SET plzig.zig_sha256 = '';
 ERROR:  parameter "plzig.zig_sha256" cannot be changed now
 SET plzig.compiler_sandbox = try;
 ERROR:  parameter "plzig.compiler_sandbox" cannot be changed now
+SET plzig.cache_size_limit = '1TB';
+ERROR:  parameter "plzig.cache_size_limit" cannot be changed now
 SELECT set_config('plzig.zig_path', '/bin/sh', false);
 ERROR:  parameter "plzig.zig_path" cannot be changed now
 ALTER ROLE regress_plzig_dev SET plzig.zig_path = '/bin/sh';
@@ -130,6 +147,10 @@ ALTER SYSTEM SET plzig.zig_sha256 = '';
 ERROR:  parameter "plzig.zig_sha256" cannot be changed
 ALTER SYSTEM SET plzig.compiler_sandbox = off;
 ERROR:  parameter "plzig.compiler_sandbox" cannot be changed
+ALTER SYSTEM SET plzig.cache_size_limit = '1TB';
+ERROR:  parameter "plzig.cache_size_limit" cannot be changed
+ALTER ROLE regress_plzig_dev SET plzig.cache_size_limit = '1TB';
+ERROR:  parameter "plzig.cache_size_limit" cannot be changed now
 SELECT count(*) AS role_db_settings FROM pg_db_role_setting
  WHERE array_to_string(setconfig, ',') LIKE '%plzig.%';
  role_db_settings 

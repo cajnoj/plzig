@@ -31,9 +31,13 @@ DROP FUNCTION regress_plzig_open.ok();
 DO $$ $$ LANGUAGE plzig;
 RESET ROLE;
 
--- the diagnostics function is not executable by PUBLIC
+-- the diagnostics and cache functions are not executable by PUBLIC
 SET ROLE regress_plzig_nobody;
 SELECT plzig_sandbox_status();
+SELECT plzig_cache_clear();
+RESET ROLE;
+SET ROLE regress_plzig_dev;
+SELECT plzig_cache_clear();
 RESET ROLE;
 
 -- GUCs exist, and the security-relevant ones cannot be changed by ordinary users
@@ -54,6 +58,9 @@ SET plzig.zig_sha256 = '';
 SET plzig.compile_memory_limit = 0;
 SET plzig.instance_cache_size = 1000;
 SET plzig.max_source_size = '3MB';
+SET plzig.max_module_size = '16MB';
+SET plzig.instance_cache_max_memory = '1GB';
+SET plzig.cache_size_limit = '1TB';
 RESET ROLE;
 
 -- the toolchain and sandbox settings are config-file only, even for superusers:
@@ -62,6 +69,7 @@ SET plzig.zig_path = '/bin/sh';
 SET plzig.zig_lib_dir = '/';
 SET plzig.zig_sha256 = '';
 SET plzig.compiler_sandbox = try;
+SET plzig.cache_size_limit = '1TB';
 SELECT set_config('plzig.zig_path', '/bin/sh', false);
 ALTER ROLE regress_plzig_dev SET plzig.zig_path = '/bin/sh';
 ALTER ROLE regress_plzig_dev SET plzig.zig_lib_dir = '/';
@@ -74,6 +82,8 @@ ALTER SYSTEM SET plzig.zig_path = '/bin/sh';
 ALTER SYSTEM SET plzig.zig_lib_dir = '/';
 ALTER SYSTEM SET plzig.zig_sha256 = '';
 ALTER SYSTEM SET plzig.compiler_sandbox = off;
+ALTER SYSTEM SET plzig.cache_size_limit = '1TB';
+ALTER ROLE regress_plzig_dev SET plzig.cache_size_limit = '1TB';
 SELECT count(*) AS role_db_settings FROM pg_db_role_setting
  WHERE array_to_string(setconfig, ',') LIKE '%plzig.%';
 

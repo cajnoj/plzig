@@ -888,3 +888,65 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
     - The setting is config-file only like the toolchain paths
       (`GUC_DISALLOW_IN_AUTO_FILE` added, so `ALTER SYSTEM` is refused too);
       it can change only by editing `postgresql.conf` and reloading.
+22. **Hardening round after an independent review (2026-11-14).**
+    - *Module cache bounded.* `DO` blocks are compiled, run from the build
+      directory and never written to the cache (`plzig_get_wasm(...,
+      use_cache)`). New `plzig.max_module_size` (superuser, default 2 MB,
+      16 kB–16 MB; own error, no path) and `plzig.cache_size_limit`
+      (config-file only, `GUC_DISALLOW_IN_AUTO_FILE`, default 256 MB, min
+      64 MB). Before a module is stored, under the compile lock, every
+      `<key>.wasm.tmp.<pid>` is removed (one exists only while its writer
+      holds the lock) and modules are evicted oldest-mtime first until the
+      new one fits; a cache hit refreshes the mtime at most once a minute.
+      Only regular files directly in `cache/` matching `^[0-9a-f]{64}\.wasm$`
+      or the temp pattern are touched. New superuser-only
+      `plzig_cache_clear()` (EXECUTE revoked from PUBLIC; `sql/plzig--1.0.sql`
+      edited in place, no release yet). The temp file is unlinked on every
+      write/fsync/rename failure; `durable_rename` gets data-directory-
+      relative paths so fd.c's messages do not show `$PGDATA`.
+      `plzig.compile_timeout` default lowered from 300 s to 30 s (supersedes
+      the default in entry 8); the Docker suite passes with the default.
+    - *Sandbox: Landlock by ABI plus a seccomp filter.* Landlock now handles
+      `FS_RESOLVE_UNIX` (ABI 9) and `NET_BIND_UDP`/`NET_CONNECT_SEND_UDP`
+      (ABI 10), granted by no rule; ABIs 7 (audit flags) and 8 (TSYNC) add
+      no access rights. `FS_MAKE_SYM` was dropped from the read-write rule
+      (strace of cold, warm and failing compiles: Zig 0.17.1 creates no
+      symlinks; it needs create/remove of files and directories, truncate,
+      and cross-directory renames in its caches, i.e. REFER). A seccomp-bpf
+      deny filter (raw BPF, x86_64/aarch64 with an arch check, x32 and
+      foreign-arch calls denied) is installed after Landlock, before
+      `execve`; denied calls return EPERM, `clone3` ENOSYS, `kill`/`tkill`/
+      `tgkill`/`rt_(tg)sigqueueinfo` only towards the child's own pid. Zig
+      needed none of the denied calls. `require` now means Landlock ABI >= 6
+      **and** the filter (probed in the backend with a NULL program, which
+      fails with EFAULT exactly when filter mode is usable); the error names
+      what is missing. `try` applies what is available and logs once per
+      backend what is missing; `off` applies neither. There is no setting to
+      lower the minimum ABI. `plzig_sandbox_status()` reports
+      `enforced|partial|none (landlock ABI n|no landlock, seccomp|no
+      seccomp[; missing: ...])`. The Docker matrix gained a third container
+      per version whose profile makes `prctl(PR_SET_SECCOMP)` fail; it checks
+      the `require` refusal and shows what Landlock alone enforces.
+      (Supersedes the Landlock-only description in entries 9, 14 and 20.)
+    - *Recursive delete is descriptor-relative.* `openat(O_NOFOLLOW |
+      O_DIRECTORY)`, `fstat` + same `st_dev` as the top, `fdopendir`,
+      `unlinkat`, depth <= 64, external descriptors accounted with
+      `AcquireExternalFD`; no ERROR and no allocation while descriptors are
+      open, problems reported afterwards at WARNING (LOG in the exit
+      callback).
+    - *Build directories* are `pgsql_tmp.build.<pid>.<n>.<16 hex from
+      pg_strong_random>`; `EEXIST` draws a new name. Stale ones are swept by
+      every compilation, under the compile lock, regardless of pid
+      liveness: each compilation holds that lock from `mkdir` to removal, so
+      any other build directory seen while holding it is stale.
+    - *No data directory in client messages.* Paths under `$PGDATA` are
+      shown relative to it (the backend's cwd), the full path goes to
+      `errdetail_log`; compiler output additionally has the Zig cache and
+      data directory replaced.
+    - *Compiler output sanitised always*: C0 controls except `\n`/`\t`, and
+      DEL, become `?`; non-ASCII too if the encoding check fails;
+      continuation lines of the DETAIL are indented by two spaces.
+    - *Idle instances*: new `plzig.instance_cache_max_memory` (superuser,
+      default 4 MB): an instance whose linear memory exceeds it is destroyed
+      after the call instead of being cached.
+    - The validator is built with `-mcpu baseline`.

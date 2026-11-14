@@ -52,6 +52,9 @@ extern int	plzig_compile_memory_limit; /* MB, 0 = off */
 extern int	plzig_max_source_size;	/* kB */
 extern int	plzig_max_memory;		/* MB */
 extern int	plzig_instance_cache_size;
+extern int	plzig_instance_cache_max_memory;	/* kB */
+extern int	plzig_max_module_size;	/* kB */
+extern int	plzig_cache_size_limit; /* MB */
 
 /* ---------------------------------------------------------------------
  * Types (plzig_types.c)
@@ -119,8 +122,11 @@ extern char *plzig_generate_inline_source(const char *body, size_t *srclen);
  * Build pipeline (plzig_build.c)
  * ---------------------------------------------------------------------
  */
-extern char *plzig_get_wasm(const char *src, size_t srclen, uint32 *wasm_len);
+extern char *plzig_get_wasm(const char *src, size_t srclen, uint32 *wasm_len,
+							bool use_cache);
+extern int64 plzig_cache_clear_files(void);
 extern const char *plzig_sandbox_status_string(void);
+extern const char *plzig_display_path(const char *path);
 extern void plzig_build_atexit(void);
 
 /* ---------------------------------------------------------------------
@@ -133,6 +139,8 @@ typedef struct PlzigSandbox
 {
 	int			mode;			/* PlzigSandboxMode */
 	int			landlock_abi;	/* probed in the parent; <= 0 = unavailable */
+	int			seccomp;		/* probed in the parent: 0 = available, else
+								 * -errno (-ENOSYS: unsupported architecture) */
 	const char *rx_files[PLZIG_SANDBOX_MAX_PATHS];	/* single files: read + execute */
 	int			n_rx_files;
 	const char *ro_dirs[PLZIG_SANDBOX_MAX_PATHS];	/* read only, no exec */
@@ -151,6 +159,7 @@ typedef struct PlzigSpawnResult
 	bool		timed_out;
 	bool		sandboxed;		/* Landlock was applied in the child */
 	int			landlock_abi;
+	bool		seccomp;		/* the seccomp filter was installed */
 	StringInfoData output;		/* stdout+stderr, first PLZIG_MAX_OUTPUT bytes */
 } PlzigSpawnResult;
 
@@ -160,8 +169,14 @@ extern void plzig_spawn(const char *prog, char *const argv[], char *const envp[]
 						PlzigSpawnResult *res);
 extern void plzig_spawn_atexit(void);
 
+/* Landlock ABI that plzig.compiler_sandbox = require insists on */
+#define PLZIG_LANDLOCK_MIN_REQUIRED_ABI 6
+
 extern int	plzig_landlock_probe(void);
+extern int	plzig_seccomp_probe(void);
 extern int	plzig_sandbox_apply_in_child(const PlzigSandbox *sb, int *abi_used,
+										 char *errbuf, size_t errlen);
+extern int	plzig_seccomp_apply_in_child(const PlzigSandbox *sb,
 										 char *errbuf, size_t errlen);
 
 /* ---------------------------------------------------------------------
@@ -177,6 +192,7 @@ extern void plzig_module_unload(PlzigModule *mod);
 extern PlzigInstance *plzig_instance_create(PlzigModule *mod);
 extern void plzig_instance_destroy(PlzigInstance *inst);
 extern bool plzig_instance_current(PlzigInstance *inst);
+extern uint64 plzig_instance_memory_size(PlzigInstance *inst);
 
 extern Datum plzig_instance_call(PlzigInstance *inst, PlzigTypeInfo *argtypes,
 								 int nargs, NullableDatum *args,

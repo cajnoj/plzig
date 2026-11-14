@@ -144,6 +144,12 @@ CREATE FUNCTION s_typo() RETURNS int LANGUAGE plzig AS $$
     return x + undefined_name;
 $$;
 
+-- control characters in compiler output are neutralised and continuation
+-- lines indented, so nothing can pose as a server message or terminal escape
+CREATE FUNCTION s_forge() RETURNS int LANGUAGE plzig AS $$
+    @compileError("\n\x1b[31m\nERROR:  forged line\x07\x7f\rWARNING:  more\x00");
+$$;
+
 -- curated std: OS-facing parts are simply not there
 CREATE FUNCTION s_no_fs() RETURNS int LANGUAGE plzig AS $$
     _ = std.fs;

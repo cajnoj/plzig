@@ -37,11 +37,14 @@ char	   *plzig_zig_path = NULL;
 char	   *plzig_zig_lib_dir = NULL;
 char	   *plzig_zig_sha256 = NULL;
 char	   *plzig_compiler_sandbox = NULL;
-int			plzig_compile_timeout = 300000;
+int			plzig_compile_timeout = 30000;
 int			plzig_compile_memory_limit = 4096;
 int			plzig_max_source_size = 1024;
 int			plzig_max_memory = 64;
 int			plzig_instance_cache_size = 64;
+int			plzig_instance_cache_max_memory = 4096;
+int			plzig_max_module_size = 2048;
+int			plzig_cache_size_limit = 256;
 
 /* ---------------------------------------------------------------------
  * Function cache
@@ -84,6 +87,7 @@ PG_FUNCTION_INFO_V1(plzig_call_handler);
 PG_FUNCTION_INFO_V1(plzig_inline_handler);
 PG_FUNCTION_INFO_V1(plzig_validator);
 PG_FUNCTION_INFO_V1(plzig_sandbox_status);
+PG_FUNCTION_INFO_V1(plzig_cache_clear);
 
 void
 _PG_init(void)
@@ -125,7 +129,7 @@ _PG_init(void)
 	 * with anything but require, try or off.
 	 */
 	DefineCustomStringVariable("plzig.compiler_sandbox",
-							   "Landlock confinement of the compiler: require, try (if available), off.",
+							   "Confinement of the compiler (Landlock and seccomp): require, try (what is available), off.",
 							   NULL,
 							   &plzig_compiler_sandbox,
 							   "require",
@@ -136,7 +140,7 @@ _PG_init(void)
 							"Wall-clock limit for one compilation.",
 							NULL,
 							&plzig_compile_timeout,
-							300000, 100, 3600 * 1000,
+							30000, 100, 3600 * 1000,
 							PGC_SUSET,
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
@@ -171,6 +175,31 @@ _PG_init(void)
 							64, 0, 10000,
 							PGC_SUSET,
 							0,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("plzig.instance_cache_max_memory",
+							"Instances whose linear memory grew beyond this are not kept idle.",
+							NULL,
+							&plzig_instance_cache_max_memory,
+							4096, 0, 1023 * 1024,
+							PGC_SUSET,
+							GUC_UNIT_KB,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("plzig.max_module_size",
+							"Maximum size of a compiled PL/Zig module.",
+							NULL,
+							&plzig_max_module_size,
+							2048, 16, PLZIG_MAX_WASM_SIZE / 1024,
+							PGC_SUSET,
+							GUC_UNIT_KB,
+							NULL, NULL, NULL);
+	/* config-file only, like the toolchain settings */
+	DefineCustomIntVariable("plzig.cache_size_limit",
+							"Total size of the PL/Zig module cache; least recently used modules are evicted.",
+							NULL,
+							&plzig_cache_size_limit,
+							256, 64, 1024 * 1024,
+							PGC_SIGHUP,
+							GUC_UNIT_MB | GUC_DISALLOW_IN_AUTO_FILE,
 							NULL, NULL, NULL);
 #if PG_VERSION_NUM >= 150000
 	MarkGUCPrefixReserved("plzig");
@@ -261,7 +290,7 @@ plzig_function_build(Oid fn_oid, HeapTuple proctup)
 		plzig_check_signature(proctup, &sig);
 		body = plzig_get_body(proctup);
 		src = plzig_generate_source(&sig, body, &srclen);
-		wasm = plzig_get_wasm(src, srclen, &wasm_len);
+		wasm = plzig_get_wasm(src, srclen, &wasm_len, true);
 		fn->module = plzig_module_load(wasm, wasm_len);
 
 		old = MemoryContextSwitchTo(cxt);
@@ -445,7 +474,9 @@ plzig_function_execute(PlzigFunction *fn, FunctionCallInfo fcinfo)
 		if (fn->use_count == 0)
 			plzig_function_free(fn);
 	}
-	else if (fn->instance == NULL && plzig_instance_cache_size > 0)
+	else if (fn->instance == NULL && plzig_instance_cache_size > 0 &&
+			 plzig_instance_memory_size(inst) <=
+			 (uint64) plzig_instance_cache_max_memory * 1024)
 	{
 		fn->instance = inst;
 		dlist_push_head(&plzig_lru, &fn->lru_node);
@@ -494,7 +525,8 @@ plzig_inline_handler(PG_FUNCTION_ARGS)
 	ErrorContextCallback errcb;
 
 	src = plzig_generate_inline_source(codeblock->source_text, &srclen);
-	wasm = plzig_get_wasm(src, srclen, &wasm_len);
+	/* DO blocks are never cached: compiled, run once, discarded */
+	wasm = plzig_get_wasm(src, srclen, &wasm_len, false);
 
 	memset(&rettype, 0, sizeof(rettype));
 	rettype.typid = VOIDOID;
@@ -547,7 +579,7 @@ plzig_validator(PG_FUNCTION_ARGS)
 		size_t		srclen;
 		char	   *src = plzig_generate_source(&sig, body, &srclen);
 		uint32		wasm_len;
-		char	   *wasm = plzig_get_wasm(src, srclen, &wasm_len);
+		char	   *wasm = plzig_get_wasm(src, srclen, &wasm_len, true);
 		PlzigModule *mod = plzig_module_load(wasm, wasm_len);
 
 		plzig_module_unload(mod);
@@ -565,4 +597,16 @@ Datum
 plzig_sandbox_status(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_TEXT_P(cstring_to_text(plzig_sandbox_status_string()));
+}
+
+/*
+ * plzig_cache_clear(): empty the module cache (superuser only by default;
+ * EXECUTE is revoked from PUBLIC).  Returns the number of files removed.
+ * Functions already loaded in some backend keep running; everything else
+ * is recompiled on next use.
+ */
+Datum
+plzig_cache_clear(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64(plzig_cache_clear_files());
 }

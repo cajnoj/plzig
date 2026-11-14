@@ -6,6 +6,8 @@
 #
 # PLZIG_NO_LANDLOCK=1: the container was started with a seccomp profile that
 # blocks the Landlock syscalls; run only the checks for that situation.
+# PLZIG_NO_SECCOMP=1: likewise, with a profile that makes installing a
+# seccomp filter fail.
 set -u
 
 export PGDATA=/tmp/pgdata
@@ -30,6 +32,14 @@ if [ "${PLZIG_NO_LANDLOCK:-0}" = 1 ]; then
     pg_ctl -D "$PGDATA" -m fast stop >/dev/null
     if [ $rc -eq 0 ]; then echo "RESULT: PASS (Landlock blocked by seccomp)"; exit 0; fi
     echo "RESULT: FAIL (no-Landlock checks: $rc failure(s))"
+    exit 1
+fi
+if [ "${PLZIG_NO_SECCOMP:-0}" = 1 ]; then
+    bash /src/docker/no-seccomp-checks.sh
+    rc=$?
+    pg_ctl -D "$PGDATA" -m fast stop >/dev/null
+    if [ $rc -eq 0 ]; then echo "RESULT: PASS (seccomp filters blocked)"; exit 0; fi
+    echo "RESULT: FAIL (no-seccomp checks: $rc failure(s))"
     exit 1
 fi
 

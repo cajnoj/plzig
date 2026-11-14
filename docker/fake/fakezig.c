@@ -1,7 +1,10 @@
 /*
  * Test helper: a fake "zig" used via plzig.zig_path by docker/security-checks.sh.
  * Built with -DMODE=<n>.  Modes 1-4 write a hand-assembled out.wasm with a
- * forbidden import; mode 5 probes what the (sandboxed) compiler process can do.
+ * forbidden import; mode 5 probes what the (sandboxed) compiler process can do
+ * (it only attempts each operation and prints the result); mode 7 leaves
+ * symbolic links to CANARY_DIR and a deep directory tree in its build
+ * directory and fails, to test the backend's recursive delete.
  * "zig version" prints FAKE_VERSION (default 0.17.1, the version PL/Zig
  * requires); building with -DFAKE_VERSION='"0.16.0"' makes a wrong-version
  * compiler.
@@ -15,12 +18,64 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <stdlib.h>
+#include <sys/ipc.h>
+#include <sys/ptrace.h>
+#include <sys/shm.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 
 #ifndef FAKE_VERSION
 #define FAKE_VERSION "0.17.1"
 #endif
+#ifndef PGSOCK
+#define PGSOCK "/tmp/.s.PGSQL.5432"
+#endif
+#ifndef CANARY_DIR
+#define CANARY_DIR "/tmp/plzig-canary"
+#endif
+
+static const char *
+res(int ok)
+{
+	return ok ? "ALLOWED" : strerror(errno);
+}
+
+/* run fn in a forked child (so that it cannot change this process) */
+static void
+in_child(const char *label, int (*fn) (void))
+{
+	pid_t		pid;
+	int			st;
+
+	fflush(stdout);
+	pid = fork();
+	if (pid == 0)
+	{
+		int			ok = fn() == 0;
+
+		printf("%s: %s\n", label, res(ok));
+		fflush(stdout);
+		_exit(0);
+	}
+	if (pid < 0)
+		printf("%s: fork: %s\n", label, strerror(errno));
+	else
+		waitpid(pid, &st, 0);
+}
+
+static int
+do_setsid(void)
+{
+	return setsid() < 0 ? -1 : 0;
+}
+
+static int
+do_setpgid(void)
+{
+	return setpgid(0, 0);
+}
 
 static const unsigned char hdr[] = {0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00};
 /* one type: (i32, i32) -> () */
@@ -137,14 +192,77 @@ main(int argc, char **argv)
 		if (pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0)
 			printf("exec /bin/true: ALLOWED\n");
 	}
-	s = socket(AF_INET, SOCK_STREAM, 0);
+	printf("symlink in build dir: %s\n", res(symlink("src", "probe-link") == 0));
+
 	memset(&a, 0, sizeof(a));
 	a.sin_family = AF_INET;
 	a.sin_port = htons(5432);
 	inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
-	printf("tcp connect 127.0.0.1:5432: %s\n", connect(s, (void *) &a, sizeof(a)) == 0 ? "ALLOWED" : strerror(errno));
-	printf("signal parent: %s\n", kill(getppid(), 0) == 0 ? "ALLOWED" : strerror(errno));
+
+	s = socket(AF_INET, SOCK_STREAM, 0);
+	printf("inet socket: %s\n", res(s >= 0));
+	if (s >= 0)
+		printf("tcp connect 127.0.0.1:5432: %s\n", res(connect(s, (void *) &a, sizeof(a)) == 0));
+	else
+		printf("tcp connect 127.0.0.1:5432: no socket (%s)\n", strerror(errno));
+
+	s = socket(AF_INET, SOCK_DGRAM, 0);
+	printf("udp socket: %s\n", res(s >= 0));
+	if (s >= 0)
+		printf("udp send 127.0.0.1:5432: %s\n", res(sendto(s, "x", 1, 0, (void *) &a, sizeof(a)) == 1));
+	else
+		printf("udp send 127.0.0.1:5432: no socket (%s)\n", strerror(errno));
+
+	{
+		struct sockaddr_un u;
+
+		memset(&u, 0, sizeof(u));
+		u.sun_family = AF_UNIX;
+		strncpy(u.sun_path, PGSOCK, sizeof(u.sun_path) - 1);
+		s = socket(AF_UNIX, SOCK_STREAM, 0);
+		printf("unix socket: %s\n", res(s >= 0));
+		if (s >= 0)
+			printf("unix connect server socket: %s\n", res(connect(s, (void *) &u, sizeof(u)) == 0));
+		else
+			printf("unix connect server socket: no socket (%s)\n", strerror(errno));
+	}
+
+	printf("signal parent: %s\n", res(kill(getppid(), 0) == 0));
+	printf("signal self: %s\n", res(kill(getpid(), 0) == 0));
+	printf("ptrace attach parent: %s\n", res(ptrace(PTRACE_ATTACH, getppid(), 0, 0) == 0));
+	printf("shmget: %s\n", res(shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0600) >= 0));
+	in_child("setsid in child", do_setsid);
+	in_child("setpgid in child", do_setpgid);
 	return 1;
+#elif MODE == 7
+	{
+		char		path[64];
+		int			i;
+		FILE	   *f;
+
+		printf("escape-dir: %s\n", res(symlink(CANARY_DIR, "escape-dir") == 0));
+		printf("escape-file: %s\n", res(symlink(CANARY_DIR "/canary", "escape-file") == 0));
+		printf("hardlink: %s\n", res(link(CANARY_DIR "/canary", "hardlink") == 0));
+		/* 50 levels, each with a file and a link to the canary directory */
+		for (i = 0; i < 50; i++)
+		{
+			snprintf(path, sizeof(path), "d%d", i);
+			if (mkdir(path, 0700) != 0 || chdir(path) != 0)
+			{
+				printf("deep tree: %s at level %d\n", strerror(errno), i);
+				break;
+			}
+			f = fopen("file", "w");
+			if (f)
+			{
+				fputs("x", f);
+				fclose(f);
+			}
+			(void) symlink(CANARY_DIR, "up");
+		}
+		printf("deep tree: %d levels\n", i);
+		return 1;
+	}
 #endif
 	return 0;
 }
