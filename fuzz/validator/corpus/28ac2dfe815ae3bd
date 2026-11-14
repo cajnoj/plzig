@@ -1,0 +1,5 @@
+
+    var c = try plzig.spi.open("SELECT x FROM lk_t", &.{});
+    _ = try c.next();
+    if (@mod(x, 2) == 0) plzig.raise("even {d}", .{x});
+    return x;

@@ -1,0 +1,2 @@
+const s = "@embedFile(\"x\") extern asm"; _ = s; // @import("std") export
+return;

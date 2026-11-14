@@ -1,0 +1,4 @@
+
+    return 1;
+}
+export fn plzig_evil() void {

@@ -1,0 +1,3 @@
+
+    _ = try plzig.spi.execute("CREATE TEMP TABLE IF NOT EXISTS u_nope (x int)", &.{});
+    return x;

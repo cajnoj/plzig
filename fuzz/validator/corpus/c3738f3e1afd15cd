@@ -1,0 +1,6 @@
+
+    var c = try plzig.spi.open("SELECT id FROM ct", &.{});
+    _ = try c.next();
+    _ = try plzig.spi.execute("SELECT ct_closeall()", &.{});
+    _ = try c.next();
+    return "not closed";

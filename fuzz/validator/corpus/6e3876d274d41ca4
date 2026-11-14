@@ -1,0 +1,4 @@
+
+    var c: plzig.spi.Cursor = .{ .handle = @bitCast(h) };
+    _ = try c.next();
+    return "valid";

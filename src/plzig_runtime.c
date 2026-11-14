@@ -93,8 +93,9 @@ plzig_rt_malloc(mem_alloc_usage_t usage, unsigned int size)
 
 	if (plzig_runtime_cxt == NULL)
 		return NULL;
+	/* a linear memory is never empty and never larger than plzig.max_memory */
 	if (usage == Alloc_For_LinearMemory &&
-		(Size) size > (Size) plzig_max_memory * 1024 * 1024)
+		(size == 0 || (Size) size > (Size) plzig_max_memory * 1024 * 1024))
 		return NULL;
 	if (!AllocSizeIsValid((Size) size + sizeof(PlzigAllocHdr)))
 		return NULL;
@@ -132,6 +133,9 @@ plzig_rt_realloc(mem_alloc_usage_t usage, bool full_size_mmaped, void *ptr,
 
 	if (ptr == NULL)
 		return plzig_rt_malloc(usage, size);
+	/* as in plzig_rt_malloc: a linear memory is never empty */
+	if (usage == Alloc_For_LinearMemory && size == 0)
+		return NULL;
 	h = (PlzigAllocHdr *) ((char *) ptr - sizeof(PlzigAllocHdr));
 	if (h->magic != PLZIG_ALLOC_MAGIC)
 		return NULL;
@@ -302,6 +306,162 @@ plzig_known_import(const char *name)
 	return false;
 }
 
+/*
+ * Declared sizes that cost WAMR far more than the module's size, or that
+ * can never work under PL/Zig.
+ *
+ * WAMR's loader and instantiation never check for interrupts, so their cost
+ * must stay proportional to the size of the module.  Two declarations break
+ * that (found by the loader fuzz target, fuzz/loader/findings/):
+ *
+ *  - locals: load_function_section allocates (zeroed) and walks one byte
+ *    per declared local before it rejects a function with more than 65535
+ *    local cells, so 30 bytes declaring 2^30 locals cost about 1 GB and
+ *    seconds of CPU.  Every local takes at least one cell, so a function
+ *    declaring more than PLZIG_MAX_LOCALS locals can never load.
+ *  - table size: tables_instantiate allocates (and fills) up to twice the
+ *    declared initial size, so 17 bytes declaring 130 million elements
+ *    cost about 1 GB per instance, outside plzig.max_memory (which caps
+ *    linear memory only).  Without reference types and bulk memory, table
+ *    entries can only come from element segments, which take at least a
+ *    byte per entry; PLZIG_MAX_TABLE_ELEMS is far above anything a PL/Zig
+ *    module needs (Zig sizes the table to the functions used indirectly).
+ *
+ *  - initial memory: plzig.max_memory is at most PLZIG_MAX_MEMORY_MB, so a
+ *    module declaring more initial pages than that can never be
+ *    instantiated; it is refused here rather than after WAMR has loaded it.
+ *
+ * Such modules are refused before WAMR sees them.  The scan refuses only
+ * these three things: anything it cannot parse is left to WAMR's validation,
+ * and it reads every byte at most once.
+ */
+#define PLZIG_MAX_LOCALS		65535
+#define PLZIG_MAX_TABLE_ELEMS	(1024 * 1024)
+#define PLZIG_MAX_MEMORY_MB		1023	/* upper bound of plzig.max_memory (plzig.c) */
+#define PLZIG_MAX_INITIAL_PAGES	(PLZIG_MAX_MEMORY_MB * 16)	/* 64 kB pages */
+
+static bool
+plzig_read_u32_leb(const uint8 **p, const uint8 *end, uint32 *val)
+{
+	uint64		v = 0;
+	int			shift = 0;
+
+	while (*p < end && shift < 35)
+	{
+		uint8		b = *(*p)++;
+
+		v |= (uint64) (b & 0x7f) << shift;
+		if ((b & 0x80) == 0)
+		{
+			if (v > PG_UINT32_MAX)
+				return false;
+			*val = (uint32) v;
+			return true;
+		}
+		shift += 7;
+	}
+	return false;
+}
+
+/* NULL if fine, else what is wrong */
+static const char *
+plzig_module_precheck(const uint8 *mod, uint32 len)
+{
+	const uint8 *p = mod + 8;	/* after magic and version */
+	const uint8 *end = mod + len;
+
+	while (p < end)
+	{
+		uint8		id = *p++;
+		uint32		size;
+		const uint8 *sec_end;
+		const uint8 *q;
+		uint32		n;
+		uint32		i;
+
+		if (!plzig_read_u32_leb(&p, end, &size) || size > (uint32) (end - p))
+			return NULL;
+		sec_end = p + size;
+		q = p;
+		p = sec_end;
+		if (id == 5)			/* memory section: limits* */
+		{
+			if (!plzig_read_u32_leb(&q, sec_end, &n))
+				return NULL;
+			for (i = 0; i < n; i++)
+			{
+				uint8		flags;
+				uint32		min;
+
+				if (q >= sec_end)
+					return NULL;
+				flags = *q++;
+				if (!plzig_read_u32_leb(&q, sec_end, &min))
+					return NULL;
+				if (min > PLZIG_MAX_INITIAL_PAGES)
+					return "a linear memory declares more than 1023 MB";
+				if ((flags & 1) && !plzig_read_u32_leb(&q, sec_end, &min))
+					return NULL;
+			}
+		}
+		else if (id == 4)		/* table section: (reftype, limits)* */
+		{
+			if (!plzig_read_u32_leb(&q, sec_end, &n))
+				return NULL;
+			for (i = 0; i < n; i++)
+			{
+				uint8		flags;
+				uint32		min;
+				uint32		max;
+
+				if (sec_end - q < 2)
+					return NULL;
+				q++;			/* reference type */
+				flags = *q++;
+				if (!plzig_read_u32_leb(&q, sec_end, &min))
+					return NULL;
+				if (min > PLZIG_MAX_TABLE_ELEMS)
+					return "a table declares more than 1048576 elements";
+				if ((flags & 1) && !plzig_read_u32_leb(&q, sec_end, &max))
+					return NULL;
+			}
+		}
+		else if (id == 10)		/* code section: (size, locals, code)* */
+		{
+			if (!plzig_read_u32_leb(&q, sec_end, &n))
+				return NULL;
+			for (i = 0; i < n && q < sec_end; i++)
+			{
+				uint32		body;
+				uint32		ngroups;
+				uint32		g;
+				uint64		total = 0;
+				const uint8 *body_end;
+
+				if (!plzig_read_u32_leb(&q, sec_end, &body) || body > (uint32) (sec_end - q))
+					return NULL;
+				body_end = q + body;
+				if (!plzig_read_u32_leb(&q, body_end, &ngroups))
+					return NULL;
+				/* each group is a count and a value type: >= 2 bytes */
+				for (g = 0; g < ngroups; g++)
+				{
+					uint32		cnt;
+
+					if (!plzig_read_u32_leb(&q, body_end, &cnt) || q >= body_end)
+						return NULL;
+					q++;		/* value type */
+					total += cnt;
+					if (total > PLZIG_MAX_LOCALS)
+						return "a function declares more than 65535 locals";
+				}
+				q = body_end;
+			}
+		}
+	}
+	return NULL;
+}
+
 PlzigModule *
 plzig_module_load(const char *wasm, uint32 len)
 {
@@ -316,6 +476,15 @@ plzig_module_load(const char *wasm, uint32 len)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
 				 errmsg("PL/Zig: compiled module has invalid size")));
+
+	{
+		const char *problem = plzig_module_precheck((const uint8 *) wasm, len);
+
+		if (problem)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+					 errmsg("PL/Zig: invalid WebAssembly module: %s", problem)));
+	}
 
 	mod = MemoryContextAllocZero(plzig_runtime_cxt, sizeof(PlzigModule));
 	mod->bytes = MemoryContextAlloc(plzig_runtime_cxt, len);
@@ -721,7 +890,6 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 	uint32		guest_base;
 	uint32		argv[3];
 	uint8	   *base;
-	PlzigSlot  *slots;
 	PlzigSlot	result;
 	uint32		off;
 	uint32		status;
@@ -795,7 +963,6 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 					 errhint("Increase plzig.max_memory.")));
 
 		base = plzig_guest_ptr(pi->inst, guest_base, (uint32) total);
-		slots = (PlzigSlot *) base;
 		off = (uint32) ((nargs + 1) * sizeof(PlzigSlot));
 		for (i = 0; i < nargs; i++)
 		{
@@ -846,10 +1013,14 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 						break;
 				}
 			}
-			memcpy(&slots[i], &s, sizeof(s));
+			/*
+			 * byte offsets, not &slots[i]: the address comes from the
+			 * guest's plzig_alloc and need not be aligned for PlzigSlot
+			 */
+			memcpy(base + (Size) i * sizeof(PlzigSlot), &s, sizeof(s));
 		}
-		memset(&slots[nargs], 0, sizeof(PlzigSlot));
-		/* base/slots are not used after this point: the guest may move memory */
+		memset(base + (Size) nargs * sizeof(PlzigSlot), 0, sizeof(PlzigSlot));
+		/* base is not used after this point: the guest may move memory */
 
 		/* 3. call */
 		argv[0] = guest_base;

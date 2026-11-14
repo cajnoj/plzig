@@ -1,0 +1,5 @@
+
+    const a = @import("std");
+    const b = @embedFile("x");
+    asm volatile ("");
+    return 1;

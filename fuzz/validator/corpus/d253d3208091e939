@@ -1,0 +1,2 @@
+
+    _ = try plzig.spi.execute("INSERT INTO proc_log VALUES ($1)", &.{m});

@@ -1,0 +1,4 @@
+
+    const out = try plzig.allocator.alloc(u8, x.len);
+    for (x, 0..) |c, i| out[x.len - 1 - i] = c;
+    return out;

@@ -1,0 +1,2 @@
+
+    return @intCast(x.len);

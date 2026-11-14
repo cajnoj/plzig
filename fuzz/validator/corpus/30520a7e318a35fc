@@ -1,0 +1,7 @@
+
+    const idx: usize = @intCast(i);
+    big[idx] +%= 1;
+    return big[idx];
+}
+var big: [96 * 1024 * 1024]u8 = undefined;
+fn unused() void {

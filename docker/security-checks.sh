@@ -55,7 +55,7 @@ echo "--- security checks"
 fakedir=/tmp/plzig-fake
 mkdir -p "$fakedir"
 canary=/tmp/plzig-canary
-for m in 1 2 3 4 5 7; do
+for m in 1 2 3 4 5 7 8 9 10; do
     mkdir -p "$fakedir/m$m"
     gcc -O2 -static -DMODE=$m -DPGDATA="\"$PGDATA\"" -DPGSOCK="\"$PGHOST/.s.PGSQL.5432\"" \
         -DCANARY_DIR="\"$canary\"" -o "$fakedir/m$m/zig" /src/docker/fake/fakezig.c || exit 1
@@ -78,6 +78,22 @@ for case in "1|import from a module other than \"plzig\"" \
         "CREATE FUNCTION imp_$m() RETURNS int LANGUAGE plzig AS \$\$ return $m$RANDOM; \$\$;"
 done
 
+# 8, 9: declarations that would cost WAMR about 1 GB (and seconds of
+# uninterruptible CPU) for a few bytes of module, and 10: more initial
+# memory than plzig.max_memory can ever allow, are refused before WAMR sees
+# the module
+for case in "8|a function declares more than 65535 locals" \
+            "9|a table declares more than 1048576 elements" \
+            "10|a linear memory declares more than 1023 MB"; do
+    m=${case%%|*}; needle=${case#*|}
+    set_fake "$fakedir/m$m/zig"
+    start=$(date +%s%N)
+    expect "module refused before loading: $needle" "$needle" \
+        "CREATE FUNCTION imp_$m() RETURNS int LANGUAGE plzig AS \$\$ return $m$RANDOM; \$\$;"
+    ms=$(( ($(date +%s%N) - start) / 1000000 ))
+    if [ "$ms" -lt 3000 ]; then pass "... within ${ms} ms"; else fail "mode $m module took ${ms} ms"; fi
+done
+
 # 5: what the compiler process can reach
 set_fake "$fakedir/m5/zig"
 out=$(psqlq <<SQL
@@ -87,7 +103,7 @@ SQL
 )
 status=$(sed -n 's/^status: //p' <<<"$out")
 echo "         sandbox status: $status"
-echo "$out" | sed -n 's/^/         /p' | grep -E "open|tcp|udp|unix|socket|signal|ptrace|shmget|setsid|setpgid|symlink|zig lib|compiler|exec"
+echo "$out" | sed -n 's/^/         /p' | grep -E "open|tcp|udp|unix|socket|signal|ptrace|shmget|setsid|setpgid|symlink|zig lib|compiler|exec|rlimit|env|fds|stdin|privs|seccomp|session|group leader|umask|cwd|HOME|hardlink|move out"
 if grep -qF "zig-lib-dir=$fakedir/lib" <<<"$out"; then pass "--zig-lib-dir passed to the compiler"; else fail "--zig-lib-dir passed to the compiler"; fi
 if [[ "$status" == "enforced (landlock ABI "*", seccomp"* ]]; then
     # Landlock (filesystem)
@@ -118,6 +134,40 @@ if [[ "$status" == "enforced (landlock ABI "*", seccomp"* ]]; then
                   "setpgid in child: Operation not permitted" \
                   "signal self: ALLOWED"; do
         if grep -qF "$needle" <<<"$out"; then pass "sandbox: $needle"; else fail "sandbox: $needle"; fi
+    done
+    # the process state the child was started with, observed from inside:
+    # resource limits (plzig.compile_memory_limit = 4GB default, 256 MB per
+    # file, no core dumps), a scrubbed environment, only stdin/stdout/stderr
+    # open, default signal state, no_new_privs, the seccomp filter, death
+    # with the backend, its own session/process group, umask 077, the build
+    # directory as working directory and HOME; and Landlock refusing hard
+    # links to files outside the sandbox and moving entries out of it
+    for needle in "rlimit core: 0/0" \
+                  "rlimit fsize: 268435456/268435456" \
+                  "rlimit as: 4294967296/4294967296" \
+                  "env names: PATH,HOME,ZIG_GLOBAL_CACHE_DIR,ZIG_LOCAL_CACHE_DIR,TMPDIR,LC_ALL,NO_COLOR" \
+                  "env PATH=/usr/bin:/bin" \
+                  "open fds: 0,1,2" \
+                  "stdin: character device" \
+                  "blocked signals: 0" \
+                  "non-default signal dispositions: 0" \
+                  "no_new_privs: 1" \
+                  "seccomp mode: 2" \
+                  "parent-death signal: 9" \
+                  "session leader: yes" \
+                  "process group leader: yes" \
+                  "umask: 0077" \
+                  "cwd: build directory" \
+                  "HOME is cwd: yes"; do
+        if grep -qF "$needle" <<<"$out"; then pass "child state: $needle"; else fail "child state: $needle"; fi
+    done
+    if grep -qE "rlimit cpu: ([0-9]+)/\1$" <<<"$out"; then pass "child state: CPU time limited"; else fail "child state: CPU time limited"; fi
+    for what in "hardlink to postgresql.conf" "hardlink to pg_control" "move out of the build dir"; do
+        if grep -qF "$what: " <<<"$out" && ! grep -qF "$what: ALLOWED" <<<"$out"; then
+            pass "landlock: $what refused"
+        else
+            fail "landlock: $what refused"
+        fi
     done
 else
     fail "sandbox not enforced ($status)"
@@ -543,6 +593,53 @@ chmod 0750 "$PGDATA/plzig"
 expect "plzig directory with group permissions is refused" "has group or other permissions" "SELECT tamper();"
 chmod 0700 "$PGDATA/plzig"
 expect "works again after repair" "4242" "SELECT tamper();"
+
+# 7b: entries planted in the plzig directory are refused, not followed
+f=$(ls -t "$PGDATA"/plzig/cache/*.wasm | head -1)
+mv "$f" "$f.orig"
+mkfifo -m 600 "$f"
+out=$(timeout 30 psql -X -q -At -c "SELECT tamper();" 2>&1); rc=$?
+if [ $rc -ne 124 ] && grep -qF "is not a regular file" <<<"$out"; then pass "FIFO planted as a cache file is refused without blocking"; else fail "FIFO planted as a cache file is refused without blocking (rc $rc)"; echo "$out" | sed 's/^/         /'; fi
+rm -f "$f"
+# a hard link to another file of the server user (same owner, mode 0600)
+# passes the file checks, but is only ever read: the loader rejects it,
+# eviction and plzig_cache_clear() unlink the name, never the file
+conf_sum=$(sha256sum "$PGDATA/postgresql.conf" | cut -d' ' -f1)
+chmod 600 "$PGDATA/postgresql.conf"
+ln "$PGDATA/postgresql.conf" "$f"
+expect "hard link to postgresql.conf as a cache file is rejected by the loader" "invalid WebAssembly module" "SELECT tamper();"
+out=$(psqlq -c "SELECT plzig_cache_clear() > 0;")
+if [ ! -e "$f" ] && [ -f "$PGDATA/postgresql.conf" ] && [ "$(sha256sum "$PGDATA/postgresql.conf" | cut -d' ' -f1)" = "$conf_sum" ] &&
+   [ "$(stat -c %h "$PGDATA/postgresql.conf")" = 1 ]; then
+    pass "plzig_cache_clear() removed the hard link, postgresql.conf intact"
+else
+    fail "plzig_cache_clear() removed the hard link, postgresql.conf intact"; echo "$out" | sed 's/^/         /'
+fi
+mv "$f.orig" "$f"
+expect "works again after repair" "4242" "SELECT tamper();"
+# the compile lock and the Zig cache directory as symbolic links
+mkdir -p "$canary"; rm -f "$canary/lock-target"
+mv "$PGDATA/plzig/compile.lock" "$PGDATA/plzig/compile.lock.orig"
+ln -s "$canary/lock-target" "$PGDATA/plzig/compile.lock"
+expect "symlinked compile lock refused" "could not open file \"plzig/compile.lock\"" "$(compile_sql)"
+if [ ! -e "$canary/lock-target" ]; then pass "symlinked compile lock not followed"; else fail "symlinked compile lock not followed"; fi
+rm -f "$PGDATA/plzig/compile.lock"; mv "$PGDATA/plzig/compile.lock.orig" "$PGDATA/plzig/compile.lock"
+mv "$PGDATA/plzig/pgsql_tmp.zig-cache" "$PGDATA/plzig/zig-cache.orig"
+mkdir -p "$canary/zigcache"; chmod 700 "$canary/zigcache"
+ln -s "$canary/zigcache" "$PGDATA/plzig/pgsql_tmp.zig-cache"
+expect "symlinked Zig cache directory refused" "is not a directory (or is a symbolic link)" "$(compile_sql)"
+if [ -z "$(ls -A "$canary/zigcache")" ]; then pass "symlinked Zig cache directory not used"; else fail "symlinked Zig cache directory not used"; fi
+rm -f "$PGDATA/plzig/pgsql_tmp.zig-cache"; mv "$PGDATA/plzig/zig-cache.orig" "$PGDATA/plzig/pgsql_tmp.zig-cache"
+# a file planted where a build directory would go is swept, not followed
+ln -s "$canary" "$PGDATA/plzig/pgsql_tmp.build.1.1.0123456789abcdef"
+echo "keep me" > "$canary/canary"
+expect "compile with a planted build-directory symlink" "CREATE FUNCTION" "$(compile_sql) SELECT 'CREATE FUNCTION';"
+if [ ! -L "$PGDATA/plzig/pgsql_tmp.build.1.1.0123456789abcdef" ] && [ "$(cat "$canary/canary")" = "keep me" ]; then
+    pass "planted build-directory symlink removed, its target untouched"
+else
+    fail "planted build-directory symlink removed, its target untouched"
+fi
+expect "works after the planting tests" "4242" "SELECT tamper();"
 
 # 8: no zombie or leftover compiler processes
 z=$(awk '{ if ($3 == "Z") print }' /proc/[0-9]*/stat 2>/dev/null | wc -l)

@@ -1,0 +1,7 @@
+
+    var buf: [16]u8 = undefined;
+    const r = try plzig.spi.execute("SELECT count(*), max(t) FROM lk_t WHERE x <= $1::int",
+        &.{try std.fmt.bufPrint(&buf, "{d}", .{x})});
+    const row = try r.row(0);
+    _ = try r.get(0, 1);
+    return try row.get(i64, 0);

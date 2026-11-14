@@ -1,0 +1,4 @@
+
+    const p: *addrspace(.generic) i32 = undefined;
+    _ = p;
+    return 1;

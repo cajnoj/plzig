@@ -1,0 +1,3 @@
+
+    const r = try plzig.spi.execute("SELECT sum(x) FROM t", &.{});
+    return try std.fmt.parseInt(i64, (try r.get(0, 0)).?, 10);

@@ -2,7 +2,16 @@
  * Test helper: a fake "zig" used via plzig.zig_path by docker/security-checks.sh.
  * Built with -DMODE=<n>.  Modes 1-4 write a hand-assembled out.wasm with a
  * forbidden import; mode 5 probes what the (sandboxed) compiler process can do
- * (it only attempts each operation and prints the result); mode 7 leaves
+ * (it only attempts each operation and prints the result) and reports the
+ * process state it was started with (resource limits, environment, open
+ * descriptors, signal mask and dispositions, no_new_privs, seccomp mode,
+ * parent-death signal, session, umask, working directory); modes 8 and 9
+ * write tiny modules that declare 0x3ff00000 locals in one function, or a
+ * table of 130 million elements (each costs WAMR about 1 GB and, for the
+ * locals, seconds of CPU unless PL/Zig refuses them first;
+ * fuzz/loader/findings/wamr-huge-*.wasm); mode 10 writes a module that
+ * declares 2 GB of initial memory, more than plzig.max_memory can ever
+ * allow; mode 7 leaves
  * symbolic links to CANARY_DIR and a deep directory tree in its build
  * directory and fails, to test the backend's recursive delete.
  * "zig version" prints FAKE_VERSION (default 0.17.1, the version PL/Zig
@@ -19,7 +28,9 @@
 #include <netinet/in.h>
 #include <stdlib.h>
 #include <sys/ipc.h>
+#include <sys/prctl.h>
 #include <sys/ptrace.h>
+#include <sys/resource.h>
 #include <sys/shm.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -77,6 +88,97 @@ do_setpgid(void)
 	return setpgid(0, 0);
 }
 
+extern char **environ;
+
+/* the state PL/Zig set up for the child before execve (plzig_spawn.c) */
+static void
+report_state(const char *pgdata)
+{
+	static const struct
+	{
+		int			r;
+		const char *name;
+	}			lims[] = {
+		{RLIMIT_CORE, "core"}, {RLIMIT_CPU, "cpu"}, {RLIMIT_FSIZE, "fsize"}, {RLIMIT_AS, "as"}
+	};
+	struct rlimit rl;
+	sigset_t	set;
+	char		buf[1024];
+	char		cwd[1024];
+	size_t		n = 0;
+	int			i;
+	int			ndisp = 0;
+	int			nblocked = 0;
+	int			pdeath = -1;
+	mode_t		old;
+	struct stat st;
+
+	for (i = 0; i < (int) (sizeof(lims) / sizeof(lims[0])); i++)
+	{
+		if (getrlimit(lims[i].r, &rl) != 0)
+			printf("rlimit %s: %s\n", lims[i].name, strerror(errno));
+		else if (rl.rlim_cur == RLIM_INFINITY)
+			printf("rlimit %s: unlimited\n", lims[i].name);
+		else
+			printf("rlimit %s: %llu/%llu\n", lims[i].name,
+				   (unsigned long long) rl.rlim_cur, (unsigned long long) rl.rlim_max);
+	}
+	buf[0] = '\0';
+	for (i = 0; environ[i]; i++)
+	{
+		const char *eq = strchr(environ[i], '=');
+		size_t		len = eq ? (size_t) (eq - environ[i]) : strlen(environ[i]);
+
+		n += snprintf(buf + n, sizeof(buf) - n, "%s%.*s", i ? "," : "", (int) len, environ[i]);
+		if (n >= sizeof(buf))
+			break;
+	}
+	printf("env names: %s\n", buf);
+	printf("env PATH=%s\n", getenv("PATH") ? getenv("PATH") : "(unset)");
+	n = 0;
+	buf[0] = '\0';
+	for (i = 0; i < 1024; i++)
+		if (fcntl(i, F_GETFD) != -1)
+			n += snprintf(buf + n, sizeof(buf) - n, "%s%d", n ? "," : "", i);
+	printf("open fds: %s\n", buf);
+	if (fstat(0, &st) == 0)
+		printf("stdin: %s\n", S_ISCHR(st.st_mode) ? "character device" : S_ISREG(st.st_mode) ? "regular file" : "other");
+	sigemptyset(&set);
+	sigprocmask(SIG_BLOCK, NULL, &set);
+	for (i = 1; i < 32; i++)
+	{
+		struct sigaction sa;
+
+		if (sigismember(&set, i) == 1)
+			nblocked++;
+		if (i != SIGKILL && i != SIGSTOP && sigaction(i, NULL, &sa) == 0 && sa.sa_handler != SIG_DFL)
+			ndisp++;
+	}
+	printf("blocked signals: %d\n", nblocked);
+	printf("non-default signal dispositions: %d\n", ndisp);
+	printf("no_new_privs: %d\n", prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0));
+	printf("seccomp mode: %d\n", prctl(PR_GET_SECCOMP, 0, 0, 0, 0));
+	prctl(PR_GET_PDEATHSIG, &pdeath, 0, 0, 0);
+	printf("parent-death signal: %d\n", pdeath);
+	printf("session leader: %s\n", getsid(0) == getpid() ? "yes" : "no");
+	printf("process group leader: %s\n", getpgrp() == getpid() ? "yes" : "no");
+	old = umask(077);
+	printf("umask: %04o\n", (unsigned) old);
+	if (getcwd(cwd, sizeof(cwd)) != NULL)
+	{
+		const char *base = strrchr(cwd, '/');
+
+		printf("cwd: %s\n", base && strncmp(base + 1, "pgsql_tmp.build.", 16) == 0 ? "build directory" : "elsewhere");
+		printf("HOME is cwd: %s\n", getenv("HOME") && strcmp(getenv("HOME"), cwd) == 0 ? "yes" : "no");
+	}
+	snprintf(buf, sizeof(buf), "%s/postgresql.conf", pgdata);
+	printf("hardlink to postgresql.conf: %s\n", res(link(buf, "hl") == 0));
+	snprintf(buf, sizeof(buf), "%s/global/pg_control", pgdata);
+	printf("hardlink to pg_control: %s\n", res(link(buf, "hl2") == 0));
+	printf("move out of the build dir: %s\n", res(rename("src", "../plzig-moved-src") == 0));
+	fflush(stdout);
+}
+
 static const unsigned char hdr[] = {0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00};
 /* one type: (i32, i32) -> () */
 static const unsigned char types[] = {0x01, 0x06, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x00};
@@ -88,6 +190,37 @@ static const unsigned char imp_unknown[] = {0x02, 0x0e, 0x01, 0x05, 'p', 'l', 'z
 static const unsigned char imp_badsig[] = {0x02, 0x0d, 0x01, 0x05, 'p', 'l', 'z', 'i', 'g', 0x03, 'l', 'o', 'g', 0x00, 0x00};
 /* import "plzig" "memory" (memory, min 1 page) */
 static const unsigned char imp_mem[] = {0x02, 0x11, 0x01, 0x05, 'p', 'l', 'z', 'i', 'g', 0x06, 'm', 'e', 'm', 'o', 'r', 'y', 0x02, 0x00, 0x01};
+
+/* type () -> (); one function; its body declares 0x3ff00000 i32 locals */
+static const unsigned char huge_locals[] = {
+	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+	0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+	0x03, 0x02, 0x01, 0x00,
+	0x0a, 0x0a, 0x01, 0x08, 0x01, 0x80, 0x80, 0xc0, 0xff, 0x03, 0x7f, 0x0b
+};
+
+/* one table, funcref, initial size 0x07c00000 */
+static const unsigned char huge_table[] = {
+	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+	0x04, 0x07, 0x01, 0x70, 0x00, 0x80, 0x80, 0x80, 0x3e
+};
+
+/* memory of 32768 pages (2 GB), and 16 bytes of data at 0x10000 */
+static const unsigned char memory_too_large[] = {
+	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+	0x05, 0x05, 0x01, 0x00, 0x80, 0x80, 0x02,
+	0x0b, 0x18, 0x01, 0x00, 0x41, 0x80, 0x80, 0x04, 0x0b, 0x10,
+	'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A', 'A'
+};
+
+static void
+emit_raw(const unsigned char *m, size_t len)
+{
+	FILE	   *f = fopen("out.wasm", "wb");
+
+	fwrite(m, 1, len, f);
+	fclose(f);
+}
 
 static void
 emit(const unsigned char *imp, size_t len)
@@ -135,12 +268,19 @@ main(int argc, char **argv)
 	emit(imp_badsig, sizeof(imp_badsig));
 #elif MODE == 4
 	emit(imp_mem, sizeof(imp_mem));
+#elif MODE == 8
+	emit_raw(huge_locals, sizeof(huge_locals));
+#elif MODE == 9
+	emit_raw(huge_table, sizeof(huge_table));
+#elif MODE == 10
+	emit_raw(memory_too_large, sizeof(memory_too_large));
 #elif MODE == 5
 	struct sockaddr_in a;
 	int			s;
 	const char *pgdata = PGDATA;
 	char		path[512];
 
+	report_state(pgdata);
 	try_open("/etc/passwd", O_RDONLY);
 	snprintf(path, sizeof(path), "%s/postgresql.conf", pgdata);
 	try_open(path, O_RDONLY);

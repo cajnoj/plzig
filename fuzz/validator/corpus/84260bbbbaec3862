@@ -1,0 +1,4 @@
+
+    const r = @import("pl\x7aig");
+    _ = r;
+    return 1;

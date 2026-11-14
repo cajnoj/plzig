@@ -335,7 +335,8 @@ plzig_rm_at(int dfd, const char *name, int depth, PlzigRmState *st)
 			{
 				if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
 					continue;
-				plzig_rm_at(dirfd(d), de->d_name, depth + 1, st);
+				/* fd is the DIR's own descriptor (fdopendir took it over) */
+				plzig_rm_at(fd, de->d_name, depth + 1, st);
 			}
 			/*
 			 * If `name` was meanwhile replaced, this removes (only) whatever
@@ -853,7 +854,7 @@ plzig_format_output(const char *raw, int rawlen, const char *builddir,
 		{
 			char	   *end;
 			long		line;
-			long		col = 0;
+			long		col;
 
 			line = strtol(p + ml, &end, 10);
 			if (*end == ':' && isdigit((unsigned char) end[1]))
@@ -1803,6 +1804,17 @@ plzig_cache_maintain(const char *cache, uint64 incoming, bool clear_all)
 				 errmsg("could not open directory \"%s\": %m", shown),
 				 errdetail_log("Full path: \"%s\".", cache)));
 	dfd = dirfd(dir);
+	if (dfd < 0)
+	{
+		int			save = errno;
+
+		FreeDir(dir);
+		errno = save;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open directory \"%s\": %m", shown),
+				 errdetail_log("Full path: \"%s\".", cache)));
+	}
 	while ((de = ReadDirExtended(dir, shown, WARNING)) != NULL)
 	{
 		int			kind = plzig_cache_file_kind(de->d_name);

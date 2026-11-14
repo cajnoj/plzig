@@ -1,0 +1,3 @@
+
+    var c = try plzig.spi.open("SELECT s FROM ct_secret", &.{});
+    return try plzig.allocator.dupe(u8, try (try c.next()).?.get([]const u8, 0));

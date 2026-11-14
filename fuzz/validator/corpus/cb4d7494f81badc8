@@ -1,0 +1,4 @@
+
+    const s = @import("std");
+    _ = s;
+    return 1;

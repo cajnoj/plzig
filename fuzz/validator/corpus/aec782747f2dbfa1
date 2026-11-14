@@ -1,0 +1,3 @@
+
+    const v = try std.fmt.parseInt(i32, x, 10);
+    return try std.fmt.allocPrint(plzig.allocator, "{d}", .{v * 3});

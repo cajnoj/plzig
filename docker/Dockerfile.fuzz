@@ -1,0 +1,25 @@
+# Fuzzing and static-analysis image, built on a docker/Dockerfile image
+# (plzig-test:<version>): Clang/LLVM 19 with compiler-rt (libFuzzer, ASan,
+# UBSan, source-based coverage), the Clang static analyzer (scan-build) and
+# cppcheck.  The native fuzz targets of fuzz/ are built into /opt/plzig-fuzz
+# by fuzz/build.sh; the SQL-driven targets run against the installed PL/Zig
+# (use BASE=plzig-asan:<version> for those, see docker/run-fuzz.sh).
+#
+#   docker build -f docker/Dockerfile.fuzz --build-arg BASE=plzig-asan:18.7 -t plzig-fuzz:18.7 .
+#
+# Used by docker/run-fuzz.sh and docker/static-analysis.sh.  Nothing here is
+# part of a PL/Zig build or installation.
+ARG BASE=plzig-asan:18.7
+FROM ${BASE}
+USER root
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        clang-19 libclang-rt-19-dev llvm-19 clang-tools-19 cppcheck file binutils; \
+    rm -rf /var/lib/apt/lists/*
+ENV PATH=/usr/lib/llvm-19/bin:$PATH
+COPY fuzz /src/fuzz
+RUN set -eux; \
+    bash /src/fuzz/build.sh /opt/plzig-fuzz; \
+    chown -R postgres:postgres /src /opt/plzig-fuzz
+USER postgres

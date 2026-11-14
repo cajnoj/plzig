@@ -1,0 +1,6 @@
+
+    if (depth == 0) plzig.raise("bottom reached", .{});
+    var c = try plzig.spi.open("SELECT ct_rec_fail($1::int - 1)", &.{
+        try std.fmt.allocPrint(plzig.allocator, "{d}", .{depth}) });
+    _ = try c.next();
+    return 0;

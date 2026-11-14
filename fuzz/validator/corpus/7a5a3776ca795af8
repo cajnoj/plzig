@@ -1,0 +1,4 @@
+
+    const r = @import("root");
+    _ = r;
+    return 1;

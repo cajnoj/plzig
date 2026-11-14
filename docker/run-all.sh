@@ -18,6 +18,12 @@
 #     coverage     gcov build, all layers, report in build/coverage/
 #     compilers    GCC and Clang, -Wall -Wextra -Werror
 #     upgrade      pg_upgrade from PostgreSQL 14 (PGDG) to the version
+#     fuzz         every fuzz target of fuzz/ for a short budget
+#                  (docker/run-fuzz.sh smoke; PLZIG_FUZZ_SMOKE seconds each)
+#     static       scan-build and cppcheck over src/, and the hardening of
+#                  the installed binaries (docker/static-analysis.sh)
+#     diskfull     compilations with the data directory on a full tmpfs
+#                  (docker/diskfull-checks.sh)
 #
 #   docker/run-all.sh                       # everything
 #   PLZIG_VERSIONS="18.7" PLZIG_VARIANTS="asan coverage" docker/run-all.sh
@@ -29,6 +35,9 @@
 #   PLZIG_VALGRIND_VERSION, PLZIG_ASAN_VERSION, PLZIG_COVERAGE_VERSION,
 #   PLZIG_COMPILERS_VERSION   one version each (default: 18.7)
 #   PLZIG_UPGRADE_VERSION     the new major for pg_upgrade (default: 19rc2)
+#   PLZIG_FUZZ_VERSION, PLZIG_STATIC_VERSION, PLZIG_DISKFULL_VERSION
+#                      one version each (default: 18.7)
+#   PLZIG_FUZZ_SMOKE   seconds per fuzz target in the "fuzz" variant (default 60)
 #   PLZIG_JOBS         parallel jobs (default: 6)
 #   PLZIG_PLATFORM     docker --platform, e.g. linux/arm64 (default: host)
 #   PLZIG_LOGDIR       where the job logs go (default: build/test-logs/all)
@@ -40,13 +49,16 @@ cd "$(dirname "$0")/.."
 
 all_versions=(14.25 15.20 16.16 17.12 18.7 19rc2)
 read -r -a versions <<<"${PLZIG_VERSIONS:-${all_versions[*]}}"
-variants=" ${PLZIG_VARIANTS-hardened valgrind asan coverage compilers upgrade} "
+variants=" ${PLZIG_VARIANTS-hardened valgrind asan coverage compilers upgrade fuzz static diskfull} "
 read -r -a hardened <<<"${PLZIG_HARDENED:-14.25 18.7 19rc2}"
 vg_v=${PLZIG_VALGRIND_VERSION:-18.7}
 asan_v=${PLZIG_ASAN_VERSION:-18.7}
 cov_v=${PLZIG_COVERAGE_VERSION:-18.7}
 cc_v=${PLZIG_COMPILERS_VERSION:-18.7}
 up_v=${PLZIG_UPGRADE_VERSION:-19rc2}
+fz_v=${PLZIG_FUZZ_VERSION:-18.7}
+st_v=${PLZIG_STATIC_VERSION:-18.7}
+df_v=${PLZIG_DISKFULL_VERSION:-18.7}
 jobs_max=${PLZIG_JOBS:-6}
 plat=()
 [ -n "${PLZIG_PLATFORM:-}" ] && plat=(--platform "$PLZIG_PLATFORM")
@@ -136,7 +148,7 @@ job_hardened() {
 # Valgrind: the regress suite minus the tests that loop tens of thousands of
 # times through the interpreter (leaks: 60k+ calls; usage: deep recursion and
 # parallel workers) -- impractically slow under Valgrind
-vg_regress=${PLZIG_VALGRIND_REGRESS:-setup basics types types_more signatures encoding spi spi_prepared spi_cursor sandbox resources lifecycle}
+vg_regress=${PLZIG_VALGRIND_REGRESS:-setup basics types types_more signatures encoding spi spi_prepared spi_cursor sandbox adversarial resources lifecycle}
 job_valgrind() {
     local v=$1
     build_hardened plzig-valgrind "$v" 1 || { echo "LAYER build: FAIL"; return 1; }
@@ -174,6 +186,40 @@ job_compilers() {
     drun "plzig-compilers:$v" bash /src/docker/compiler-checks.sh
 }
 
+# the fuzz image (docker/Dockerfile.fuzz) on top of the ASan image, which
+# is on top of the cassert server built from source (see job_asan)
+build_fuzz_images() {
+    local v=$1
+    build_hardened plzig-hardened "$v" 0 && build_variant asan "$v" "plzig-hardened:$v" &&
+    docker build "${plat[@]}" -f docker/Dockerfile.fuzz --build-arg "BASE=plzig-asan:$v" -t "plzig-fuzz:$v" .
+}
+
+job_fuzz() {
+    local v=$1 rc
+    PLZIG_FUZZ_VERSION=$v PLZIG_FUZZ_NO_BUILD=1 docker/run-fuzz.sh smoke "${PLZIG_FUZZ_SMOKE:-60}" >/tmp/plzig-fuzz-smoke.$$ 2>&1
+    rc=$?
+    cat /tmp/plzig-fuzz-smoke.$$
+    sed -n 's/^FUZZ \([a-z]*\): \(.*\)$/LAYER fuzz-\1: \2/p' /tmp/plzig-fuzz-smoke.$$
+    rm -f /tmp/plzig-fuzz-smoke.$$
+    return $rc
+}
+
+job_static() {
+    local v=$1 rc1 rc2
+    drun "plzig-fuzz:$v" bash /src/docker/static-analysis.sh analyze
+    rc1=$?
+    # the hardening as built against the distribution's PostgreSQL (PGDG)
+    drun "plzig-test:$v" bash /src/docker/static-analysis.sh hardening
+    rc2=$?
+    return $((rc1 | rc2))
+}
+
+job_diskfull() {
+    local v=$1
+    drun --tmpfs /tmp/pgdata:rw,size=300m,uid=999,gid=999,mode=0700 \
+        -e PLZIG_LAYERS=diskfull "plzig-test:$v"
+}
+
 job_upgrade() {
     local v=$1
     build_variant upgrade "$v" || { echo "LAYER build: FAIL"; return 1; }
@@ -184,13 +230,23 @@ job_upgrade() {
 # ---- phase 1: the per-version images (variants build on them)
 echo "--- building images: ${versions[*]}"
 need=("${versions[@]}")
-for x in "$asan_v" "$cov_v" "$cc_v" "$up_v"; do
+for x in "$asan_v" "$cov_v" "$cc_v" "$up_v" "$fz_v" "$st_v" "$df_v"; do
     [[ " ${need[*]} " == *" $x "* ]] || need+=("$x")
 done
 for v in "${need[@]}"; do spawn "build-$v" build_main "$v"; done
 wait
 for v in "${need[@]}"; do
     grep -q 'rc=0' "$logdir/build-$v.log" || echo "image build for $v failed: $logdir/build-$v.log"
+done
+
+# the fuzz image (needed by "fuzz" and "static") before anything uses it
+fuzz_images=()
+want fuzz && fuzz_images+=("$fz_v")
+want static && [[ " ${fuzz_images[*]} " != *" $st_v "* ]] && fuzz_images+=("$st_v")
+for v in "${fuzz_images[@]}"; do spawn "build-fuzz-$v" build_fuzz_images "$v"; done
+wait
+for v in "${fuzz_images[@]}"; do
+    grep -q 'rc=0' "$logdir/build-fuzz-$v.log" || echo "fuzz image build for $v failed: $logdir/build-fuzz-$v.log"
 done
 
 # ---- phase 2: everything else
@@ -201,6 +257,9 @@ want asan && [ -n "$asan_v" ] && spawn "asan-$asan_v" job_asan "$asan_v"
 want coverage && [ -n "$cov_v" ] && spawn "coverage-$cov_v" job_coverage "$cov_v"
 want compilers && [ -n "$cc_v" ] && spawn "compilers-$cc_v" job_compilers "$cc_v"
 want upgrade && [ -n "$up_v" ] && spawn "upgrade-14-to-$up_v" job_upgrade "$up_v"
+want fuzz && [ -n "$fz_v" ] && spawn "fuzz-$fz_v" job_fuzz "$fz_v"
+want static && [ -n "$st_v" ] && spawn "static-$st_v" job_static "$st_v"
+want diskfull && [ -n "$df_v" ] && spawn "diskfull-$df_v" job_diskfull "$df_v"
 wait
 
 # ---- summary
@@ -220,7 +279,7 @@ for log in "$logdir"/*.log; do
     # LAYER lines: those of the container summaries, plus the converted
     # no-Landlock/no-seccomp results
     layers=$(awk '/^=== summary/ { f = 1; next } /^RESULT:/ { f = 0 } f && /^LAYER / { print }
-                  /^LAYER (no-landlock|no-seccomp|compilers):/ { print }' "$log" | sort -u)
+                  /^LAYER (no-landlock|no-seccomp|compilers|static-[a-z]+|fuzz-[a-z]+):/ { print }' "$log" | sort -u)
     if [ -z "$layers" ]; then
         printf '%-26s %-14s %s\n' "$name" "-" "FAIL (no result; see $log)"
         fail=1

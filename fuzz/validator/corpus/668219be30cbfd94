@@ -1,0 +1,25 @@
+
+    var p = try plzig.spi.prepare(
+        "SELECT id, name, price, small, big, flag, f4, data, vc, bp, num, d FROM pt WHERE id = $1",
+        &.{.int4});
+    defer p.free();
+    const r = try p.execute(.{i});
+    if (r.rows != 1) return error.NotFound;
+    const row = try r.row(0);
+    const a = plzig.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    var c: usize = 0;
+    while (c < row.len()) : (c += 1) try out.print(a, "{s} ", .{@tagName(try row.kind(c))});
+    try out.print(a, "| {d} {?s} {?d} {?d} {?d} {any} {?d} ", .{
+        try row.get(i32, 0),     try row.get(?[]const u8, 1), try row.get(?f64, 2),
+        try row.get(?i16, 3),    try row.get(?i64, 4),        try row.get(?bool, 5),
+        try row.get(?f32, 6),
+    });
+    if (try row.get(?[]const u8, 7)) |b| {
+        for (b) |x| try out.print(a, "{x:0>2}", .{x});
+    } else try out.appendSlice(a, "null");
+    try out.print(a, " [{?s}] [{?s}] {?s} {?s}", .{
+        try row.get(?[]const u8, 8), try row.get(?[]const u8, 9),
+        try row.get(?[]const u8, 10), try row.get(?[]const u8, 11),
+    });
+    return out.items;

@@ -1,0 +1,7 @@
+
+    count += 1;
+    if (fail) @panic("boom");
+    return count;
+}
+var count: i32 = 0;
+fn unused() void {

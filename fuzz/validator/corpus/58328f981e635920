@@ -1,0 +1,4 @@
+
+    return 1;
+}
+fn f() callconv(.c) void {

@@ -1,0 +1,3 @@
+
+    const v = x orelse return null;
+    return try std.fmt.allocPrint(plzig.allocator, "{d}", .{v});

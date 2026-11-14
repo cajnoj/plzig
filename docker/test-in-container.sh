@@ -13,6 +13,11 @@
 #   tap        the TAP tests in test/tap/t (prove; PLZIG_TAP_TESTS selects)
 #   testing    C unit checks (make installcheck-testing); needs the
 #              PLZIG_TESTING=1 build installed (docker/run-all.sh does that)
+#   diskfull   docker/diskfull-checks.sh: compilations on a full file system;
+#              needs $PGDATA on a small tmpfs (docker/run-all.sh, "diskfull")
+#   fuzz       one SQL-driven fuzz target, fuzz/$PLZIG_FUZZ_TARGET/run.sh
+#              (hostabi, marshal, pipeline) for $PLZIG_FUZZ_SECONDS seconds,
+#              output to $PLZIG_FUZZ_OUT (docker/run-fuzz.sh)
 # PLZIG_NO_LANDLOCK=1 / PLZIG_NO_SECCOMP=1: the container was started with a
 # seccomp profile that blocks Landlock / seccomp filters; run only the checks
 # for that situation.
@@ -56,7 +61,7 @@ if has unit; then
     fi
 fi
 needs_server=0
-for l in regress security leaks isolation tap testing; do has $l && needs_server=1; done
+for l in regress security leaks isolation tap testing fuzz diskfull; do has $l && needs_server=1; done
 if [ $needs_server = 0 ] && [ "${PLZIG_NO_LANDLOCK:-0}" != 1 ] && [ "${PLZIG_NO_SECCOMP:-0}" != 1 ]; then
     [ $failed = 0 ] && { echo "RESULT: PASS"; exit 0; }
     echo "RESULT: FAIL"; exit 1
@@ -242,6 +247,29 @@ if has tap; then
             grep -q 'not ok' "$f" && { echo "=== $f"; grep -B5 -A20 'not ok' "$f" | head -80; }
         done
         layer tap FAIL "$tests"; fi
+fi
+
+if has diskfull; then
+    bash /src/docker/diskfull-checks.sh
+    df=$?
+    if [ $df -eq 0 ]; then layer diskfull PASS; else layer diskfull FAIL "$df failure(s)"; fi
+fi
+
+if has fuzz; then
+    t=${PLZIG_FUZZ_TARGET:-}
+    echo "--- fuzz target $t"
+    if [ -f "/src/fuzz/$t/run.sh" ]; then
+        PLZIG_FUZZ_OUT=${PLZIG_FUZZ_OUT:-/tmp/fuzz-out} bash "/src/fuzz/$t/run.sh" "${PLZIG_FUZZ_SECONDS:-60}" >/tmp/fuzz-run.log 2>&1
+        rc=$?
+        mkdir -p "${PLZIG_FUZZ_OUT:-/tmp/fuzz-out}"
+        cp /tmp/fuzz-run.log "${PLZIG_FUZZ_OUT:-/tmp/fuzz-out}/run.log"
+        grep -aE '^(FUZZ |FINDING|--- )' /tmp/fuzz-run.log
+        line=$(grep -a '^FUZZ ' /tmp/fuzz-run.log | tail -1)
+        if [ $rc -eq 0 ] && [[ "$line" == *": PASS"* ]]; then layer fuzz PASS "$t"; else
+            tail -30 /tmp/fuzz-run.log; layer fuzz FAIL "$t"; fi
+    else
+        layer fuzz FAIL "unknown target '$t'"
+    fi
 fi
 
 if has leaks; then

@@ -1,0 +1,18 @@
+
+    var outer = try plzig.spi.open("SELECT id FROM ct WHERE id <= 60 ORDER BY id", &.{});
+    defer outer.close();
+    var other = try plzig.spi.open("SELECT id FROM ct ORDER BY id DESC", &.{});
+    defer other.close();
+    var p = try plzig.spi.prepare("SELECT ct_inner($1), (SELECT count(*) FROM ct WHERE id < $1)::int", &.{.int4});
+    defer p.free();
+    var total: i64 = 0;
+    var zipped: i64 = 0;
+    while (try outer.next()) |row| {
+        const id = try row.get(i32, 0);
+        const r = try p.execute(.{id});                 // another query, another function
+        const rr = try r.row(0);
+        total += try rr.get(i64, 0) + try rr.get(i32, 1);
+        const o = (try other.next()).?;                 // interleaved with a second cursor
+        zipped += try o.get(i32, 0);
+    }
+    return try std.fmt.allocPrint(plzig.allocator, "total {d}, zipped {d}", .{ total, zipped });

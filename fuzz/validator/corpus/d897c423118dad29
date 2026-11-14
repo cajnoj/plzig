@@ -1,0 +1,4 @@
+
+    _ = plzig.spi.execute("SELECT 1/0", &.{}) catch {};
+    plzig.notice("must not get here", .{});
+    return 1;

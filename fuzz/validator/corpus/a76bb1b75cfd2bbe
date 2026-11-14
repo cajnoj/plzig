@@ -1,0 +1,6 @@
+
+    var n: i32 = 1;
+    for (a) |c| {
+        if (c == ',') n += 1;
+    }
+    return n;

@@ -1,0 +1,5 @@
+
+    var buf: [16]u8 = undefined;
+    _ = try plzig.spi.execute("INSERT INTO u_log VALUES ($1::int)", &.{try std.fmt.bufPrint(&buf, "{d}", .{x})});
+    if (x < 0) plzig.raise("negative", .{});
+    return x;

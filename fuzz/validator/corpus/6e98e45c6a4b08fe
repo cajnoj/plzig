@@ -1,0 +1,4 @@
+
+    const buf = plzig.allocator.alloc(u8, 1 << 30) catch return "fallback";
+    _ = buf;
+    return "got it";

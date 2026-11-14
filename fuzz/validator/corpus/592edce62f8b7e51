@@ -1,0 +1,31 @@
+
+    var cur = try plzig.spi.open("SELECT 1", &.{});
+    const h = cur.handle;
+    var forged: plzig.spi.Cursor = .{ .handle = 0 };
+    switch (what) {
+        1 => {
+            cur.close();
+            _ = try cur.next();               // the SDK knows it is closed
+        },
+        2 => {
+            forged = cur;                      // a copy of a closed cursor
+            cur.close();
+        },
+        3 => forged.handle = 0,
+        4 => forged.handle = 12345,
+        5 => forged.handle = h + (1 << 16),
+        6 => forged.handle = (h & ~@as(u64, 0xffff)) | 3,
+        7 => forged.handle = h | 0xffff,
+        8 => {                                 // exhausted: the SDK closed it
+            forged = cur;
+            while (try cur.next()) |_| {}
+        },
+        9 => {
+            forged = cur;
+            cur.close();
+            forged.close();                    // closing twice through a copy
+        },
+        else => forged = cur,
+    }
+    _ = try forged.next();
+    return "valid";

@@ -1,0 +1,3 @@
+
+    const v = x orelse return null;
+    return !v;

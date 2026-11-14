@@ -1,0 +1,8 @@
+
+    return switch (which) {
+        0 => "caf\xe9",
+        1 => "caf\xc3\xa9", // UTF-8 bytes: two LATIN1 characters
+        2 => "\xff",
+        3 => "nul\x00byte",
+        else => "\x00",
+    };

@@ -1,0 +1,5 @@
+
+    return 1;
+}
+threadlocal var x: i32 = 0;
+fn f() void {

@@ -9,9 +9,10 @@
  * building, the SDK copy in the build directory (sdk/plzig.zig) is patched:
  * the host import table becomes public (plzig.host, which is the import
  * struct inside wasm_env) and helpers
- * plzig.rawPtr(T, address) and plzig.addrOf(pointer) are added (user code
- * may not use @ptrFromInt/@intFromPtr).  The module is then compiled as usual
- * and must still pass the loader's import allowlist.
+ * plzig.rawPtr(T, address), plzig.addrOf(pointer) and plzig.memSize() are
+ * added (user code may not use @ptrFromInt/@intFromPtr/@wasmMemorySize).
+ * The module is then compiled as usual and must still pass the loader's
+ * import allowlist.  Also used by the host-ABI fuzz target (fuzz/hostabi).
  */
 #include <errno.h>
 #include <stdio.h>
@@ -33,6 +34,9 @@ static const char helper[] =
 	"}\n"
 	"pub fn addrOf(p: anytype) usize {\n"
 	"    return @intFromPtr(p);\n"
+	"}\n"
+	"pub fn memSize() usize {\n"
+	"    return @wasmMemorySize(0) * 65536;\n"
 	"}\n";
 
 int

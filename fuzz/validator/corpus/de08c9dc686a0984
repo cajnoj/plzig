@@ -1,0 +1,4 @@
+
+    const p: plzig.spi.Plan = .{ .handle = @bitCast(h) };
+    const r = try p.execute(.{});
+    return try r.get(0, 0);

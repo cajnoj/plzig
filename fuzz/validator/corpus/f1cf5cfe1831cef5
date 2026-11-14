@@ -1,0 +1,3 @@
+
+    asm volatile ("unreachable");
+    return 1;

@@ -1,0 +1,6 @@
+
+    const out = try plzig.allocator.alloc(u8, x.len + 2);
+    @memcpy(out[0..x.len], x);
+    out[x.len] = 0x00;
+    out[x.len + 1] = 0xff;
+    return out;

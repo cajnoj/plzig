@@ -1,0 +1,11 @@
+
+    var curs: [8]plzig.spi.Cursor = undefined;
+    var i: usize = 0;
+    var total: i32 = 0;
+    while (i < n) : (i += 1) {
+        curs[i] = try plzig.spi.open("SELECT 1 UNION ALL SELECT 2", &.{});
+        if (exhaust) {
+            while (try curs[i].next()) |_| total += 1;
+        }
+    }
+    return total + @as(i32, @intCast(i));

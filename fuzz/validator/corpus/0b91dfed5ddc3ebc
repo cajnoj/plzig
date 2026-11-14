@@ -1,0 +1,3 @@
+
+    const r = try plzig.spi.execute("INSERT INTO items(id, name) VALUES (99, 'sneaky')", &.{});
+    return @intCast(r.rows);

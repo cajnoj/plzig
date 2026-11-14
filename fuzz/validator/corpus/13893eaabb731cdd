@@ -1,0 +1,8 @@
+
+    return big(n);
+}
+fn big(n: i32) i32 {
+    var buf: [4096]u8 = undefined;
+    buf[@intCast(@mod(n, 4096))] = @truncate(@as(u32, @bitCast(n)));
+    if (n == 0) return buf[0];
+    return big(n - 1) + buf[@intCast(@mod(n, 4096))] - buf[@intCast(@mod(n, 4096))];

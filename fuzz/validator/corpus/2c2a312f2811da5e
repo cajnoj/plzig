@@ -1,0 +1,7 @@
+
+    if (n == 0) {
+        _ = try plzig.spi.execute("CREATE OR REPLACE FUNCTION u_selfrep(n int) RETURNS int STRICT VOLATILE LANGUAGE plzig AS 'return n + 1000;'", &.{});
+        const r = try plzig.spi.execute("SELECT u_selfrep(5)", &.{});
+        return try std.fmt.parseInt(i32, (try r.get(0, 0)).?, 10);
+    }
+    return n;

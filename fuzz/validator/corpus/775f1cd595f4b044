@@ -1,0 +1,3 @@
+
+    const r = try plzig.spi.execute("INSERT INTO lc VALUES (1)", &.{});
+    return @intCast(r.rows);

@@ -1,0 +1,35 @@
+
+    return run(what) catch |e| return e;
+}
+fn mem() ![2]i64 {
+    const r = try plzig.spi.execute(
+        "SELECT coalesce(sum(total_bytes) FILTER (WHERE name LIKE 'PL/Zig%'), 0)::int8, " ++
+        "coalesce(sum(total_bytes) FILTER (WHERE name LIKE 'SPI%'), 0)::int8 FROM pg_backend_memory_contexts", &.{});
+    const row = try r.row(0);
+    return .{ try row.get(i64, 0), try row.get(i64, 1) };
+}
+fn run(what: i32) ![]const u8 {
+    var before: [2]i64 = undefined;
+    var after: [2]i64 = undefined;
+    var n: i64 = 0;
+    if (what == 1) {
+        var p = try plzig.spi.prepare("SELECT g, 'row ' || g, int4send(g) FROM generate_series(1, $1) g", &.{.int4});
+        var c = try p.open(.{@as(i32, 100000)});
+        while (try c.next()) |row| {
+            n += try row.get(i32, 0) + @as(i64, @intCast((try row.get([]const u8, 1)).len + (try row.get([]const u8, 2)).len));
+            if (n == 1 + 5 + 4) before = try mem();
+        }
+        after = try mem();
+    } else {
+        var p = try plzig.spi.prepare("SELECT $1 + 1, $2 || 'x'", &.{ .int4, .text });
+        var i: i32 = 0;
+        while (i < 10000) : (i += 1) {
+            const r = try p.execute(.{ i, "abc" });
+            const row = try r.row(0);
+            n += try row.get(i32, 0) + @as(i64, @intCast((try row.get([]const u8, 1)).len));
+            if (i == 1000) before = try mem();
+        }
+        after = try mem();
+    }
+    return try std.fmt.allocPrint(plzig.allocator, "checksum {d}, PL/Zig memory grew: {any}, SPI memory grew: {any}",
+        .{ n, after[0] > before[0], after[1] > before[1] });

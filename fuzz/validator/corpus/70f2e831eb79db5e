@@ -1,0 +1,23 @@
+
+    var p = try plzig.spi.prepare("SELECT 1", &.{});
+    const h = p.handle;
+    var forged: plzig.spi.Plan = .{ .handle = 0 };
+    switch (what) {
+        1 => forged.handle = 0,
+        2 => forged.handle = 12345,
+        3 => forged.handle = h + (1 << 16),                  // right index, wrong serial
+        4 => forged.handle = (h & ~@as(u64, 0xffff)) | 999,  // right serial, bad index
+        5 => forged.handle = h | 0xffff,
+        6 => {                                               // freed
+            p.free();
+            forged.handle = h;
+        },
+        7 => {                                               // freed twice
+            forged.handle = h;
+            p.free();
+            forged.free();
+        },
+        else => forged.handle = h,
+    }
+    _ = try forged.execute(.{});
+    return "valid";

@@ -1,0 +1,13 @@
+# UBSan suppressions for the loader fuzz target (UBSAN_OPTIONS=suppressions=...).
+# Only checks that the WAMR build makes recoverable (fuzz/build.sh) can be
+# suppressed; everything else aborts.  Each entry is a known WAMR 2.4.5
+# report, documented in doc/security.md (residual risks) with its
+# reproducer under fuzz/loader/findings/:
+#
+# memory_instantiate (core/iwasm/interpreter/wasm_runtime.c:453):
+#   memory->heap_data = memory->memory_data + heap_offset with memory_data
+#   NULL for a linear memory of 0 pages ("applying zero offset to null
+#   pointer").  NULL + 0, formally undefined in C, is a no-op with GCC and
+#   Clang; nothing dereferences it (every access is bounds-checked against
+#   a size of 0).  findings/wamr-null-plus-zero.wasm
+pointer-overflow:memory_instantiate

@@ -1,0 +1,8 @@
+
+    const S = struct { var plan: ?plzig.spi.Plan = null; };
+    if (S.plan == null) S.plan = try plzig.spi.prepare("SELECT 'secret plan'", &.{});
+    var buf: [32]u8 = undefined;
+    _ = try plzig.spi.execute("INSERT INTO pt_handles VALUES ('maker', $1::bigint) ON CONFLICT (fn) DO UPDATE SET h = excluded.h",
+                              &.{try std.fmt.bufPrint(&buf, "{d}", .{S.plan.?.handle})});
+    _ = try S.plan.?.execute(.{});
+    return @intCast(S.plan.?.handle & 0xffff);

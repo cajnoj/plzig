@@ -1,0 +1,5 @@
+
+    const S = struct { var plan: ?plzig.spi.Plan = null; };
+    if (S.plan == null) S.plan = try plzig.spi.prepare("SELECT s FROM ct_secret", &.{});
+    var c = try S.plan.?.open(.{});
+    return try plzig.allocator.dupe(u8, try (try c.next()).?.get([]const u8, 0));

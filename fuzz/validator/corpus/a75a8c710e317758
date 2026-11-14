@@ -1,0 +1,5 @@
+
+    return big[@intCast(i)];
+}
+const big: [3 << 20]u8 = @splat(7);
+fn unused() void {

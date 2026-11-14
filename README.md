@@ -174,10 +174,19 @@ container). Variants on subsets of versions: PostgreSQL built from the
 vendored source with `--enable-cassert` (`docker/Dockerfile.hardened`), a
 Valgrind run, an ASan/UBSan build of PL/Zig and WAMR, a gcov coverage run
 (report in `build/coverage/`), GCC and Clang builds with
-`-Wall -Wextra -Werror` (`docker/compiler-checks.sh`), and `pg_upgrade` from
-PostgreSQL 14 (`docker/Dockerfile.variant`). The scripts take
+`-Wall -Wextra -Werror` (`docker/compiler-checks.sh`), `pg_upgrade` from
+PostgreSQL 14 (`docker/Dockerfile.variant`), a short run of every fuzz
+target (`fuzz`), the clang static analyzer, cppcheck and a check of the
+binaries' hardening (`static`, `docker/static-analysis.sh`), and
+compilations on a full file system (`diskfull`,
+`docker/diskfull-checks.sh`). The scripts take
 `PLZIG_PLATFORM` (docker `--platform`) and pick the Zig tarball by
 architecture; only x86_64 has been run.
+
+**Fuzzing** (`docker/run-fuzz.sh <target> <seconds>`, see
+`fuzz/README.md`): the validator, the module loader, the host-import ABI,
+marshalling and the source generator, and the whole compile pipeline, each
+for a time budget, non-zero exit status on a finding.
 
 Without Docker: `make check-zig ZIG=/abs/path/to/zig` runs the Zig unit
 tests; `make installcheck` the regression suite against an existing
@@ -433,6 +442,10 @@ keep running; everything else is recompiled on next use.
 
 ## Security model
 
+This section is the operator's summary. The threat model, every defence
+with what it relies on, and the residual risks are in
+[`doc/security.md`](doc/security.md).
+
 **What the sandbox gives you.** Guest code runs in a WebAssembly
 interpreter with software bounds checks. It cannot read or write backend
 memory, make system calls, start threads or install signal handlers; it can
@@ -622,7 +635,14 @@ path goes to the server log only.
 * WAMR is a large C code base running in the backend; a bug in its
   validator or interpreter would be a sandbox escape. The build disables
   every optional feature (AOT/JIT, WASI, threads, SIMD, GC, multi-module…)
-  to keep that surface small.
+  to keep that surface small, and modules that declare more memory than `plzig.max_memory` can
+  ever allow, or absurd numbers of locals or table elements (about 1 GB of
+  work for a few bytes of module), are refused before WAMR loads them.
+* The compiler has no process-count or memory-cgroup limit and no disk
+  quota beyond the per-file size limit: a compiler exploit could fork many
+  processes or fill the file system holding `$PGDATA` within the compile
+  timeout. Run the server under a cgroup (`TasksMax=`, `MemoryMax=`) and
+  keep `pg_wal` on its own file system (doc/security.md §8).
 
 ## License
 

@@ -1,0 +1,6 @@
+
+    var c = try plzig.spi.open("INSERT INTO ct(id) VALUES (1000), (1001) RETURNING id", &.{});
+    defer c.close();
+    var s: i32 = 0;
+    while (try c.next()) |row| s += try row.get(i32, 0);
+    return s;

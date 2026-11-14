@@ -1,0 +1,1 @@
+comptime { var i: u32 = 0; while (i < 10) : (i += 1) {} }

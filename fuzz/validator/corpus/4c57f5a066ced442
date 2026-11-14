@@ -1,0 +1,7 @@
+
+    var p = try plzig.spi.prepare("SELECT g FROM generate_series(1, $1) g", &.{.int4});
+    defer p.free();
+    var c = try p.open(.{n});
+    var s: i64 = 0;
+    while (try c.next()) |row| s += try row.get(i32, 0);
+    return s;          // c left open on purpose: closed by the host

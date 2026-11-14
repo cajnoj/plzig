@@ -26,6 +26,9 @@ zig build-exe --global-cache-dir <PGDATA>/plzig/pgsql_tmp.zig-cache --cache-dir 
 
 A module is accepted by the loader (`plzig_module_load`) only if
 
+* its linear memory declares at most 1023 MB of initial pages, no function
+  declares more than 65535 locals and no table more than 1048576 elements
+  (checked before WAMR sees the module, see doc/security.md §4.5);
 * WAMR's loader validates it (full validation, classic interpreter);
 * every import is a **function** imported from module **`plzig`**, its name
   is one of the 19 host functions below, and WAMR linked it (i.e. the

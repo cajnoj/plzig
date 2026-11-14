@@ -1,0 +1,10 @@
+var buf: [16]u8 = undefined;
+const p = try std.fmt.bufPrint(&buf, "{d}", .{a});
+const r = try plzig.spi.execute("SELECT $1::int + 1", &.{p});
+var cur = try plzig.spi.open("SELECT 1", &.{});
+defer cur.close();
+while (try cur.next()) |row| _ = try row.get(i32, 0);
+const pl = try plzig.spi.prepare("SELECT $1", &.{.int4});
+_ = try pl.execute(.{a});
+_ = try r.columnName(0);
+return try std.fmt.parseInt(i32, (try r.get(0, 0)).?, 10);

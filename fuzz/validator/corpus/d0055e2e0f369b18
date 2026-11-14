@@ -1,0 +1,2 @@
+
+    @panic("custom panic message");

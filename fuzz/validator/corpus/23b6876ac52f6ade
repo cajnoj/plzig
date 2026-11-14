@@ -1,0 +1,7 @@
+
+    if (n <= 1) return 1;
+    var buf: [16]u8 = undefined;
+    const arg = try std.fmt.bufPrint(&buf, "{d}", .{n - 1});
+    const r = try plzig.spi.execute("SELECT fact($1::int)", &.{arg});
+    const sub = try std.fmt.parseInt(i64, (try r.get(0, 0)).?, 10);
+    return @as(i64, n) * sub;

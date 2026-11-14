@@ -1,0 +1,4 @@
+
+    const out = try plzig.allocator.alloc(u8, t.len);
+    for (t, 0..) |c, i| out[i] = std.ascii.toLower(c);
+    return out;

@@ -1,0 +1,3 @@
+
+    @setRuntimeSafety(false);
+    return 1;

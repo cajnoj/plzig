@@ -1156,3 +1156,103 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
     - The SDK files changed (test seam, overflow-safe arena, `pub` in
       root.zig); their digest is part of the cache key, so every cached
       module is recompiled once on first use after the update.
+26. **Phase C, security testing (2026-11-14).** Done as §13 C describes,
+    with these results and differences:
+    - *Threat model* written as `doc/security.md` (attackers A: role with
+      `USAGE`; B: can write the module cache; C: compromised compiler in
+      the sandbox), checked against the code, with a residual-risk list.
+      Two points the plan did not anticipate: B is not really weaker than
+      the `postgres` OS user (the cache is 0700), and a module planted by B
+      under another function's key runs SQL with that function's
+      privileges (sandboxed, but not harmless); and the compiler has no
+      process-count, memory-cgroup or disk quota (operators are told to use
+      cgroups and a separate `pg_wal` file system).
+    - *Fuzzing* under `fuzz/`, one entry point `docker/run-fuzz.sh <target>
+      <seconds>` (`smoke` runs every target), five targets: `validator`
+      (Zig `-ffuzz` linked with libFuzzer; differential against an
+      independent lexer and `std.zig.Ast`; Zig's own `zig build --fuzz` was
+      not used: no time budget or exit status), `loader` (libFuzzer + ASan +
+      UBSan on the unchanged `src/plzig_runtime.c` and WAMR in the
+      production configuration, with stand-ins for the PostgreSQL services
+      and host imports; structure-aware mutator; leak check of the runtime
+      context), `hostabi` (a driver function compiled through
+      `docker/fake/hostilezig.c` replays random byte scripts as host-import
+      calls on the ASan server), `marshal` (round trips of 30 types, NULL
+      patterns, random signatures through the validator and source
+      generator) and `pipeline` (generated/mutated bodies through `CREATE
+      FUNCTION`). Runs made, x86_64, PG 18.7: validator 1918 s × 8 jobs,
+      34.5 M executions, no finding; loader 1922 s × 8 jobs, 34.0 M
+      executions, 11 slow inputs (the finding below), then after the fix
+      1869 s × 8 jobs, 50.8 M executions, no finding (line coverage of the
+      replayed corpus: `plzig_runtime.c` 79 %, `wasm_loader.c` 87 %,
+      `wasm_runtime.c` 53 %, `wasm_interp_classic.c` 53 %); the smoke
+      runs then found finding 3 below; after the fixes 1865 s × 8
+      jobs, 53.5 M executions, no finding; hostabi 660 s, 51 600 calls (these three SQL runs predate fixes 0 and 3, which do not touch their paths; their 60 s smoke runs after the fixes pass);
+      marshal 660 s, 723 600 values, 36 180 signatures; pipeline 660 s, 521
+      bodies; no other finding. Not done: 24-hour runs (documented in
+      `fuzz/README.md` as a pre-release step), wasm-smith-generated modules,
+      SQLsmith, CodeQL, aarch64.
+    - *Findings and fixes* (all in `doc/security.md` §8):
+      0. The module pre-check also refuses a module whose declared initial
+         memory exceeds the upper bound of `plzig.max_memory` (1023 MB):
+         it can never be instantiated. Regression test fake compiler
+         mode 10.
+      1. WAMR's loader and instantiation do work proportional to *declared*
+         counts that need no bytes: a 30-byte module declaring 2^30 locals
+         cost a production backend 1.4 s of uninterruptible CPU (past
+         `statement_timeout`) and ~1 GB per load; a 17-byte module with a
+         130-million-element table ~1 GB per instance. Reachable for B and
+         C only. Fixed in PL/Zig, not WAMR: `plzig_module_precheck`
+         (`src/plzig_runtime.c`) refuses functions with more than 65535
+         locals (WAMR rejects those anyway, later) and tables with more
+         than 1048576 elements before WAMR sees the module. Reproducers in
+         `fuzz/loader/findings/`, regression tests in
+         `docker/security-checks.sh` (fake compiler modes 8, 9).
+      2. WAMR UBSan report "applying zero offset to null pointer" in
+         `memory_instantiate` for a 0-page memory: harmless, reported and
+         suppressed by name for the fuzz runs (`fuzz/loader/ubsan.supp`),
+         like the known misaligned access in `tables_instantiate`.
+      3. Undefined behaviour in `plzig_instance_call` (UBSan, loader
+         target): the argument slots were written through a `PlzigSlot *`
+         derived from the address the guest's `plzig_alloc` returned, which
+         a hostile module can misalign. The copies were `memcpy` (no
+         effect with GCC/Clang on x86_64/aarch64), but the pointer
+         arithmetic is UB; now byte offsets. Reproducer
+         `fuzz/loader/findings/plzig-misaligned-args.wasm`.
+      4. Static analysis: `dirfd()` results used unchecked in
+         `plzig_build.c` (scan-build; replaced by the descriptor already at
+         hand, or checked), a dead initialisation (cppcheck), a cppcheck
+         false positive suppressed inline in `plzig.c`.
+      5. Hardening: `plzig-validate` was a static non-PIE executable; now
+         built with `-fPIE` (static PIE, full RELRO; Makefile).
+    - *Adversarial tests*: new regress test `test/sql/adversarial.sql`
+      (comptime reflection reaching `std.Io` but nothing OS-facing
+      compiling, private SDK declarations, import tricks, comptime loops,
+      row-level security and column privileges through all three SPI paths
+      including a kept plan re-checked after `SET ROLE`, definer/invoker
+      nesting, refused identity changes in an unprivileged session,
+      read-only transactions and data-modifying CTEs, an unprivileged
+      user's view of error messages); `docker/security-checks.sh` gained
+      the child's process state observed from inside the sandbox
+      (rlimits, environment, descriptors, signals, no_new_privs, seccomp,
+      parent-death signal, session, umask, cwd), Landlock refusing hard
+      links to outside files and moves out of the build directory, a FIFO
+      and a hard link to `postgresql.conf` as cache files, symbolic links in
+      place of the compile lock, the Zig cache and a build directory, and
+      the two pre-check cases; new `docker/diskfull-checks.sh` (data
+      directory on a small tmpfs). Already covered and not duplicated: no
+      `USAGE`, `SECURITY DEFINER`, STABLE/IMMUTABLE read-only, standby,
+      fault injection (TAP).
+    - *Static analysis* `docker/static-analysis.sh` (scan-build and cppcheck
+      over `src/`, hardening of the installed binaries), every suppression
+      justified in the script.
+    - *Wiring*: `docker/run-all.sh` variants `fuzz` (smoke, 60 s per
+      target), `static`, `diskfull`; `docker/run-tests.sh` unchanged except
+      that its layers include the new regress and security checks.
+    - *Changes to security-relevant code*: the module pre-check (above),
+      the runtime allocator refuses an empty linear memory, byte-offset
+      writes of the argument slots in `plzig_instance_call`,
+      the two `dirfd` changes in the recursive delete and cache
+      maintenance, `-fPIE` for the validator. No change to the sandbox
+      policy, the validator tables, permission checks, GUC defaults or the
+      ABI.

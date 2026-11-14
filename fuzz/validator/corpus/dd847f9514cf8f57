@@ -1,0 +1,5 @@
+
+    plzig.debug("debug {d}", .{1});
+    plzig.info("info {d}", .{2});
+    plzig.notice("notice {s}", .{"three"});
+    plzig.warning("warning {d}", .{4});

@@ -1,0 +1,3 @@
+
+    if (x > 10) plzig.raise("value {d} is too big", .{x});
+    return x;

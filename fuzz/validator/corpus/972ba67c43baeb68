@@ -1,0 +1,3 @@
+
+    return try std.fmt.allocPrint(plzig.allocator, "{s} {s} {s} {s}",
+        .{ n orelse "null", d orelse "null", a orelse "null", j orelse "null" });

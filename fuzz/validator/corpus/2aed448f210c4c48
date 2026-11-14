@@ -1,0 +1,9 @@
+
+    const S = struct { var cur: ?plzig.spi.Cursor = null; };
+    if (first) {
+        S.cur = try plzig.spi.open("SELECT 1 FROM ct", &.{});
+        _ = try S.cur.?.next();
+        return "opened";
+    }
+    _ = try S.cur.?.next();
+    return "still valid";

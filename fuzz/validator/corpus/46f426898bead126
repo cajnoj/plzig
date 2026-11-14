@@ -1,0 +1,9 @@
+
+    if (depth == 0) {
+        const p: plzig.spi.Plan = .{ .handle = @bitCast(h) };
+        _ = try p.execute(.{});
+        return "inner used the outer handle";
+    }
+    var p = try plzig.spi.prepare("SELECT pt_recurse($1, $2)", &.{ .int4, .int8 });
+    const r = try p.execute(.{ depth - 1, @as(i64, @bitCast(p.handle)) });
+    return try r.get(0, 0);

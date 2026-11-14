@@ -1,0 +1,7 @@
+
+    // 65535 ASCII bytes, then a two-byte character across the 64 kB limit
+    var buf: [65537]u8 = undefined;
+    @memset(buf[0..65535], 'a');
+    buf[65535] = 0xa4;
+    buf[65536] = 0xa2;
+    plzig.notice("{s}", .{buf[0..]});

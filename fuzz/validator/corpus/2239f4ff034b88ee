@@ -1,0 +1,12 @@
+
+    var p = try plzig.spi.prepare("SELECT g, g::float8 / 2, g % 2 = 0, NULLIF(g, 3)::int2, now() IS NOT NULL " ++
+                                  "FROM generate_series($1, $2) g", &.{ .int4, .int4 });
+    defer p.free();
+    var cur = try p.open(.{ lo, hi });
+    defer cur.close();
+    var out: std.ArrayList(u8) = .empty;
+    while (try cur.next()) |row| {
+        try out.print(plzig.allocator, "{d}:{d}:{any}:{?d}:{any} ", .{ try row.get(i32, 0), try row.get(f64, 1),
+            try row.get(bool, 2), try row.get(?i16, 3), try row.get(bool, 4) });
+    }
+    return out.items;

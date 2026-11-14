@@ -1,0 +1,3 @@
+
+    const r = try plzig.spi.execute("SELECT pg_backend_pid()", &.{});
+    return try std.fmt.parseInt(i32, (try r.get(0, 0)).?, 10);

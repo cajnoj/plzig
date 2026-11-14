@@ -1,0 +1,5 @@
+
+    const S = struct { var plan: ?plzig.spi.Plan = null; };
+    if (S.plan == null) S.plan = try plzig.spi.prepare("SELECT b FROM pt_inv", &.{});
+    const r = try S.plan.?.execute(.{});
+    return try (try r.row(0)).get(i32, 0);

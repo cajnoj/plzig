@@ -1,0 +1,5 @@
+
+    // (no braces: an isolation spec cannot contain them)
+    _ = try plzig.spi.execute("SELECT pg_advisory_xact_lock(4711)", &std.mem.zeroes([0]?[]const u8));
+    return "old code";
+  

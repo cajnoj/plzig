@@ -1,0 +1,12 @@
+
+    const r = try plzig.spi.execute("SELECT id, name, price FROM items ORDER BY id", &.{});
+    var out: std.ArrayList(u8) = .empty;
+    try out.print(plzig.allocator, "{d} rows, {d} cols:", .{ r.rows, r.columns });
+    var c: u32 = 0;
+    while (c < r.columns) : (c += 1) try out.print(plzig.allocator, " {s}", .{try r.columnName(c)});
+    var i: u64 = 0;
+    while (i < r.rows) : (i += 1) {
+        const name = (try r.get(i, 1)) orelse "<null>";
+        try out.print(plzig.allocator, "; {s}={s}@{s}", .{ (try r.get(i, 0)).?, name, (try r.get(i, 2)).? });
+    }
+    return out.items;

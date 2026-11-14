@@ -271,6 +271,7 @@ plzig_lru_trim(void)
 {
 	while (plzig_lru_count > plzig_instance_cache_size && !dlist_is_empty(&plzig_lru))
 	{
+		/* cppcheck-suppress nullPointer ; container_of macro (docker/static-analysis.sh) */
 		PlzigFunction *victim = dlist_tail_element(PlzigFunction, lru_node, &plzig_lru);
 
 		plzig_lru_remove(victim);

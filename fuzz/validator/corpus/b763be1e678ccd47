@@ -1,0 +1,11 @@
+
+    const a = plzig.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    const r = try plzig.spi.execute("SELECT 5::int2, 6::posint, NULL::int8, 'x'::name", &.{});
+    const row = try r.row(0);
+    try out.print(a, "{d} {s} {s} {?d} {s}/{s} {s}", .{ try row.get(i16, 0), @tagName(try row.kind(1)),
+        try row.get([]const u8, 1), try row.get(?i64, 2), @tagName(try row.kind(3)),
+        try row.get([]const u8, 3), @tagName(try row.kind(2)) });
+    const z = try plzig.spi.execute("SELECT FROM pt", &.{});
+    try out.print(a, "; {d} rows of {d} columns", .{ z.rows, (try z.row(1)).len() });
+    return out.items;

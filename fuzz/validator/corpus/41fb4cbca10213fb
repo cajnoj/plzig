@@ -1,0 +1,7 @@
+
+    const S = struct { var plan: ?plzig.spi.Plan = null; };
+    if (S.plan == null) S.plan = try plzig.spi.prepare("SELECT $1 * 2", &.{.int4});
+    const r = try S.plan.?.execute(.{i});
+    var c = try plzig.spi.open("SELECT 1 UNION ALL SELECT 2", &.{});
+    _ = try c.next();                  // left open: closed by the host
+    return try (try r.row(0)).get(i32, 0);

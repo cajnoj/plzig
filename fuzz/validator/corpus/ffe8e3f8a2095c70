@@ -1,0 +1,5 @@
+
+    const n: usize = @intCast(mb);
+    const buf = try plzig.allocator.alloc(u8, n << 20);
+    @memset(buf, 1);
+    return @intCast(buf.len >> 20);

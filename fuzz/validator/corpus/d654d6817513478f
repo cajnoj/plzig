@@ -1,0 +1,3 @@
+}
+const S = struct { pub fn f() void {} };
+fn g() void {

@@ -1,0 +1,16 @@
+
+    var cs: [10]plzig.spi.Cursor = undefined;
+    var buf: [16]u8 = undefined;
+    for (&cs, 0..) |*c, i| {
+        c.* = try plzig.spi.open("SELECT g * $1::int FROM generate_series(1, 3) g",
+            &.{try std.fmt.bufPrint(&buf, "{d}", .{i + 1})});
+    }
+    var sum: i64 = 0;
+    // interleaved: one row of every cursor, three times
+    for (0..3) |_| {
+        for (&cs) |*c| sum += try (try c.next()).?.get(i32, 0);
+    }
+    for (&cs) |*c| {
+        if (try c.next() != null) return error.TooManyRows;
+    }
+    return try std.fmt.allocPrint(plzig.allocator, "sum {d}", .{sum});

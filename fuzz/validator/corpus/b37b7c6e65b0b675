@@ -1,0 +1,5 @@
+
+    if (n <= 0) return 0;
+    var buf: [16]u8 = undefined;
+    const r = try plzig.spi.execute("SELECT u_rec($1::int)", &.{try std.fmt.bufPrint(&buf, "{d}", .{n - 1})});
+    return 1 + try std.fmt.parseInt(i32, (try r.get(0, 0)).?, 10);

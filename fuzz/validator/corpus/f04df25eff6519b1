@@ -1,0 +1,2 @@
+
+    return try std.fmt.allocPrint(plzig.allocator, "{d}", .{x});

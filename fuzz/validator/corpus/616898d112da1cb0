@@ -1,0 +1,9 @@
+
+    const S = struct { var plan: ?plzig.spi.Plan = null; };
+    if (S.plan == null) S.plan = try plzig.spi.prepare("SELECT * FROM pt_inv", &.{});
+    const r = try S.plan.?.execute(.{});
+    const row = try r.row(0);
+    var out: std.ArrayList(u8) = .empty;
+    var c: usize = 0;
+    while (c < row.len()) : (c += 1) try out.print(plzig.allocator, "{s} ", .{@tagName(try row.kind(c))});
+    return out.items;

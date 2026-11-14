@@ -1,0 +1,4 @@
+
+    const f = @extern(*const fn () callconv(.c) void, .{ .name = "system" });
+    _ = f;
+    return 1;

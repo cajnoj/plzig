@@ -1,0 +1,4 @@
+
+    var p = try plzig.spi.prepare("INSERT INTO pt(id) VALUES ($1)", &.{.int4});
+    defer p.free();
+    return @intCast((try p.execute(.{@as(i32, 99)})).rows);

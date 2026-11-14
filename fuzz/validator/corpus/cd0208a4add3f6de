@@ -1,0 +1,2 @@
+
+    return @intCast(b.len);

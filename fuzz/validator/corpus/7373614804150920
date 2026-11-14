@@ -1,0 +1,4 @@
+
+    const S = struct { var plan: ?plzig.spi.Plan = null; };
+    if (S.plan == null) S.plan = try plzig.spi.prepare("INSERT INTO pt(id) VALUES ($1)", &.{.int4});
+    return @intCast((try S.plan.?.execute(.{i})).rows);

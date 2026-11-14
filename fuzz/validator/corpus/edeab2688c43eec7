@@ -1,0 +1,5 @@
+
+    var c = try plzig.spi.open("SELECT g FROM generate_series(1, 1000000000) g", &.{});
+    var n: i64 = 0;
+    while (try c.next()) |row| n += try row.get(i32, 0);
+    return n;

@@ -1,0 +1,3 @@
+
+    if (std.mem.eql(u8, m, "sad")) return "ok";
+    return "happy";

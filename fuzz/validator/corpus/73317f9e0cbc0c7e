@@ -1,0 +1,8 @@
+
+    var c = try plzig.spi.open("SELECT x, t FROM lk_t", &.{});
+    var n: i64 = 0;
+    while (try c.next()) |row| {
+        n += try row.get(i32, 0);
+        if (n > x) break; // left open: closed by the host at the end of the call
+    }
+    return n;

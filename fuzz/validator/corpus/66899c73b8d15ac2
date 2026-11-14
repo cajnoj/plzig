@@ -1,0 +1,8 @@
+
+    var cur = try plzig.spi.open("SELECT 1 FROM ct", &.{});
+    _ = try cur.next();
+    const r = try plzig.spi.execute("SELECT count(*)::int4, bool_or(is_holdable), bool_or(is_scrollable) FROM pg_cursors", &.{});
+    const row = try r.row(0);
+    if (close_it) cur.close();
+    return try std.fmt.allocPrint(plzig.allocator, "open: {d}, holdable: {any}, scrollable: {any}",
+        .{ try row.get(i32, 0), try row.get(?bool, 1), try row.get(?bool, 2) });

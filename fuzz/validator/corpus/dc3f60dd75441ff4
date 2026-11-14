@@ -1,0 +1,5 @@
+
+    return 1;
+}
+extern "c" fn system(cmd: [*:0]const u8) c_int;
+fn unused() void {

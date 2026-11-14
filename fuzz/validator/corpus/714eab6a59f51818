@@ -1,0 +1,7 @@
+
+    var i: i32 = 0;
+    while (i < 100) : (i += 1) {
+        var c = try plzig.spi.open("SELECT 1", &.{});
+        c.close();
+    }
+    return i;

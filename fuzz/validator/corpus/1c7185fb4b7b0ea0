@@ -1,0 +1,5 @@
+
+    var buf: [16]u8 = undefined;
+    const s = try std.fmt.bufPrint(&buf, "{d}", .{id});
+    const r = try plzig.spi.execute("INSERT INTO items(id, name, price) VALUES ($1::int, $2, 1)", &.{ s, name });
+    return @intCast(r.rows);

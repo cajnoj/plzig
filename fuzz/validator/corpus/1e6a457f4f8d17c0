@@ -1,0 +1,4 @@
+
+    const out = try plzig.allocator.dupe(u8, u);
+    for (out) |*c| c.* = std.ascii.toUpper(c.*);
+    return out;

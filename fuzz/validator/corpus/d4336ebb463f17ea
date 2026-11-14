@@ -1,0 +1,3 @@
+
+    var x: i32 = 0;
+    return @atomicRmw(i32, &x, .Add, 1, .seq_cst);

@@ -1,0 +1,3 @@
+
+    const r = try plzig.spi.execute("SELECT 'caf\xe9'::text || $1", &.{"\xe9"});
+    return (try r.get(0, 0)).?;

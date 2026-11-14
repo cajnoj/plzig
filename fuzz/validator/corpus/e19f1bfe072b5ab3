@@ -1,0 +1,17 @@
+
+    var c = try plzig.spi.open("SELECT id FROM ct ORDER BY id", &.{});
+    var p = try plzig.spi.prepare("SELECT ct_catch($1)", &.{.int4});
+    var n: i64 = 0;
+    var caught: i64 = 0;
+    while (try c.next()) |row| {
+        const id = try row.get(i32, 0);
+        n += id;
+        if (@rem(id, 40) == 0) {
+            const r = try p.execute(.{@as(i32, 5)});
+            if (try (try r.row(0)).get(i32, 0) == -1) caught += 1;
+            // only our own cursor is left: the nested function's were dropped
+            const open = try plzig.spi.execute("SELECT count(*)::int4 FROM pg_cursors", &.{});
+            if (try (try open.row(0)).get(i32, 0) != 1) return error.UnexpectedCursorCount;
+        }
+    }
+    return try std.fmt.allocPrint(plzig.allocator, "sum {d}, caught {d}", .{ n, caught });

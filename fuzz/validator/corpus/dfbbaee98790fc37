@@ -1,0 +1,12 @@
+
+    switch (what) {
+        1 => _ = try plzig.spi.execute("DECLARE c CURSOR WITH HOLD FOR SELECT 1", &.{}),
+        2 => _ = try plzig.spi.execute("SELECT 1; FETCH ALL FROM c", &.{}),
+        3 => _ = try plzig.spi.execute("MOVE c", &.{}),
+        4 => _ = try plzig.spi.execute("CLOSE ALL", &.{}),
+        5 => _ = try plzig.spi.prepare("CLOSE c", &.{}),
+        6 => _ = try plzig.spi.open("FETCH ALL FROM c", &.{}),
+        7 => _ = try plzig.spi.execute("SELEC 1", &.{}),
+        else => {},
+    }
+    return "ok";

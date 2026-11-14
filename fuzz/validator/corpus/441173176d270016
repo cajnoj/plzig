@@ -1,0 +1,6 @@
+
+    return switch (which) {
+        0 => "ok",
+        1 => "\xff\xfe",
+        else => "nul\x00byte",
+    };

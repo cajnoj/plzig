@@ -1,0 +1,3 @@
+
+    if (t.len > 5) plzig.raise("too long: {s}", .{t});
+    return @intCast(t.len);

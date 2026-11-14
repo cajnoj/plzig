@@ -1,0 +1,4 @@
+
+    var s: u64 = 0;
+    for (b) |c| s += c;
+    return @intCast(s);

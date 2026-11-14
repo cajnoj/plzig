@@ -1,0 +1,6 @@
+
+    var x: u64 = @bitCast(seed);
+    while (true) x = step(x);
+}
+noinline fn step(x: u64) u64 {
+    return x *% 6364136223846793005 +% 1442695040888963407;

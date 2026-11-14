@@ -1,0 +1,11 @@
+
+    const S = struct { var plans: [10]plzig.spi.Plan = undefined; var count: usize = 0; };
+    var i: i32 = 0;
+    while (i < n) : (i += 1) {
+        S.plans[S.count] = try plzig.spi.prepare("SELECT 1", &.{});
+        S.count += 1;
+        var buf: [32]u8 = undefined;
+        _ = try plzig.spi.execute("INSERT INTO pt_handles VALUES ('cap', $1::bigint) ON CONFLICT (fn) DO UPDATE SET h = excluded.h",
+                                  &.{try std.fmt.bufPrint(&buf, "{d}", .{S.plans[S.count - 1].handle})});
+    }
+    return @intCast(S.count);

@@ -1,0 +1,14 @@
+
+    var plans: [20]plzig.spi.Plan = undefined;
+    const count: usize = @intCast(n);
+    for (plans[0..count], 0..) |*p, i| {
+        _ = i;
+        p.* = try plzig.spi.prepare("SELECT $1::bigint * 2", &.{.int8});
+    }
+    var sum: i64 = 0;
+    for (plans[0..count], 0..) |p, i| {
+        const r = try p.execute(.{@as(i64, @intCast(i))});
+        sum += try (try r.row(0)).get(i64, 0);
+    }
+    for (plans[0..count]) |*p| p.free();
+    return sum;

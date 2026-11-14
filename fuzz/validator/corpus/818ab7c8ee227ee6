@@ -1,0 +1,3 @@
+
+    const r = try plzig.spi.execute("SELECT count(*) FROM proc_log", &.{});
+    plzig.notice("proc_log has {s} rows", .{(try r.get(0, 0)).?});

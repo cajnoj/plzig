@@ -1,0 +1,7 @@
+
+    return switch (which) {
+        0 => "\xa4\xa2",   // あ
+        1 => "\xff\xfe",   // invalid
+        2 => "\xa4",       // truncated character
+        else => "ok",
+    };

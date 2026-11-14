@@ -1,0 +1,7 @@
+
+    return next();
+}
+var count: i32 = 0;
+fn next() i32 {
+    count += 1;
+    return count;

@@ -1,0 +1,1 @@
+const T = @Struct(.auto, null, &.{}, &.{}, &.{}); _ = T;

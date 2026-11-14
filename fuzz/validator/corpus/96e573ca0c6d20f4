@@ -1,0 +1,3 @@
+
+    plzig.notice("char [{s}] ({d} bytes), name [{s}] ({d} bytes)", .{ c, c.len, n, n.len });
+    return n[n.len - 1 ..];

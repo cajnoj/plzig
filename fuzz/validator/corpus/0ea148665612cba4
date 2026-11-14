@@ -1,0 +1,3 @@
+
+    plzig.notice("caf\xe9", .{});
+    plzig.raise("{s}", .{"\xe9t\xe9"});

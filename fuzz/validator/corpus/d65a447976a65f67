@@ -1,0 +1,6 @@
+
+    plzig.debug("level {s}", .{"debug"});
+    plzig.print(.log, "level {s}", .{"log"});
+    plzig.info("level {s}", .{"info"});
+    plzig.notice("level {s}", .{"notice"});
+    plzig.warning("level {s}", .{"warning"});

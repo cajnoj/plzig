@@ -1,0 +1,5 @@
+
+    var c = try plzig.spi.open("SELECT pg_sleep(0.01) FROM generate_series(1, 1000)", &.{});
+    var n: i64 = 0;
+    while (try c.next()) |_| n += 1;
+    return n;

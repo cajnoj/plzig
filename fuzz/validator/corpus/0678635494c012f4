@@ -1,0 +1,5 @@
+
+    var c = try plzig.spi.open("SELECT id FROM ct", &.{});
+    _ = try c.next();
+    _ = try plzig.spi.execute("ALTER TABLE ct ADD COLUMN extra int", &.{});
+    return "altered";

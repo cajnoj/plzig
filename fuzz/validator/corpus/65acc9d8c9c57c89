@@ -1,0 +1,3 @@
+
+    const r = try plzig.spi.execute("SELECT s FROM secret", &.{});
+    return try r.get(0, 0);

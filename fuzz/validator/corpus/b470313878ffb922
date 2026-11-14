@@ -1,0 +1,5 @@
+const m =
+    \\@import("std")
+    \\extern volatile
+;
+_ = m;

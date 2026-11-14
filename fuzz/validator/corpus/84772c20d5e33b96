@@ -1,0 +1,15 @@
+
+    switch (kind) {
+        0 => return 42,
+        1 => plzig.raise("raised {d}", .{kind}),
+        2 => return error.ZigError,
+        3 => @panic("panicked"),
+        4 => {
+            const zero: i32 = kind - 4;
+            return @divTrunc(10, zero);
+        },
+        5 => _ = try plzig.spi.execute("SELECT 1/0", &.{}),
+        6 => _ = try plzig.spi.execute("SELECT * FROM no_such_table", &.{}),
+        else => {},
+    }
+    return -1;

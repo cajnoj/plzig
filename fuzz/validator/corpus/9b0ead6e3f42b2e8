@@ -1,0 +1,2 @@
+
+    return (s orelse 0) + (x orelse 0);

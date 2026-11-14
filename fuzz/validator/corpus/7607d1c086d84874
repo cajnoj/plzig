@@ -1,0 +1,2 @@
+
+    return if (v.len > 1000) v else "x\x00";

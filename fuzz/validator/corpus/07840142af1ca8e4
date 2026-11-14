@@ -1,0 +1,2 @@
+
+    return @divTrunc(100, x);

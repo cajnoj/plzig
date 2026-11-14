@@ -1,0 +1,2 @@
+
+    return if (which == 0) "\"\xa4\xa2\"" else "\"\xff\"";

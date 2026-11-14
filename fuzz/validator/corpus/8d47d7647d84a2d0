@@ -1,0 +1,6 @@
+
+    if (std.math.isNan(x)) return "nan";
+    if (std.math.isPositiveInf(x)) return "+inf";
+    if (std.math.isNegativeInf(x)) return "-inf";
+    if (x == 0 and std.math.signbit(x)) return "-0";
+    return "finite";

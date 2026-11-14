@@ -1,0 +1,4 @@
+
+    if (std.mem.eql(u8, c, "red")) return "green";
+    if (std.mem.eql(u8, c, "green")) return "blue";
+    return "purple";

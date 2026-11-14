@@ -1,0 +1,3 @@
+
+    return @"return" + @"fn" + @"extern" + @"asm" + @"volatile" + @"i32" + @"u8" +
+        @"true" + @"null" + @"undefined" + @"type" + @"anyerror" + Foo;

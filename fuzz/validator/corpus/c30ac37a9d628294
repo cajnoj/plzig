@@ -1,0 +1,7 @@
+
+    var i: i32 = 0;
+    while (i < 10) : (i += 1) {
+        var p = try plzig.spi.prepare("SELECT 1", &.{});
+        p.free();
+    }
+    return i;

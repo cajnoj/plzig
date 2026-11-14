@@ -1,0 +1,2 @@
+
+    return @intCast(@wasmMemoryGrow(0, 1));

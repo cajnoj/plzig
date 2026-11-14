@@ -26,7 +26,7 @@ DATA = sql/plzig--1.0.sql
 PGFILEDESC = "PL/Zig - procedural language"
 
 REGRESS = setup basics types types_more signatures usage encoding spi spi_prepared spi_cursor \
-          sandbox resources leaks lifecycle
+          sandbox adversarial resources leaks lifecycle
 REGRESS_OPTS = --inputdir=test --load-extension=plzig
 # only against a PLZIG_TESTING=1 build: make installcheck-testing
 REGRESS_TESTING = testing
@@ -87,9 +87,11 @@ $(WAMR_LIB): $(WAMR_BUILD_SRC)/.stamp third_party/wamr/CMakeLists.txt
 	    -DCMAKE_C_COMPILER="$(CC)" >/dev/null
 	+cmake --build $(BUILD_DIR)/wamr
 
+# static PIE (full RELRO, ASLR for the code too); it needs no program
+# interpreter, so it starts under Landlock like a plain static binary
 $(VALIDATOR): zig/validate/main.zig third_party/check-zig.sh
 	sh third_party/check-zig.sh "$(ZIG)" "$(ZIG_VERSION)"
-	"$(ZIG)" build-exe -O ReleaseSafe -fstrip -mcpu baseline \
+	"$(ZIG)" build-exe -O ReleaseSafe -fstrip -mcpu baseline -fPIE \
 	    --global-cache-dir $(BUILD_DIR)/zig-cache-host \
 	    --cache-dir $(BUILD_DIR)/zig-cache-local \
 	    zig/validate/main.zig --name plzig-validate -femit-bin=$@

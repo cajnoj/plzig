@@ -1,0 +1,18 @@
+
+    const p = try plzig.spi.prepare("SELECT $1::text || $2", &.{ .int4, .text });
+    switch (what) {
+        1 => _ = try p.execute(.{@as(i32, 1)}),
+        2 => _ = try p.execute(.{ @as(i32, 1), "a", "b" }),
+        3 => _ = try p.execute(.{ @as(i64, 1), "a" }),
+        4 => _ = try p.execute(.{ @as(i32, 1), plzig.bytea("a") }),
+        5 => _ = try p.execute(.{ @as(?i16, null), "a" }),
+        6 => _ = try plzig.spi.prepare("SELECT $1", &.{@as(plzig.spi.Type, @enumFromInt(42))}),
+        7 => _ = try plzig.spi.prepare("SELECT $1", &.{@as(plzig.spi.Type, @enumFromInt(0))}),
+        8 => _ = try plzig.spi.prepare("SELECT $3::int", &.{.int4}),
+        9 => _ = try plzig.spi.prepare("SELECT $1 + 1", &.{.text}),
+        else => {
+            const r = try p.execute(.{ @as(i32, 1), null });
+            return (try (try r.row(0)).get(?[]const u8, 0)) orelse "null";
+        },
+    }
+    return "unreachable";

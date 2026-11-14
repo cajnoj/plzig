@@ -1,0 +1,2 @@
+
+    if (bad) plzig.notice("bad \xff", .{}) else plzig.notice("good \xa4\xa2", .{});

@@ -1,0 +1,11 @@
+
+    var cur = try plzig.spi.open("SELECT id FROM ct ORDER BY id", &.{});
+    var cur2 = try plzig.spi.open("SELECT 10 / (60 - id) FROM ct ORDER BY id", &.{});
+    _ = &cur2;
+    var n: i32 = 0;
+    while (try cur.next()) |row| {
+        n += 1;
+        if (n == at) plzig.raise("error at row {d}", .{try row.get(i32, 0)});
+        if (at < 0) _ = try cur2.next();
+    }
+    return n;

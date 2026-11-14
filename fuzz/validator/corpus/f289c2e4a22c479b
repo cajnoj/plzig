@@ -1,0 +1,4 @@
+
+    var p = try plzig.spi.prepare("UPDATE ct SET name = 'x' WHERE id = $1 RETURNING id", &.{.int4});
+    var c = try p.open(.{@as(i32, 1)});
+    return (try (try c.next()).?.get(i32, 0));

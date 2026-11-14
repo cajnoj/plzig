@@ -1,0 +1,4 @@
+
+    var x: i32 = 0;
+    const p: *volatile i32 = &x;
+    return p.*;

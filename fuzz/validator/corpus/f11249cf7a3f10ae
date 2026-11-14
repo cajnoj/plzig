@@ -1,0 +1,1 @@
+ _ = try plzig.spi.prepare("SELECT 1", &.{}); _ = try plzig.spi.prepare("SELECT 2", &.{}); 

@@ -1,0 +1,8 @@
+
+    return switch (k) {
+        0 => std.math.inf(f32),
+        1 => -std.math.inf(f32),
+        2 => std.math.nan(f32),
+        3 => -0.0,
+        else => std.math.floatMax(f32),
+    };

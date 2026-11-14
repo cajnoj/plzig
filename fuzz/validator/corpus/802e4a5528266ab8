@@ -1,0 +1,3 @@
+
+    const r = try plzig.spi.execute("SELECT current_user::text", &.{});
+    return try r.get(0, 0);

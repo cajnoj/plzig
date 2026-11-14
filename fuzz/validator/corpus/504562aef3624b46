@@ -1,0 +1,3 @@
+
+    const r = try plzig.spi.execute("SELECT coalesce($1, 'was null') || '/' || $2", &.{ null, "x" });
+    return try r.get(0, 0);

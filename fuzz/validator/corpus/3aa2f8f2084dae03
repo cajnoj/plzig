@@ -1,0 +1,16 @@
+
+    if (n == 0) {
+        const p: plzig.spi.Plan = .{ .handle = @bitCast(h) };
+        _ = try p.execute(.{});
+        return "valid";
+    }
+    var buf: [32]u8 = undefined;
+    const S = struct { var plans: [10]plzig.spi.Plan = undefined; var count: usize = 0; };
+    var i: i32 = 0;
+    while (i < n) : (i += 1) {
+        S.plans[S.count] = try plzig.spi.prepare("SELECT 1", &.{});
+        _ = try plzig.spi.execute("INSERT INTO pt_handles VALUES ('cap2', $1::bigint) ON CONFLICT (fn) DO UPDATE SET h = excluded.h",
+                                  &.{try std.fmt.bufPrint(&buf, "{d}", .{S.plans[S.count].handle})});
+        S.count += 1;
+    }
+    return "prepared";

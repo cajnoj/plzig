@@ -1,0 +1,3 @@
+
+    var c = try plzig.spi.open("INSERT INTO ct(id) VALUES (999) RETURNING id", &.{});
+    return (try (try c.next()).?.get(i32, 0));

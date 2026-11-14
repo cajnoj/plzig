@@ -1,0 +1,5 @@
+
+    var p = try plzig.spi.prepare("INSERT INTO pt(id, name, flag) VALUES ($1, $2, $3)", &.{ .int4, .text, .boolean });
+    defer p.free();
+    const r = try p.execute(.{ id, name, true });
+    return @intCast(r.rows);

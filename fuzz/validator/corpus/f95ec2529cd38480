@@ -1,0 +1,3 @@
+
+    const r = try plzig.spi.execute("DELETE FROM items", &.{});
+    return @intCast(r.rows);

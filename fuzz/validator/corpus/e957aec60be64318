@@ -1,0 +1,3 @@
+
+    const r = try plzig.spi.execute("SELECT 1", &.{});
+    return try r.get(5, 0);

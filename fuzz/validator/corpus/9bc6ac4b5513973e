@@ -1,0 +1,2 @@
+
+    plzig.raise("bad \xa4", .{});

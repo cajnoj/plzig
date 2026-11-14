@@ -1,0 +1,9 @@
+
+    const S = struct { var plans: [8]plzig.spi.Plan = undefined; var count: usize = 0; };
+    var i: i32 = 0;
+    while (i < n) : (i += 1) {
+        S.plans[S.count] = try plzig.spi.prepare("SELECT 1", &.{});
+        S.count += 1;
+    }
+    if (fail) plzig.raise("failing with {d} plans", .{S.count});
+    return @as(i32, @intCast(S.count)) + 100;

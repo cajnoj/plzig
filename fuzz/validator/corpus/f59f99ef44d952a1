@@ -1,0 +1,8 @@
+
+    if (plan == null) plan = try plzig.spi.prepare("SELECT t FROM lk_t WHERE x = $1", &.{.int4});
+    const r = try plan.?.execute(.{x});
+    _ = try (try r.row(0)).get([]const u8, 0);
+    return @intCast(r.rows);
+}
+var plan: ?plzig.spi.Plan = null;
+fn unused() void {
