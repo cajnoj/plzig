@@ -22,6 +22,8 @@
 #   --history DIR        a directory of labelled run directories (1-head, 2-...;
 #                        optional DIR/README with "label: description" lines);
 #                        the report shows their task 10 side by side
+#   --call-history DIR   the same for runs of tasks 1, 7 and 8 with pgbench
+#                        (shown as the per-call/per-row before-and-after table)
 #   --publish            write the report to doc/benchmarks.md + doc/benchmarks/
 #   --profile "QUERY"    instead of benchmarking: set up as usual (with --tasks
 #                        to create only those functions), then perf-profile one
@@ -56,6 +58,7 @@ cpus=""
 out=""
 build=1
 history=""
+call_history=""
 publish=0
 report_only=""
 profile=""
@@ -74,6 +77,7 @@ while [ $# -gt 0 ]; do
         --out) out="$2"; shift 2 ;;
         --no-build) build=0; shift ;;
         --history) history="$2"; shift 2 ;;
+        --call-history) call_history="$2"; shift 2 ;;
         --publish) publish=1; shift ;;
         --report-only) report_only="$2"; shift 2 ;;
         --profile) profile="$2"; shift 2 ;;
@@ -103,10 +107,12 @@ render_report() {   # render_report <run dir>
     containers+=("$c")
     local args=(--in /tmp/in --out /tmp/report)
     [ -n "$history" ] && args+=(--history /tmp/history)
+    [ -n "$call_history" ] && args+=(--call-history /tmp/call-history)
     docker create --name "$c" "$img" python3 /bench/report.py "${args[@]}" >/dev/null
     docker cp bench/. "$c:/bench"
     docker cp "$dir/." "$c:/tmp/in"
     [ -n "$history" ] && docker cp "$history/." "$c:/tmp/history"
+    [ -n "$call_history" ] && docker cp "$call_history/." "$c:/tmp/call-history"
     docker start -a "$c"
     if [ $publish = 1 ]; then dest=doc; else dest="$dir/report"; fi
     mkdir -p "$dest/benchmarks"

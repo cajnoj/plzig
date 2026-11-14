@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Render the benchmark report from a run directory (bench/run.sh).
 
-    report.py --in RUNDIR --out OUTDIR [--history DIR]
+    report.py --in RUNDIR --out OUTDIR [--history DIR] [--call-history DIR]
 
 RUNDIR holds one subdirectory per PostgreSQL version (CSV files and
 meta.json written by bench/driver.py) and a file `primary` naming the
 primary version.  --history DIR holds labelled run directories (sorted by
 name, e.g. 1-head, 2-sdk, 3-copy) whose task 10 results are shown as a
-before/after table.
+before/after table.  --call-history DIR is the same for runs of tasks 1, 7
+and 8 with pgbench (the per-call and per-row changes).  Each may have a
+README of "label: description" lines; it is copied along with the CSVs.
 
 Writes OUTDIR/benchmarks.md, OUTDIR/benchmarks/*.svg and copies of the CSV
 files to OUTDIR/benchmarks/<version>/.  The hand-written analysis in
@@ -279,11 +281,97 @@ def timing_table(rows, jit):
     return d
 
 
+def read_history_readme(src, dst):
+    """label -> description from src/README (copied to dst/README)."""
+    desc = {}
+    dp = os.path.join(src, "README")
+    if os.path.exists(dp):
+        os.makedirs(dst, exist_ok=True)
+        shutil.copy(dp, os.path.join(dst, "README"))
+        for line in open(dp):
+            k, _, v = line.partition(":")
+            if k.strip():
+                desc[k.strip()] = v.strip()
+    return desc
+
+
+CALL_TASKS = [(1, "x+1"), (7, "by_key"), (8, "cursor_sum")]
+
+
+def call_history(src, dst, w):
+    """Tasks 1, 7, 8 and pgbench of labelled runs, one row per state."""
+    labels = sorted(x for x in os.listdir(src) if os.path.isdir(os.path.join(src, x)))
+    tv, pb = {}, {}
+    for lab in labels:
+        for v in sorted(os.listdir(os.path.join(src, lab))):
+            p = os.path.join(src, lab, v, "timings.csv")
+            if not os.path.exists(p):
+                continue
+            tv[lab] = timing_table(read_csv(p), "off")
+            d = os.path.join(dst, lab)
+            os.makedirs(d, exist_ok=True)
+            shutil.copy(p, d)
+            q = os.path.join(src, lab, v, "pgbench.csv")
+            if os.path.exists(q):
+                shutil.copy(q, d)
+                pb[lab] = read_csv(q)
+    desc = read_history_readme(src, dst)
+    labels = [lab for lab in labels if lab in tv]
+    w("## Per-call and per-row overhead before and after")
+    w("")
+    w("Separate runs of tasks 1, 7 and 8 (same method as the main run: 3 warm-up and "
+      "15 timed runs, JIT off, container pinned to the same CPUs, one run after the other), "
+      "one per state of the code, each state including the ones above it; median ms "
+      "(interquartile range). PL/pgSQL did not change between the runs: its column shows "
+      "the run-to-run noise. Raw data: [`benchmarks/call-history/`](benchmarks/call-history/).")
+    w("")
+    head = []
+    for t, var in CALL_TASKS:
+        head += [f"{t} {var}: PL/Zig", f"{t} {var}: PL/pgSQL"]
+    w("| State | " + " | ".join(head) + " |")
+    w("|---|" + "---:|" * len(head))
+    for lab in labels:
+        cells = []
+        for t, var in CALL_TASKS:
+            for i in ("plzig", "plpgsql"):
+                xs = tv[lab].get((t, var), {}).get(i, [])
+                if xs:
+                    q1, q3 = quart(xs)
+                    cells.append(f"{fms(med(xs))} ({fms(q1)}–{fms(q3)})")
+                else:
+                    cells.append("–")
+        w(f"| {desc.get(lab, lab)} | " + " | ".join(cells) + " |")
+    w("")
+    if pb:
+        clients = sorted({int(r["clients"]) for rows in pb.values() for r in rows})
+        w("pgbench (`-M prepared`, 15 s per client count, one measurement each, so no "
+          "spread): transactions per second at " + "/".join(str(c) for c in clients) +
+          " clients.")
+        w("")
+        head = []
+        for t in (1, 7):
+            head += [f"{t}: PL/Zig", f"{t}: PL/pgSQL"]
+        w("| State | " + " | ".join(head) + " |")
+        w("|---|" + "---:|" * len(head))
+        for lab in labels:
+            if lab not in pb:
+                continue
+            cells = []
+            for t in (1, 7):
+                for i in ("plzig", "plpgsql"):
+                    tps = {int(r["clients"]): float(r["tps"]) for r in pb[lab]
+                           if int(r["task"]) == t and r["impl"] == i}
+                    cells.append(" / ".join(f"{tps[c]:,.0f}" if c in tps else "–" for c in clients))
+            w(f"| {desc.get(lab, lab)} | " + " | ".join(cells) + " |")
+        w("")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="indir", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--history", default="")
+    ap.add_argument("--call-history", default="")
     args = ap.parse_args()
     with open(os.path.join(args.indir, "primary")) as f:
         primary = f.read().strip()
@@ -588,12 +676,7 @@ def main():
                     dst = os.path.join(figdir, "task10-history", lab)
                     os.makedirs(dst, exist_ok=True)
                     shutil.copy(p, dst)
-        desc = {}
-        dp = os.path.join(args.history, "README")
-        if os.path.exists(dp):
-            for line in open(dp):
-                k, _, v = line.partition(":")
-                desc[k.strip()] = v.strip()
+        desc = read_history_readme(args.history, os.path.join(figdir, "task10-history"))
         w("| State | " + " | ".join(f"{var}: PL/Zig" + " | " + f"{var}: PL/pgSQL" for var in ("text_1MB", "bytea_1MB")) + " |")
         w("|---|---:|---:|---:|---:|")
         for lab in labels:
@@ -610,6 +693,10 @@ def main():
                         cells.append("–")
             w(f"| {desc.get(lab, lab)} | " + " | ".join(cells) + " |")
         w("")
+
+    # history (per-call and per-row changes: tasks 1, 7, 8 and pgbench)
+    if args.call_history and os.path.isdir(args.call_history):
+        call_history(args.call_history, os.path.join(figdir, "call-history"), w)
 
     # cross-version
     if len(versions) > 1:

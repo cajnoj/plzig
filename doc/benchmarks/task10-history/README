@@ -1,0 +1,3 @@
+1-head: HEAD (82168e3) before phase D
+2-sdk: + SDK plzig_alloc without the 0xAA fill
+3-copy: + PLAN §12 item 6 (one copy for text/bytea results and SPI text parameters)

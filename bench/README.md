@@ -37,13 +37,20 @@ The published report was produced by
 ```sh
 bench/run.sh --cpus 0-11 --clients 1,2,4,8 --out build/bench/pg18
 bench/run.sh --cpus 0-11 --versions "14.25 19rc2" --jit off --runs 10 --clients "" --out build/bench/xver
-# combined: build/bench/pg18 plus the two version directories of xver
-bench/run.sh --report-only build/bench/pg18 --history build/bench/t10-history --publish
+bench/run.sh --cpus 0-11 --tasks 1,2,8 --jit off,on,force --clients "" --out build/bench/jit
+# combined: build/bench/pg18 plus the two version directories of xver,
+# and build/bench/jit/18.7 as pg18/jit/18.7
+bench/run.sh --report-only build/bench/pg18 --history build/bench/t10-history \
+    --call-history build/bench/abc-history --publish
 ```
 
 where `t10-history/` held three task-10-only runs (`--tasks 10 --jit off
---clients ""`) of the code before and after the changes described in the
-report.
+--clients ""`) of the code before and after the copy changes of phase D, and
+`abc-history/` four runs of tasks 1, 7 and 8 with pgbench (`--tasks 1,7,8
+--jit off --clients 1,2,4,8`) of the code before the per-call/per-row
+changes and after each of them (both described in the report; each
+directory has a README naming the states). The CSV files of both are kept
+under `doc/benchmarks/task10-history/` and `doc/benchmarks/call-history/`.
 
 `--profile "QUERY"` sets up the same cluster and records a `perf` profile of
 one backend running the query (output `perf-report.txt`); that mode runs the

@@ -1,0 +1,4 @@
+1-head: HEAD (ca4f263): three guest entries per call, two host calls per cursor row, two memory contexts created per call
+2-A: + one guest entry per call (argument buffer, ABI 3)
+3-B: + one host call per cursor row, no per-row allocation
+4-C: + per-instance call contexts, reset instead of created/deleted
