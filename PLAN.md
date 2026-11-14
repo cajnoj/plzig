@@ -597,6 +597,94 @@ v1 is expected to be slower than PL/pgSQL; neither weakens the sandbox.
    - Deliverable: `doc/research-subtransactions.md` with findings, a
      recommended design or a recommendation not to do it, the tests it
      would need, and an effort estimate.
+9. *Optional.* **Enable WAMR bulk-memory** (`memory.copy`/`memory.fill`;
+   WAMR build and `-mcpu` for guests). Helps string- and copy-heavy code
+   (every guest `memcpy`/`memset` becomes one native operation instead of
+   an interpreted byte loop; doc/benchmarks.md tasks 3 and 4). Enlarges the
+   interpreter surface slightly. The loader fuzz target must be run on the
+   new configuration (and pass) before it is enabled.
+10. *Optional, not planned.* **WAMR fast interpreter or AOT.** The fast
+    interpreter had a heap-overflow CVE fixed in the release we use (2.4.5);
+    AOT means running native code generated from guest modules inside the
+    backend. Both stay rejected (D2); the benchmark numbers are the
+    baseline if this is ever reconsidered.
+11. *Optional.* **Skip the `ReleaseSafe` 0xAA fill of guest allocations**
+    (`@memset(undefined)` in `Allocator.alloc`, ~8 ns per byte in the
+    interpreter). Harmless to the host (guest memory only), but it changes
+    what a buggy function sees: uninitialised memory would hold leftovers
+    of earlier calls of the same instance instead of 0xAA.
+12. **Native mappings for more built-in types** (owner decision,
+    2026-11-15; before the extension port of item 13 and before packaging).
+    Today every type other than bool, int2/4/8, float4/8, text-like and
+    bytea crosses the boundary as text. In this order:
+    1. *Fixed-width types*: `date`, `time`, `timestamp`, `timestamptz`,
+       `interval`, `uuid`, `oid`. Raw values in the existing 16-byte slot;
+       the host range-checks every value a guest returns or passes as an SPI
+       parameter (PostgreSQL's own range macros) and raises an error for an
+       invalid one.
+    2. *`numeric`*: PostgreSQL's binary wire format in both directions
+       (`numeric_send` / `numeric_recv`: architecture independent, and
+       `numeric_recv` is the server's validating path for untrusted bytes).
+       Comparison, conversion to `i64`/`f64` and formatting in the SDK;
+       arithmetic as host imports that call the native functions, so results
+       are PostgreSQL's exactly.
+    3. *Time zone and calendar conversion* as host imports (the guest sees
+       neither the time zone database nor the session's `TimeZone`).
+    4. *`jsonb` input* in the on-disk layout (stable since 9.4, identical in
+       14–19), read in place by an SDK reader: lazy, binary search on object
+       keys. Parsing happens inside the sandbox. `jsonb` *results* stay text
+       through `jsonb_in`: a guest-built binary value stored unchecked would
+       be a data-integrity risk. The layout is in host byte order: on a
+       big-endian host the type falls back to text. Fallback if the reader
+       proves troublesome: host accessor imports behind the same SDK
+       interface.
+    5. *Arrays* of natively mapped element types: later. Composites, ranges
+       and enums stay text.
+    The same mappings apply to SPI parameters and result columns. Each step:
+    regression tests, hostile-guest cases for returned values, and the SDK
+    readers get a fuzz target.
+    Considered and rejected: compiling PostgreSQL's own type code
+    (`numeric.c`, `jsonb_util.c`, ...) into the guest. It needs a stand-in
+    for the backend (`palloc`, `ereport`/`longjmp`, `fmgr`) and a libc in
+    every module, vendored PostgreSQL sources (not installed by PGXS), and
+    would run interpreted, where a host call into the native function is
+    expected to be faster. ecpg's `pgtypeslib` also needs libc and differs
+    from the server in behaviour.
+13. **Port a real PL/pgSQL extension and compare** (owner request,
+    2026-11-15): `postgres-json-schema` (`validate_json_schema(jsonb,
+    jsonb)`), in a separate repository; correctness by the extension's own
+    test suite; benchmark the original against the PL/Zig port (text and
+    binary `jsonb`), with the Rust `pg_jsonschema` as a third data point.
+14. **Features cut from v1 (D10) that are now planned** (owner decision,
+    2026-11-15; after item 12, which reworks the same marshalling code, and
+    before packaging, so that 1.0.0 ships with them). In this order:
+    1. *`OUT`/`INOUT`/`TABLE` parameters and composite results.* The
+       function returns a Zig struct; the host builds the row
+       (`heap_form_tuple`) from fields it has type-checked one by one, as it
+       does for a scalar result. Foundation for the next two.
+    2. *Set-returning functions.* Materialize mode: the guest pushes rows
+       through a host import into a tuplestore (as PL/pgSQL's `RETURN NEXT`),
+       bounded by `work_mem` as usual. No value-per-call mode: an instance
+       never stays suspended between calls.
+    3. *Row and statement triggers.* `NEW`/`OLD` as structs, `TG_*` data
+       through the SDK; the function returns a modified row, the original,
+       or null to skip. The returned row is built by the host from checked
+       fields and must match the table's row type; a trigger function keeps
+       the permissions of its owner/caller like any other function.
+    4. *Transaction control in procedures*: `plzig.commit()` and
+       `plzig.rollback()` (`SPI_commit`/`SPI_rollback`), only where
+       PostgreSQL allows it (non-atomic context: `CALL` or `DO` outside a
+       transaction block and not below a function; otherwise PostgreSQL's
+       own error is reported). To settle in the design: SPI is connected
+       non-atomically only for procedures and `DO`; every cursor of the call
+       is closed at commit/rollback (no holdable portals); prepared plans
+       survive (they are saved plans); nothing the host keeps for the call
+       may live in a transaction-lifetime memory context or resource owner;
+       an error during commit destroys the instance like any other error.
+       Catching SQL errors (item 8, subtransactions) stays separate.
+    Still not planned: event triggers (they run around DDL with elevated
+    context), polymorphic and other pseudo-types, `VARIADIC`, aggregate and
+    window function support.
 
 ## 13. Roadmap after v1 is operable
 
@@ -819,6 +907,52 @@ Open risks for E/F, to be raised with the owner when they become concrete:
 whether repositories accept a bundled or repackaged Zig toolchain; whether
 Debian accepts a patched embedded WAMR; upstreaming the interrupt patch to
 WAMR to remove that objection.
+
+## 14. Versioning and Zig upgrades (owner decision, 2026-11-14)
+
+**PL/Zig has its own semantic version; it does not mirror Zig's.** A scheme
+like `0.17.1.0` was considered and rejected: PL/Zig's own incompatible
+changes (ABI, SDK API, SQL surface) would have no place in it, PGXN requires
+three-part semantic versions, and the coupling breaks as soon as one Zig
+release needs two PL/Zig lines.
+
+- `MAJOR.MINOR.PATCH`. A new Zig minor release (0.18) forces a new PL/Zig
+  **major**; a Zig patch release (0.17.2) is a PL/Zig **minor**; PL/Zig's own
+  changes follow the usual rules (incompatible SDK/SQL change = major).
+- The first published release is `1.0.0` (extension version `1.0`). Until
+  then nothing is promised: the ABI and SDK change freely.
+- The pinned Zig version is shown everywhere else: extension comment and
+  control file, `plzig_sandbox_status()`, release notes, package description
+  and dependency (`zig = <pin>`), and a compatibility table in the README
+  (PL/Zig 1.x: Zig 0.17.1; ...).
+- Not decided: semantic-version build metadata (`1.0.0+zig.0.17.1`). Check
+  that PGXN, RPM and Debian all accept it before using it.
+
+**One Zig version per PL/Zig release; Zig is not a test-matrix dimension.**
+The validator uses the pinned version's tokenizer and classifies that
+version's builtins (a unit test fails on an unclassified builtin), and the
+server refuses any other compiler. Supporting several at once would multiply
+the validator, SDK and flag sets that need review and fuzzing.
+
+- *Zig patch release:* bump the pin, the checksums and, if needed, the
+  validator tables; full suite and fuzz targets; PL/Zig minor release. The
+  Zig version is in the module cache key, so every function recompiles once.
+- *Zig minor release:* function bodies are stored as source and may stop
+  compiling; failures surface at first call (also after dump/restore, which
+  restores with `check_function_bodies = off`). Therefore:
+  1. **`plzig_check_all()`** (to do; useful before any Zig upgrade too): a
+     superuser-only function that compiles every PL/Zig function with the
+     configured compiler, under the normal sandbox and limits, and returns
+     the ones that fail with their error. It must not execute any function,
+     must respect the compile lock and cancellation, and must not leave
+     modules in the cache for functions that fail.
+  2. An upgrade note listing the Zig language and `std` changes that affect
+     function bodies; a pass over the SDK's curated `std` subset and its
+     probing tests.
+  3. An overlap period in which the previous PL/Zig major (previous Zig)
+     still receives fixes.
+- *CI:* the matrix stays PostgreSQL versions x one Zig. Add one job against
+  the newest Zig release that is allowed to fail (early warning only).
 
 ## Deviations from plan
 
@@ -1343,3 +1477,65 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       `memset` single instructions), the ABI (one guest call per function
       call instead of three; one host call per cursor row instead of two),
       and the per-call memory contexts.
+28. **Per-call/per-row overhead and §12 item 7 (2026-11-14).** Four
+    changes on top of phase D, measured one after the other
+    (`doc/benchmarks.md`, *Per-call and per-row overhead before and
+    after*). SDK ABI version 3 (part of the cache key: every module is
+    recompiled); the three ABI changes land together, so version 3 covers
+    all of them.
+    - *One guest entry per call* (the recommendation of phase D). New
+      exports `plzig_init() -> i64` (called once per instance: the SDK's
+      4 kB static argument buffer, outside the arena, as
+      `capacity << 32 | address`) and `plzig_alloc_args(len)` (reset the
+      arena and allocate the argument block: the fallback for larger
+      arguments); `plzig_call` gets a fourth parameter `begin` (reset the
+      arena first). `plzig_begin` and `plzig_alloc` are gone. The host
+      checks the buffer at instantiation (16 bytes to 1 MB, inside linear
+      memory, else the module is rejected) and the actual block range on
+      every call; the exports must now have exactly the expected
+      parameter and result types, not only counts. Task 1: 384 -> 256 ms.
+      New hostile-guest tests ("hostile entry points" in
+      `docker/security-checks.sh`: forged, wrapping, too small/large and
+      misaligned buffers and blocks; `docker/fake/hostilezig.c` now also
+      patches the SDK root for that); the loader fuzz harness calls once
+      through the fallback path too.
+    - *One host call per cursor row.* `spi_cursor_next` + `spi_cursor_read`
+      became `spi_cursor_fetch(cursor, buf, buf_len)`: writes the row if it
+      fits, else returns its size and keeps it current for the next call
+      (taken from the portal once); returns `ncols << 32 | size`. The
+      per-row `palloc`s of the column arrays are gone (allocated once per
+      descriptor). 18 imports (19 again with item 7). Task 8:
+      290 -> 217 ms. The hostile-guest cases that tested "no current
+      row" and "row buffer is too small" on `spi_cursor_read` (24-28, 40)
+      were rewritten for `spi_cursor_fetch`, whose too-small buffer is not
+      an error any more (the cases now check that nothing is written and
+      the same row comes again); "row buffer is too small" is still
+      tested, through `spi_row_read` (new case 41).
+    - *Call contexts reused.* The `PL/Zig call` and `PL/Zig SPI scratch`
+      contexts belong to the instance (children of `PL/Zig runtime`),
+      are reset at the start and end of each call and deleted with the
+      instance; every exit from `plzig_instance_call` restores the
+      caller's memory context, and `plzig_instance_destroy` never leaves
+      `CurrentMemoryContext` in a deleted context. An idle instance keeps
+      about 2 kB (the first block of each). An error stashed by a host
+      import is copied into the caller's context instead of the call
+      context: the instance is destroyed before the error is reported, and
+      `ReThrowError` does not copy every string of an `ErrorData`
+      (filename, funcname, domain, message_id stay where `CopyErrorData`
+      put them) -- found by the ASan variant as a use after free in the
+      first version of this change. Task 1: 253 -> 234 ms. New
+      regress case in `leaks.sql` (a call using megabytes of host memory
+      leaves nothing in the kept instance); the loader harness also
+      refuses any context left below the runtime context.
+    - *§12 item 7*, as specified: import `raise_error` (19 imports),
+      `plzig.raiseError(.{ .sqlstate, .message, .detail, .hint })` and
+      `plzig.raiseErrorFmt(fields, fmt, args)`; refused or malformed codes
+      are `22023` errors naming the code; strings as for `raise` (64 kB
+      each, cut on a character boundary, database encoding, no NUL), then
+      control characters except newline and tab become `?` (the
+      compiler-output rule); empty detail/hint are omitted. `plzig.raise`
+      is unchanged (and keeps control characters). Tests:
+      `test/sql/errors.sql`, hostile-guest cases 42-49, fuzz driver.
+    - *Not done:* the same single-call scheme for `Result.row`
+      (`spi_row_size` + `spi_row_read` stay two calls); the three
+      optional items 9-11 of §12.
