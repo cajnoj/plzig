@@ -1,0 +1,5 @@
+{
+  "title": "First call in a new session; first-ever call after CREATE",
+  "stresses": "load and compile cost",
+  "special": "startup"
+}

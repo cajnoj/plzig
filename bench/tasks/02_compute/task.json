@@ -1,0 +1,10 @@
+{
+  "title": "Integer and float loops",
+  "stresses": "raw computation",
+  "params": {"full": {"n": 100000, "w": 2000, "maxiter": 1000},
+             "quick": {"n": 20000, "w": 300, "maxiter": 200}},
+  "variants": [
+    {"name": "primes", "fn": "t02_primes", "query": "SELECT {fn}({n})"},
+    {"name": "mandelbrot", "fn": "t02_mandel", "query": "SELECT {fn}({w}, {maxiter})"}
+  ]
+}

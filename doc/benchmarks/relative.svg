@@ -1,0 +1,133 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 432" width="820" height="432" role="img" aria-labelledby="t d">
+<title id="t">Time relative to PL/pgSQL, PostgreSQL 18.7, JIT off</title>
+<desc id="d">Dot plot, log scale: median time of each implementation divided by the PL/pgSQL median, one row per task. Left of 1x is faster than PL/pgSQL.</desc>
+<style>
+  text { font-family: system-ui, -apple-system, 'Segoe UI', 'DejaVu Sans', sans-serif; font-size: 12px; }
+  .t { font-size: 14px; font-weight: 600; }
+  .bg { fill: #fcfcfb; }
+  .ring { stroke: #fcfcfb; stroke-width: 2; }
+  text { fill: #52514e; }
+  .t, .lab { fill: #0b0b0b; }
+  .grid { stroke: #e4e3df; stroke-width: 1; }
+  .axis { stroke: #52514e; stroke-width: 1; }
+  .f-sql { fill: #2a78d6; } .s-sql { stroke: #2a78d6; fill: none; }
+  .f-plpgsql { fill: #eb6834; } .s-plpgsql { stroke: #eb6834; fill: none; }
+  .f-plpython { fill: #1baf7a; } .s-plpython { stroke: #1baf7a; fill: none; }
+  .f-plperl { fill: #eda100; } .s-plperl { stroke: #eda100; fill: none; }
+  .f-plzig { fill: #e87ba4; } .s-plzig { stroke: #e87ba4; fill: none; }
+  @media (prefers-color-scheme: dark) {
+  .bg { fill: #1a1a19; }
+  .ring { stroke: #1a1a19; stroke-width: 2; }
+  text { fill: #c3c2b7; }
+  .t, .lab { fill: #f0efec; }
+  .grid { stroke: #3a3a37; stroke-width: 1; }
+  .axis { stroke: #c3c2b7; stroke-width: 1; }
+  .f-sql { fill: #3987e5; } .s-sql { stroke: #3987e5; fill: none; }
+  .f-plpgsql { fill: #d95926; } .s-plpgsql { stroke: #d95926; fill: none; }
+  .f-plpython { fill: #199e70; } .s-plpython { stroke: #199e70; fill: none; }
+  .f-plperl { fill: #c98500; } .s-plperl { stroke: #c98500; fill: none; }
+  .f-plzig { fill: #d55181; } .s-plzig { stroke: #d55181; fill: none; }
+  }
+</style>
+<rect width="820" height="432" class="bg"/>
+<text x="16" y="24" class="t">Time relative to PL/pgSQL, PostgreSQL 18.7, JIT off</text>
+<circle cx="21" cy="44" r="5" class="f-sql"/>
+<text x="30" y="48" class="lab">SQL</text>
+<circle cx="66.6" cy="44" r="5" class="f-plpgsql"/>
+<text x="75.6" y="48" class="lab">PL/pgSQL</text>
+<circle cx="148.2" cy="44" r="5" class="f-plpython"/>
+<text x="157.2" y="48" class="lab">PL/Python</text>
+<circle cx="237.0" cy="44" r="5" class="f-plperl"/>
+<text x="246.0" y="48" class="lab">PL/Perl</text>
+<circle cx="311.4" cy="44" r="5" class="f-plzig"/>
+<text x="320.4" y="48" class="lab">PL/Zig</text>
+<rect x="373.59999999999997" y="39" width="10" height="10" class="s-plzig" stroke-width="2"/>
+<text x="387.59999999999997" y="48" class="lab">PL/Zig (exec)</text>
+<line x1="230.0" y1="62" x2="230.0" y2="390" class="grid"/>
+<text x="230.0" y="406" text-anchor="middle">0.01×</text>
+<line x1="286.2" y1="62" x2="286.2" y2="390" class="grid" stroke-dasharray="2 3"/>
+<line x1="360.5" y1="62" x2="360.5" y2="390" class="grid" stroke-dasharray="2 3"/>
+<line x1="416.7" y1="62" x2="416.7" y2="390" class="grid"/>
+<text x="416.7" y="406" text-anchor="middle">0.1×</text>
+<line x1="472.9" y1="62" x2="472.9" y2="390" class="grid" stroke-dasharray="2 3"/>
+<line x1="547.1" y1="62" x2="547.1" y2="390" class="grid" stroke-dasharray="2 3"/>
+<line x1="603.3" y1="62" x2="603.3" y2="390" class="grid"/>
+<text x="603.3" y="406" text-anchor="middle">1×</text>
+<line x1="659.5" y1="62" x2="659.5" y2="390" class="grid" stroke-dasharray="2 3"/>
+<line x1="733.8" y1="62" x2="733.8" y2="390" class="grid" stroke-dasharray="2 3"/>
+<line x1="790.0" y1="62" x2="790.0" y2="390" class="grid"/>
+<text x="790.0" y="406" text-anchor="middle">10×</text>
+<line x1="603.3" y1="62" x2="603.3" y2="390" class="axis"/>
+<text x="510" y="424" text-anchor="middle">time relative to PL/pgSQL (log scale, left is faster)</text>
+<text x="218" y="87.0" text-anchor="end" class="lab">1 x+1</text>
+<circle cx="482.9" cy="83.0" r="6" class="f-sql ring"><title>1 x+1 – SQL: 0.23× PL/pgSQL time</title></circle>
+<circle cx="603.3" cy="83.0" r="6" class="f-plpgsql ring"><title>1 x+1 – PL/pgSQL: 1.00× PL/pgSQL time</title></circle>
+<circle cx="674.7" cy="83.0" r="6" class="f-plpython ring"><title>1 x+1 – PL/Python: 2.41× PL/pgSQL time</title></circle>
+<circle cx="685.4" cy="83.0" r="6" class="f-plperl ring"><title>1 x+1 – PL/Perl: 2.75× PL/pgSQL time</title></circle>
+<circle cx="643.9" cy="83.0" r="6" class="f-plzig ring"><title>1 x+1 – PL/Zig: 1.65× PL/pgSQL time</title></circle>
+<text x="218" y="113.0" text-anchor="end" class="lab">2 mandelbrot</text>
+<circle cx="603.3" cy="109.0" r="6" class="f-plpgsql ring"><title>2 mandelbrot – PL/pgSQL: 1.00× PL/pgSQL time</title></circle>
+<circle cx="562.1" cy="109.0" r="6" class="f-plpython ring"><title>2 mandelbrot – PL/Python: 0.60× PL/pgSQL time</title></circle>
+<circle cx="591.6" cy="109.0" r="6" class="f-plperl ring"><title>2 mandelbrot – PL/Perl: 0.87× PL/pgSQL time</title></circle>
+<circle cx="478.6" cy="109.0" r="6" class="f-plzig ring"><title>2 mandelbrot – PL/Zig: 0.21× PL/pgSQL time</title></circle>
+<text x="218" y="139.0" text-anchor="end" class="lab">2 primes</text>
+<circle cx="697.5" cy="135.0" r="6" class="f-sql ring"><title>2 primes – SQL: 3.19× PL/pgSQL time</title></circle>
+<circle cx="603.3" cy="135.0" r="6" class="f-plpgsql ring"><title>2 primes – PL/pgSQL: 1.00× PL/pgSQL time</title></circle>
+<circle cx="541.5" cy="135.0" r="6" class="f-plpython ring"><title>2 primes – PL/Python: 0.47× PL/pgSQL time</title></circle>
+<circle cx="553.8" cy="135.0" r="6" class="f-plperl ring"><title>2 primes – PL/Perl: 0.54× PL/pgSQL time</title></circle>
+<circle cx="499.5" cy="135.0" r="6" class="f-plzig ring"><title>2 primes – PL/Zig: 0.28× PL/pgSQL time</title></circle>
+<text x="218" y="165.0" text-anchor="end" class="lab">3 build</text>
+<circle cx="594.5" cy="161.0" r="6" class="f-sql ring"><title>3 build – SQL: 0.90× PL/pgSQL time</title></circle>
+<circle cx="603.3" cy="161.0" r="6" class="f-plpgsql ring"><title>3 build – PL/pgSQL: 1.00× PL/pgSQL time</title></circle>
+<circle cx="568.6" cy="161.0" r="6" class="f-plpython ring"><title>3 build – PL/Python: 0.65× PL/pgSQL time</title></circle>
+<circle cx="498.6" cy="161.0" r="6" class="f-plperl ring"><title>3 build – PL/Perl: 0.27× PL/pgSQL time</title></circle>
+<circle cx="717.9" cy="161.0" r="6" class="f-plzig ring"><title>3 build – PL/Zig: 4.11× PL/pgSQL time</title></circle>
+<text x="218" y="191.0" text-anchor="end" class="lab">4 csv</text>
+<circle cx="618.0" cy="187.0" r="6" class="f-sql ring"><title>4 csv – SQL: 1.20× PL/pgSQL time</title></circle>
+<circle cx="603.3" cy="187.0" r="6" class="f-plpgsql ring"><title>4 csv – PL/pgSQL: 1.00× PL/pgSQL time</title></circle>
+<circle cx="545.9" cy="187.0" r="6" class="f-plpython ring"><title>4 csv – PL/Python: 0.49× PL/pgSQL time</title></circle>
+<circle cx="684.1" cy="187.0" r="6" class="f-plperl ring"><title>4 csv – PL/Perl: 2.71× PL/pgSQL time</title></circle>
+<circle cx="663.1" cy="187.0" r="6" class="f-plzig ring"><title>4 csv – PL/Zig: 2.09× PL/pgSQL time</title></circle>
+<text x="218" y="217.0" text-anchor="end" class="lab">5 fnv1a</text>
+<circle cx="603.3" cy="213.0" r="6" class="f-plpgsql ring"><title>5 fnv1a – PL/pgSQL: 1.00× PL/pgSQL time</title></circle>
+<circle cx="628.7" cy="213.0" r="6" class="f-plpython ring"><title>5 fnv1a – PL/Python: 1.37× PL/pgSQL time</title></circle>
+<circle cx="652.0" cy="213.0" r="6" class="f-plperl ring"><title>5 fnv1a – PL/Perl: 1.82× PL/pgSQL time</title></circle>
+<circle cx="484.8" cy="213.0" r="6" class="f-plzig ring"><title>5 fnv1a – PL/Zig: 0.23× PL/pgSQL time</title></circle>
+<text x="218" y="243.0" text-anchor="end" class="lab">6 levenshtein</text>
+<circle cx="235.7" cy="239.0" r="6" class="f-sql ring"><title>6 levenshtein – SQL: 0.01× PL/pgSQL time</title></circle>
+<circle cx="603.3" cy="239.0" r="6" class="f-plpgsql ring"><title>6 levenshtein – PL/pgSQL: 1.00× PL/pgSQL time</title></circle>
+<circle cx="582.6" cy="239.0" r="6" class="f-plpython ring"><title>6 levenshtein – PL/Python: 0.77× PL/pgSQL time</title></circle>
+<circle cx="600.1" cy="239.0" r="6" class="f-plperl ring"><title>6 levenshtein – PL/Perl: 0.96× PL/pgSQL time</title></circle>
+<circle cx="557.4" cy="239.0" r="6" class="f-plzig ring"><title>6 levenshtein – PL/Zig: 0.57× PL/pgSQL time</title></circle>
+<text x="218" y="269.0" text-anchor="end" class="lab">7 by_key</text>
+<circle cx="418.9" cy="265.0" r="6" class="f-sql ring"><title>7 by_key – SQL: 0.10× PL/pgSQL time</title></circle>
+<circle cx="603.3" cy="265.0" r="6" class="f-plpgsql ring"><title>7 by_key – PL/pgSQL: 1.00× PL/pgSQL time</title></circle>
+<circle cx="636.8" cy="265.0" r="6" class="f-plpython ring"><title>7 by_key – PL/Python: 1.51× PL/pgSQL time</title></circle>
+<circle cx="641.9" cy="265.0" r="6" class="f-plperl ring"><title>7 by_key – PL/Perl: 1.61× PL/pgSQL time</title></circle>
+<circle cx="607.7" cy="265.0" r="6" class="f-plzig ring"><title>7 by_key – PL/Zig: 1.06× PL/pgSQL time</title></circle>
+<rect x="740.6" y="260.0" width="10" height="10" class="s-plzig" stroke-width="2"><title>7 by_key – PL/Zig (exec): 5.78× PL/pgSQL time</title></rect>
+<text x="218" y="295.0" text-anchor="end" class="lab">8 cursor_sum</text>
+<circle cx="493.2" cy="291.0" r="6" class="f-sql ring"><title>8 cursor_sum – SQL: 0.26× PL/pgSQL time</title></circle>
+<circle cx="603.3" cy="291.0" r="6" class="f-plpgsql ring"><title>8 cursor_sum – PL/pgSQL: 1.00× PL/pgSQL time</title></circle>
+<circle cx="636.4" cy="291.0" r="6" class="f-plpython ring"><title>8 cursor_sum – PL/Python: 1.50× PL/pgSQL time</title></circle>
+<circle cx="763.9" cy="291.0" r="6" class="f-plperl ring"><title>8 cursor_sum – PL/Perl: 7.25× PL/pgSQL time</title></circle>
+<circle cx="649.4" cy="291.0" r="6" class="f-plzig ring"><title>8 cursor_sum – PL/Zig: 1.76× PL/pgSQL time</title></circle>
+<text x="218" y="321.0" text-anchor="end" class="lab">9 insert_update</text>
+<circle cx="520.9" cy="317.0" r="6" class="f-sql ring"><title>9 insert_update – SQL: 0.36× PL/pgSQL time</title></circle>
+<circle cx="603.3" cy="317.0" r="6" class="f-plpgsql ring"><title>9 insert_update – PL/pgSQL: 1.00× PL/pgSQL time</title></circle>
+<circle cx="641.1" cy="317.0" r="6" class="f-plpython ring"><title>9 insert_update – PL/Python: 1.59× PL/pgSQL time</title></circle>
+<circle cx="638.4" cy="317.0" r="6" class="f-plperl ring"><title>9 insert_update – PL/Perl: 1.54× PL/pgSQL time</title></circle>
+<circle cx="608.1" cy="317.0" r="6" class="f-plzig ring"><title>9 insert_update – PL/Zig: 1.06× PL/pgSQL time</title></circle>
+<text x="218" y="347.0" text-anchor="end" class="lab">10 bytea_1MB</text>
+<circle cx="594.6" cy="343.0" r="6" class="f-sql ring"><title>10 bytea_1MB – SQL: 0.90× PL/pgSQL time</title></circle>
+<circle cx="603.3" cy="343.0" r="6" class="f-plpgsql ring"><title>10 bytea_1MB – PL/pgSQL: 1.00× PL/pgSQL time</title></circle>
+<circle cx="578.9" cy="343.0" r="6" class="f-plpython ring"><title>10 bytea_1MB – PL/Python: 0.74× PL/pgSQL time</title></circle>
+<circle cx="759.1" cy="343.0" r="6" class="f-plperl ring"><title>10 bytea_1MB – PL/Perl: 6.83× PL/pgSQL time</title></circle>
+<circle cx="613.4" cy="343.0" r="6" class="f-plzig ring"><title>10 bytea_1MB – PL/Zig: 1.13× PL/pgSQL time</title></circle>
+<text x="218" y="373.0" text-anchor="end" class="lab">10 text_1MB</text>
+<circle cx="601.8" cy="369.0" r="6" class="f-sql ring"><title>10 text_1MB – SQL: 0.98× PL/pgSQL time</title></circle>
+<circle cx="603.3" cy="369.0" r="6" class="f-plpgsql ring"><title>10 text_1MB – PL/pgSQL: 1.00× PL/pgSQL time</title></circle>
+<circle cx="643.0" cy="369.0" r="6" class="f-plpython ring"><title>10 text_1MB – PL/Python: 1.63× PL/pgSQL time</title></circle>
+<circle cx="657.1" cy="369.0" r="6" class="f-plperl ring"><title>10 text_1MB – PL/Perl: 1.94× PL/pgSQL time</title></circle>
+<circle cx="624.5" cy="369.0" r="6" class="f-plzig ring"><title>10 text_1MB – PL/Zig: 1.30× PL/pgSQL time</title></circle>
+</svg>

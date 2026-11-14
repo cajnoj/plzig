@@ -1,0 +1,9 @@
+Task 11 is driven by bench/driver.py (startup()), not by a query template.
+  * new session: connect (not timed), time the first call of t11_<impl>(1),
+    then a second call, disconnect;
+  * after CREATE: in a new session, time CREATE FUNCTION of a function with
+    a body nobody has compiled before (a unique comment), then its first
+    call.  For PL/Zig twice: with the Zig compiler cache warm (the standard
+    library already compiled by earlier functions) and cold (the cache
+    directory $PGDATA/plzig/pgsql_tmp.zig-cache removed before each run).
+The function bodies are the same as task 1 (x + 1).

@@ -188,6 +188,9 @@ architecture; only x86_64 has been run.
 marshalling and the source generator, and the whole compile pipeline, each
 for a time budget, non-zero exit status on a finding.
 
+**Benchmarks** (not tests, not part of the build): `bench/run.sh`, see
+[bench/README.md](bench/README.md) and [doc/benchmarks.md](doc/benchmarks.md).
+
 Without Docker: `make check-zig ZIG=/abs/path/to/zig` runs the Zig unit
 tests; `make installcheck` the regression suite against an existing
 installation (the `setup` test reconnects as a test role with `\c`, so

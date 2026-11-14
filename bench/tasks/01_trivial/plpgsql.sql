@@ -1,0 +1,5 @@
+CREATE FUNCTION t01_plpgsql(x int) RETURNS int LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+BEGIN
+    RETURN x + 1;
+END
+$$;

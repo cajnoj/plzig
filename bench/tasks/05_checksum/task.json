@@ -1,0 +1,9 @@
+{
+  "title": "Checksum (32-bit FNV-1a) of a bytea",
+  "stresses": "tight loop over a buffer",
+  "params": {"full": {}, "quick": {}},
+  "variants": [
+    {"name": "fnv1a", "fn": "t05",
+     "query": "SELECT {fn}(b || ''::bytea) FROM bench_blob"}
+  ]
+}

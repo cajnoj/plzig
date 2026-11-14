@@ -1,0 +1,13 @@
+{
+  "title": "Large text/bytea argument in and out (identity function)",
+  "stresses": "marshalling",
+  "params": {"full": {"reps": 20}, "quick": {"reps": 4}},
+  "variants": [
+    {"name": "text_1MB", "fn": "t10_text",
+     "query": "SELECT sum(length({fn}(t))) FROM (SELECT t || '' AS t FROM bench_blob, generate_series(1, {reps})) s",
+     "check": "SELECT md5({fn}(t || '')) FROM bench_blob"},
+    {"name": "bytea_1MB", "fn": "t10_bytea",
+     "query": "SELECT sum(length({fn}(b))) FROM (SELECT b || ''::bytea AS b FROM bench_blob, generate_series(1, {reps})) s",
+     "check": "SELECT md5({fn}(b || ''::bytea)) FROM bench_blob"}
+  ]
+}

@@ -1,0 +1,144 @@
+## Read this first
+
+* **One machine, one run per version.** A laptop-class CPU (hybrid
+  performance/efficiency cores; the benchmark container was pinned to the
+  six performance cores, 12 hardware threads) with frequency scaling left
+  on. Ratios between languages are more meaningful than absolute times.
+* **PL/Python (`plpython3u`) is untrusted and unsandboxed**: its functions
+  run with the full rights of the server OS user. It is here as a speed
+  reference, not as a like-for-like alternative to PL/Zig. **PL/Perl
+  (`plperl`) is the trusted variant**, which runs code in `Safe`
+  compartments (for example `pack`/`unpack` are not available, see task 5).
+  PL/Zig is trusted and runs every function in a WebAssembly sandbox,
+  executed by an **interpreter** (WAMR classic interpreter, no JIT or AOT,
+  by design: PLAN.md D2).
+* **Trigger and set-returning workloads are absent** because PL/Zig v1
+  supports neither (README, *Not supported*).
+* Every implementation is meant to be idiomatic for its language, with
+  prepared plans where the language has them (PL/pgSQL caches plans by
+  itself). Where the obvious code is a known trap, the trap was avoided and
+  the file says so: PL/pgSQL string building appends to an array instead of
+  `s := s || x` (quadratic), and task 5/10 values are passed as in-memory
+  values (PL/pgSQL would re-read a TOASTed argument on every `get_byte()`).
+  The SQL column is a reference: in task 6 it is C code from contrib, in
+  tasks 7 and 9 a set-based statement.
+* Before timing, a **correctness gate** compares every implementation's
+  result with PL/pgSQL's; the run stops if any differs.
+
+## What the numbers say
+
+(The figures quoted in this section are those of the published run in
+`doc/benchmarks.md`, PostgreSQL 18.7, JIT off.)
+
+**Where PL/Zig wins: computation inside one call.** Integer loops (task 2
+primes: 0.28× PL/pgSQL's time), floating point (Mandelbrot row: 0.21×), a
+checksum loop over a 1 MB `bytea` (task 5: 0.23×) and edit distance against
+10 000 rows fetched through a cursor (task 6: 0.57×). In all of these PL/Zig
+is also faster than PL/Python and PL/Perl (1.7–4× on task 2, 6–8× on task 5). This is
+the case the design predicts: compiled Zig is interpreted at roughly
+10–15 ns per byte for a simple loop (task 5: 11 ms for 1 MB; one call), which
+beats PL/pgSQL's per-statement expression evaluation, but is far from native
+code: compiled C would be one to two orders of magnitude faster still.
+
+**About even: SPI-heavy loops with prepared statements.** Task 7 (100 000
+lookups by key: 1.06×), task 9 (20 000 inserts + 20 000 updates: 1.06×), and
+under concurrency (pgbench task 7: within 10 % of PL/pgSQL at 1–8 clients).
+The time goes into the executor, which every language shares; PL/Zig's
+boundary crossing (host import, typed parameter and row encoding) costs about
+as much as PL/pgSQL's own statement overhead. Without a prepared statement
+(`spi.execute`: parse, plan, text parameters, text result for every lookup)
+PL/Zig is 5.8× slower than with one: prepare anything that runs in a loop.
+
+**Where PL/Zig loses, and why (measured, see *Profiling*):**
+
+* **Per-call overhead (task 1: 1.65× PL/pgSQL, ~0.39 µs per call against
+  ~0.24 µs).** Each call creates and deletes two memory contexts and enters
+  the interpreter three times (`plzig_begin`, `plzig_alloc`, `plzig_call`);
+  the guest's own work for `x + 1` is negligible. PL/Zig is still faster per
+  call than PL/Python and PL/Perl here.
+* **Row-at-a-time cursor loops (task 8: 1.76×).** Every row crosses the
+  boundary twice (`spi_cursor_next` for the size, `spi_cursor_read` for the
+  encoded row) and is converted into a per-row buffer; ~0.3 µs per row
+  against ~0.17 µs for PL/pgSQL's `FOR r IN SELECT`.
+* **String building with `std.fmt` (task 3: 4.1×) and parsing (task 4:
+  2.1×).** Here the competitors run their inner work in C: PL/pgSQL's
+  `string_to_array`, `btrim`, `lower` and regular expressions, Perl's and
+  Python's string primitives. PL/Zig runs it all as interpreted code: task 4
+  makes about four passes over ~9 MB of input at ~13–23 ns per byte and pass
+  (a loop that only counts commas already costs 13 ns per byte), and in
+  `ReleaseSafe` every allocation is first filled with `0xAA` byte by byte
+  (another ~8 ns per byte for the output buffer). Formatting an integer with
+  `std.fmt` costs about 0.8 µs in the interpreter (task 3: 200 000 items,
+  168 ms). PL/Python is 4× faster than PL/Zig on task 4 and 6× on task 3.
+* **Large values (task 10): 1.13× for `bytea`, 1.30× for `text`.** One copy
+  in, one copy out (plus the arena), and `text` results are validated
+  (UTF-8, no NUL), which PL/pgSQL, returning its argument unchanged, does
+  not need to do. Before this phase these were 20× and 8× (see *Task 10
+  before and after*).
+* **Start-up and compile (task 11).** The first call in a new session costs
+  ~1.2 ms (WAMR initialisation, reading and validating the cached module,
+  instantiation) against ~0.4 ms for PL/pgSQL, but less than the ~7–8 ms that
+  PL/Python and PL/Perl need to start their interpreters. `CREATE FUNCTION`
+  compiles: **~165 ms with a warm Zig cache, ~1.9 s with a cold one** (the
+  first function of a new cluster, or after the Zig cache directory is
+  removed), against well under a millisecond for PL/pgSQL. Compilations are
+  serialised cluster-wide (PLAN.md D9), so a deployment that creates many
+  PL/Zig functions at once waits for them one after the other.
+* **Memory (task 12).** The peak increase per backend is small for every
+  language in tasks 6 and 8 (≤ 3 MB). In task 3 PL/Zig's guest memory (the
+  1.4 MB result built in the arena, then copied out) adds ~8 MB at peak, less
+  than PL/pgSQL (~19 MB: array of 200 000 elements, then the joined string)
+  and SQL (~20 MB). Guest linear memory never shrinks; an instance that grew
+  beyond `plzig.instance_cache_max_memory` (4 MB) is destroyed after the call.
+
+**JIT** makes no measurable difference to any language here: with the
+default thresholds only the outer statement of task 1's PL variants is
+compiled (its cost estimate counts 100 per function call), and the time is
+in the function calls, which JIT does not touch. Forcing JIT for every
+statement only adds compile time (task 8's SQL baseline: 1.5×).
+
+**Concurrency (pgbench).** Every language scales similarly from 1 to 4
+clients; at 8 clients the six physical cores (shared with the pgbench
+threads) are saturated. PL/Zig's relative position matches the
+single-session results.
+
+## Profiling and what was changed
+
+`bench/run.sh --profile` (perf, user-space cycles) on tasks 1, 8 and 10 at
+the start of this phase:
+
+1. **Fixed (guest SDK, no host or ABI change).** 97 % of an identity
+   function on a 1 MB `bytea`, and 70 % of a trivial call, were spent in the
+   interpreter. Cause: `plzig_alloc`, which the host calls to obtain the
+   argument block of every call, used `Allocator.alignedAlloc`, which in
+   `ReleaseSafe` fills the new block with `0xAA` — byte by byte in the
+   interpreter, ~10 ns per byte — before the host overwrites it. It now uses
+   the allocator's `rawAlloc`. Task 1 went from ~0.77 to ~0.37 µs per call (quick-mode runs);
+   task 10 from 262/225 ms to 52/21 ms (text/bytea).
+2. **PLAN.md §12 item 6 (host).** `text`/`bytea` results and SPI `text`
+   parameters are copied once, straight into the final value, and
+   validated there (rules unchanged). Task 10: text 52.0 → 44.2 ms, bytea
+   21.1 → 12.2 ms.
+3. **Explained, not changed:** the remaining per-call cost (task 1: ~35 %
+   interpreter entry for three guest calls, ~15–20 % creating and deleting
+   the per-call memory contexts) and the per-row cost of cursors (task 8:
+   two host calls and native-call trampolines per row, per-row conversion).
+   Both would need ABI or lifetime changes in security-relevant host code.
+
+## Recommendations (not done: they change the interpreter configuration or the ABI)
+
+* **Enable the bulk-memory proposal** (WAMR build and `-mcpu` for guests):
+  `memory.copy`/`memory.fill` would turn every guest `memcpy`/`memset`
+  (including `ReleaseSafe`'s `0xAA` fill of each allocation) into one native
+  operation instead of an interpreted byte loop. Expected to help tasks 3
+  and 4 most. It enlarges the interpreter surface a little; needs a security
+  review.
+* **WAMR fast interpreter or AOT** would change the compute picture by a
+  large factor; D2 rejected both for code-size and attack-surface reasons.
+  If ever reconsidered, these numbers are the baseline.
+* **One guest entry per call** (an ABI where `plzig_call` resets the arena
+  and receives the argument size) and **one host call per cursor row**
+  (`next` writing into a guest buffer that the guest grows on demand) would
+  remove roughly a third of the per-call and per-row overhead.
+* **Reuse the per-call memory contexts** instead of creating and deleting
+  two per call (needs care with recursion and error paths).

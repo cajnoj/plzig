@@ -1,0 +1,19 @@
+{
+  "title": "Row-by-row aggregation over a large result",
+  "stresses": "result fetching, cursors",
+  "params": {
+    "full": {},
+    "quick": {}
+  },
+  "variants": [
+    {
+      "name": "cursor_sum",
+      "fn": "t08",
+      "query": "SELECT {fn}()",
+      "memory": true,
+      "memory_pretouch": [
+        "SELECT count(*) FROM bench_big"
+      ]
+    }
+  ]
+}

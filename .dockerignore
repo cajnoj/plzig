@@ -16,3 +16,4 @@ test/tap/log
 .zig-cache
 zig-out
 .github
+bench

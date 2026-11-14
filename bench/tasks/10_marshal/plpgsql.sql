@@ -1,0 +1,10 @@
+CREATE FUNCTION t10_text_plpgsql(t text) RETURNS text LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+BEGIN
+    RETURN t;
+END
+$$;
+CREATE FUNCTION t10_bytea_plpgsql(b bytea) RETURNS bytea LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+BEGIN
+    RETURN b;
+END
+$$;

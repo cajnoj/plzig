@@ -1,0 +1,61 @@
+{
+  "cpu_model": "Intel(R) Core(TM) Ultra 7 155H",
+  "cpus_visible": 12,
+  "cpu_list": "0-11",
+  "online_cpus": 22,
+  "mem_total_gb": 93.9,
+  "kernel": "7.2.15-200.fc44.x86_64",
+  "governor": "powersave",
+  "os_image": "12.15",
+  "server_version": "14.25 (Debian 14.25-1.pgdg12+1)",
+  "version_string": "PostgreSQL 14.25 (Debian 14.25-1.pgdg12+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit",
+  "jit_available": false,
+  "python": "Python 3.11.2",
+  "perl": "v5.36.0",
+  "zig": "0.17.1",
+  "plzig_version": "1.0",
+  "settings": {
+    "DateStyle": "ISO, MDY",
+    "TimeZone": "Etc/UTC",
+    "autovacuum": "off",
+    "default_text_search_config": "pg_catalog.english",
+    "dynamic_shared_memory_type": "posix",
+    "lc_messages": "C",
+    "lc_monetary": "C",
+    "lc_numeric": "C",
+    "lc_time": "C",
+    "listen_addresses": "",
+    "log_min_messages": "warning",
+    "log_timezone": "Etc/UTC",
+    "maintenance_work_mem": "262144kB",
+    "max_connections": "100",
+    "max_parallel_workers_per_gather": "0",
+    "max_stack_depth": "2048kB",
+    "max_wal_size": "1024MB",
+    "min_wal_size": "80MB",
+    "shared_buffers": "655368kB",
+    "synchronous_commit": "off",
+    "unix_socket_directories": "/tmp",
+    "work_mem": "65536kB"
+  },
+  "mode": "full",
+  "warmup": 3,
+  "runs": 10,
+  "jit_modes": [
+    "off"
+  ],
+  "pgbench_clients": [],
+  "pgbench_seconds": 15,
+  "sizes": {
+    "big_rows": 1000000,
+    "words": 10000,
+    "csv_rows": 20000,
+    "blob_kb": 1024
+  },
+  "started": "2026-11-14 17:36:15 +0000",
+  "defaults_of_interest": {
+    "jit_above_cost": "100000",
+    "jit_inline_above_cost": "500000",
+    "jit_optimize_above_cost": "500000"
+  }
+}

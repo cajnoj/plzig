@@ -1,0 +1,9 @@
+{
+  "title": "Many small lookups by key in a loop",
+  "stresses": "SPI round trip, plan caching",
+  "params": {"full": {"n": 100000}, "quick": {"n": 10000}},
+  "variants": [
+    {"name": "by_key", "fn": "t07", "query": "SELECT {fn}({n})"}
+  ],
+  "pgbench": {"variant": "by_key", "query": "SELECT {fn}(1000)"}
+}

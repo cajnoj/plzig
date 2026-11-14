@@ -1,0 +1,19 @@
+{
+  "title": "Edit distance against each row of a query result",
+  "stresses": "query loop + CPU work",
+  "params": {
+    "full": {},
+    "quick": {}
+  },
+  "variants": [
+    {
+      "name": "levenshtein",
+      "fn": "t06",
+      "query": "SELECT {fn}('postgresql')",
+      "memory": true,
+      "memory_pretouch": [
+        "SELECT count(*) FROM bench_words"
+      ]
+    }
+  ]
+}

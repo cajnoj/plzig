@@ -1,0 +1,9 @@
+{
+  "title": "Parsing: split a CSV line, validate and normalise identifiers",
+  "stresses": "byte-level work",
+  "params": {"full": {}, "quick": {}},
+  "variants": [
+    {"name": "csv", "fn": "t04",
+     "query": "SELECT md5(string_agg({fn}(line), E'\\n' ORDER BY id)) FROM bench_csv"}
+  ]
+}

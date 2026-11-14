@@ -793,6 +793,33 @@ plzig_copy_out(PlzigInstance *pi, uint64 ptr, uint32 len)
 	return buf;
 }
 
+/*
+ * Copy guest bytes [ptr, ptr+len) straight into a new palloc'd varlena (one
+ * copy across the boundary; the result never aliases guest memory).  Same
+ * pointer and size checks as plzig_copy_out.
+ */
+static struct varlena *
+plzig_copy_out_varlena(PlzigInstance *pi, uint64 ptr, uint32 len)
+{
+	struct varlena *v;
+	void	   *src;
+
+	if (ptr > PG_UINT32_MAX && len > 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+				 errmsg("PL/Zig: guest returned an invalid pointer")));
+	if ((Size) len + 1 > MaxAllocSize - VARHDRSZ)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("PL/Zig: result value is too large")));
+	src = plzig_guest_ptr(pi->inst, (uint32) (ptr & PG_UINT32_MAX), len);
+	v = (struct varlena *) palloc(VARHDRSZ + (Size) len);
+	SET_VARSIZE(v, VARHDRSZ + (Size) len);
+	if (len > 0)
+		memcpy(VARDATA(v), src, len);
+	return v;
+}
+
 static Datum
 plzig_decode_result(PlzigInstance *pi, PlzigSlot *slot, PlzigTypeInfo *rt,
 					bool *isnull)
@@ -838,26 +865,22 @@ plzig_decode_result(PlzigInstance *pi, PlzigSlot *slot, PlzigTypeInfo *rt,
 				return Float8GetDatum(f);
 			}
 		case PLZIG_T_BYTEA:
-			{
-				char	   *s = plzig_copy_out(pi, slot->val, slot->len);
-				bytea	   *b = (bytea *) palloc(VARHDRSZ + slot->len);
-
-				SET_VARSIZE(b, VARHDRSZ + slot->len);
-				memcpy(VARDATA(b), s, slot->len);
-				pfree(s);
-				return PointerGetDatum(b);
-			}
+			return PointerGetDatum(plzig_copy_out_varlena(pi, slot->val, slot->len));
 		case PLZIG_T_TEXT:
 			{
-				char	   *s = plzig_copy_out(pi, slot->val, slot->len);
+				struct varlena *t = plzig_copy_out_varlena(pi, slot->val, slot->len);
 
-				/* rejects invalid sequences and NUL bytes */
-				(void) pg_verifymbstr(s, (int) slot->len, false);
-				return PointerGetDatum(cstring_to_text_with_len(s, (int) slot->len));
+				/*
+				 * Validate the host copy in place: rejects invalid sequences
+				 * and NUL bytes (on error t goes with the memory context).
+				 */
+				(void) pg_verifymbstr(VARDATA(t), (int) slot->len, false);
+				return PointerGetDatum(t);
 			}
 		case PLZIG_T_TEXTIO:
 		case PLZIG_T_IO:
 			{
+				/* input functions need a NUL-terminated C string */
 				char	   *s = plzig_copy_out(pi, slot->val, slot->len);
 
 				(void) pg_verifymbstr(s, (int) slot->len, false);

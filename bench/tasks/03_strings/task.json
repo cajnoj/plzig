@@ -1,0 +1,9 @@
+{
+  "title": "String building and concatenation",
+  "stresses": "allocation, text handling",
+  "params": {"full": {"n": 200000}, "quick": {"n": 20000}},
+  "variants": [
+    {"name": "build", "fn": "t03", "query": "SELECT length({fn}({n}))",
+     "check": "SELECT md5({fn}({n}))", "memory": true}
+  ]
+}

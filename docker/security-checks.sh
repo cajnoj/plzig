@@ -573,6 +573,18 @@ else
 fi
 rm -rf "$dest"
 
+# PL/Python and PL/Perl are benchmark-only (bench/Dockerfile): never in this
+# image, and bench/ is not part of the test image's source tree
+# (.dockerignore) nor of the make install tree (checked above: 10 files)
+pls=$( { ls "$(pg_config --pkglibdir)" "$(pg_config --sharedir)/extension" 2>/dev/null
+         dpkg-query -W -f '${Package}\n' 2>/dev/null; } | grep -Ei 'plpython|plperl|plpy' | sort -u)
+if [ -z "$pls" ] && [ ! -e /src/bench ]; then
+    pass "no PL/Python or PL/Perl in the test image, no bench/ in its source tree"
+else
+    fail "no PL/Python or PL/Perl in the test image, no bench/ in its source tree"
+    echo "$pls" | sed 's/^/         /'
+fi
+
 # 6: on-disk state: private directories and files
 perm=$(stat -c '%a %U' "$PGDATA/plzig" "$PGDATA/plzig/cache" "$PGDATA/plzig/pgsql_tmp.zig-cache" | sort -u)
 if [ "$perm" = "700 postgres" ]; then pass "plzig directories are 0700"; else fail "plzig directories are 0700 ($perm)"; fi

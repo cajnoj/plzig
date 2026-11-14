@@ -1,0 +1,9 @@
+{
+  "title": "Trivial function over N rows",
+  "stresses": "per-call overhead",
+  "params": {"full": {"n": 1000000}, "quick": {"n": 100000}},
+  "variants": [
+    {"name": "x+1", "fn": "t01", "query": "SELECT sum({fn}(v)) FROM bench_big WHERE id <= {n}"}
+  ],
+  "pgbench": {"variant": "x+1", "query": "SELECT sum({fn}(v)) FROM bench_big WHERE id <= 20000"}
+}

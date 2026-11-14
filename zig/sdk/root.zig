@@ -23,9 +23,13 @@ export fn plzig_begin() void {
 }
 
 /// Allocate `len` bytes (8-byte aligned) in the per-call arena; 0 on failure.
+/// rawAlloc, not alignedAlloc: in ReleaseSafe the latter first fills the
+/// block with 0xAA (@memset undefined), byte by byte in the interpreter, ~10
+/// ns per byte; the host writes every slot and payload (alignment padding
+/// keeps this instance's old bytes: guest memory, never host data).
 export fn plzig_alloc(len: u32) u32 {
-    const mem = plzig.allocator.alignedAlloc(u8, .@"8", len) catch return 0;
-    return @intCast(@intFromPtr(mem.ptr));
+    const p = plzig.allocator.rawAlloc(len, .@"8", 0) orelse return 0;
+    return @intCast(@intFromPtr(p));
 }
 
 const Fn = @TypeOf(user.call); // decode/encode below are pub for zig/sdk/test.zig

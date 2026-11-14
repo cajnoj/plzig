@@ -59,6 +59,82 @@ SELECT t_badtext(0);
 SELECT t_badtext(1);
 SELECT t_badtext(2);
 
+-- text and bytea results are copied once, straight into the result value,
+-- and checked there: the edges of that check, large values, and values that
+-- must not alias guest memory (the next call reuses the guest's arena)
+CREATE FUNCTION t_textedge(which int) RETURNS text STRICT LANGUAGE plzig AS $$
+    return switch (which) {
+        0 => "",
+        1 => "\xc3\xa9t\xc3\xa9",
+        2 => "x\x00",          // NUL as the last byte
+        3 => "\x00",           // nothing but a NUL
+        4 => "ab\xc3",         // two-byte character cut at the end
+        else => "\xe2\x82",    // three-byte character cut at the end
+    };
+$$;
+SELECT t_textedge(0) = '' AS empty, t_textedge(1);
+SELECT t_textedge(2);
+SELECT t_textedge(3);
+SELECT t_textedge(4);
+SELECT t_textedge(5);
+CREATE FUNCTION t_bigtext(n int, bad boolean) RETURNS text STRICT LANGUAGE plzig AS $$
+    const out = try plzig.allocator.alloc(u8, @as(usize, @intCast(n)) * 2);
+    var i: usize = 0;
+    while (i < out.len) : (i += 2) {
+        out[i] = 0xc3;
+        out[i + 1] = 0xa9;
+    }
+    if (bad) out[out.len - 1] = 0x00;
+    return out;
+$$;
+SELECT length(t_bigtext(524288, false)), t_bigtext(524288, false) = repeat('é', 524288) AS same;
+SELECT t_bigtext(524288, true);
+CREATE FUNCTION t_echo(x text) RETURNS text STRICT LANGUAGE plzig AS $$
+    return x;
+$$;
+CREATE FUNCTION t_becho(x bytea) RETURNS bytea STRICT LANGUAGE plzig AS $$
+    return x;
+$$;
+SELECT array_agg(t_echo(x) ORDER BY x) AS texts, array_agg(t_becho(convert_to(x, 'UTF8')) ORDER BY x) AS byteas
+FROM (VALUES ('a'), ('bb'), ('ccc'), ('dé')) AS v(x);
+SELECT t_echo(repeat('ü', 300000)) = repeat('ü', 300000) AS same_text,
+       t_becho(decode(repeat('00ff', 300000), 'hex')) = decode(repeat('00ff', 300000), 'hex') AS same_bytea;
+-- text parameters of prepared statements, spi.execute and spi.open: same rules
+CREATE FUNCTION t_spitext(path int, which int) RETURNS text STRICT LANGUAGE plzig AS $$
+    const v: []const u8 = switch (which) {
+        0 => "h\xc3\xa9",
+        1 => "",
+        2 => "a\x00",
+        3 => "\xff",
+        else => "ab\xc3",
+    };
+    const q = "SELECT $1 || '|' || octet_length($1)";
+    switch (path) {
+        0 => {
+            var p = try plzig.spi.prepare(q, &.{.text});
+            defer p.free();
+            const r = try p.execute(.{v});
+            return try (try r.row(0)).get([]const u8, 0);
+        },
+        1 => {
+            const r = try plzig.spi.execute(q, &.{v});
+            return (try r.get(0, 0)).?;
+        },
+        else => {
+            var c = try plzig.spi.open(q, &.{v});
+            defer c.close();
+            return try plzig.allocator.dupe(u8, try (try c.next()).?.get([]const u8, 0));
+        },
+    }
+$$;
+SELECT p, t_spitext(p, 0) AS valid, t_spitext(p, 1) AS empty FROM generate_series(0, 2) AS p;
+SELECT t_spitext(0, 2);
+SELECT t_spitext(0, 3);
+SELECT t_spitext(0, 4);
+SELECT t_spitext(1, 3);
+SELECT t_spitext(2, 2);
+SELECT t_spitext(2, 4);
+
 CREATE FUNCTION t_varchar(x varchar, y char(5)) RETURNS varchar LANGUAGE plzig AS $$
     return try std.fmt.allocPrint(plzig.allocator, "[{s}|{s}]", .{ x orelse "-", y orelse "-" });
 $$;

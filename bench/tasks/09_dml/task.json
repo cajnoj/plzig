@@ -1,0 +1,24 @@
+{
+  "title": "Insert/update loop",
+  "stresses": "DML through SPI",
+  "params": {
+    "full": {
+      "n": 20000
+    },
+    "quick": {
+      "n": 2000
+    }
+  },
+  "variants": [
+    {
+      "name": "insert_update",
+      "fn": "t09",
+      "query": "SELECT {fn}({n})",
+      "before_each": "TRUNCATE bench_t9",
+      "check": [
+        "SELECT {fn}({n})",
+        "SELECT count(*) || '/' || sum(v) FROM bench_t9"
+      ]
+    }
+  ]
+}

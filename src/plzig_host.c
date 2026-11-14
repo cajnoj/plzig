@@ -126,6 +126,32 @@ guest_string(wasm_exec_env_t env, uint32 ptr, uint32 len, uint32 maxlen,
 	return s;
 }
 
+/*
+ * Copy a guest string straight into a new text value (one copy) and check
+ * the copy in place exactly as guest_string does (valid in the database
+ * encoding, no NUL bytes).  Same length limit as guest_string without
+ * truncation.
+ */
+static text *
+guest_text(wasm_exec_env_t env, uint32 ptr, uint32 len, uint32 maxlen,
+		   const char *what)
+{
+	void	   *src;
+	text	   *t;
+
+	if (len > maxlen || (Size) len + 1 > MaxAllocSize)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("PL/Zig: %s is too long", what)));
+	src = plzig_guest_ptr(wasm_runtime_get_module_inst(env), ptr, len);	/* NULL if len == 0 */
+	t = (text *) palloc(VARHDRSZ + (Size) len);
+	SET_VARSIZE(t, VARHDRSZ + (Size) len);
+	if (len > 0)
+		memcpy(VARDATA(t), src, len);
+	(void) pg_verifymbstr(VARDATA(t), (int) len, false);
+	return t;
+}
+
 /* ---------------------------------------------------------------------
  * log / raise / panic
  * ---------------------------------------------------------------------
@@ -449,15 +475,13 @@ decode_text_params(wasm_exec_env_t env, uint32 params_ptr, uint32 nparams,
 		}
 		else
 		{
-			char	   *v;
-
 			if (copy[i].val > PG_UINT32_MAX && copy[i].len > 0)
 				ereport(ERROR,
 						(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
 						 errmsg("PL/Zig: invalid SPI parameter pointer")));
-			v = guest_string(env, (uint32) (copy[i].val & PG_UINT32_MAX), copy[i].len,
-							 MaxAllocSize - VARHDRSZ - 1, "SPI parameter", false);
-			(*values)[i] = PointerGetDatum(cstring_to_text_with_len(v, (int) copy[i].len));
+			(*values)[i] = PointerGetDatum(guest_text(env, (uint32) (copy[i].val & PG_UINT32_MAX),
+													  copy[i].len, MaxAllocSize - VARHDRSZ - 1,
+													  "SPI parameter"));
 			(*nulls)[i] = ' ';
 		}
 	}
@@ -591,17 +615,12 @@ decode_typed_params(wasm_exec_env_t env, SPIPlanPtr plan, uint32 params_ptr,
 					break;
 				}
 			case PLZIG_KIND_TEXT:
-				{
-					char	   *s;
-
-					if (v->val > PG_UINT32_MAX && v->len > 0)
-						goto bad_pointer;
-					s = guest_string(env, (uint32) (v->val & PG_UINT32_MAX), v->len,
-									 MaxAllocSize - VARHDRSZ - 1, "SPI parameter", false);
-					(*values)[i] = PointerGetDatum(cstring_to_text_with_len(s, (int) v->len));
-					pfree(s);
-					break;
-				}
+				if (v->val > PG_UINT32_MAX && v->len > 0)
+					goto bad_pointer;
+				(*values)[i] = PointerGetDatum(guest_text(env, (uint32) (v->val & PG_UINT32_MAX),
+														  v->len, MaxAllocSize - VARHDRSZ - 1,
+														  "SPI parameter"));
+				break;
 			case PLZIG_KIND_BYTEA:
 				{
 					bytea	   *b;
