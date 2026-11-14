@@ -310,7 +310,8 @@ const plzig = @import("plzig"); const std = plzig.std; pub fn call(@"a": i32, @"
 * `STRICT` → plain parameter types, otherwise optionals.
 * Return type `anyerror!?T`, or `anyerror!void` for `void` and procedures.
 * Parameter names must match `[A-Za-z_][A-Za-z0-9_]*` and must not be
-  `plzig` or `std`; unnamed parameters are `arg1..argN`.
+  `plzig`, `std` or `call` (the generated file's own declarations);
+  unnamed parameters are `arg1..argN`.
 * `DO` blocks: `pub fn call() anyerror!void {`.
 
 ## Interrupts

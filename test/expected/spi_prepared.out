@@ -556,12 +556,33 @@ SELECT set_config('pt.base', (count(*) - 2)::text, false) IS NOT NULL AS rebased
  t
 (1 row)
 
--- LRU eviction (no idle instances kept)
+-- LRU eviction (no idle instances kept): lowering plzig.instance_cache_size
+-- destroys the idle instances, with their plans, at the next PL/Zig call
 SET plzig.instance_cache_size = 0;
+SELECT pt_hold(0, false) AS from_a_fresh_instance;
+ from_a_fresh_instance 
+-----------------------
+                   100
+(1 row)
+
+SELECT pt_plans() <= -2 AS its_two_plans_freed;
+ its_two_plans_freed 
+---------------------
+ t
+(1 row)
+
+-- (that also freed the plans of other functions' idle instances: rebase)
+SELECT set_config('pt.base', count(*)::text, false) IS NOT NULL AS rebased
+  FROM pg_backend_memory_contexts WHERE name = 'SPI Plan';
+ rebased 
+---------
+ t
+(1 row)
+
 SELECT pt_hold(2, false);
  pt_hold 
 ---------
-     104
+     102
 (1 row)
 
 SELECT pt_plans() AS after_lru;

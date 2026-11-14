@@ -1,0 +1,59 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s3_lock s1_call s2_replace s2_call s3_unlock s1_call
+step s3_lock: SELECT pg_advisory_lock(4711);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step s1_call: SELECT iso_r(); <waiting ...>
+step s2_replace: CREATE OR REPLACE FUNCTION iso_r() RETURNS text VOLATILE LANGUAGE plzig AS $$ return "new code"; $$;
+step s2_call: SELECT iso_r();
+iso_r   
+--------
+new code
+(1 row)
+
+step s3_unlock: SELECT pg_advisory_unlock(4711);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step s1_call: <... completed>
+iso_r   
+--------
+old code
+(1 row)
+
+step s1_call: SELECT iso_r();
+iso_r   
+--------
+new code
+(1 row)
+
+
+starting permutation: s3_lock s1_call s2_drop s3_unlock s1_call
+step s3_lock: SELECT pg_advisory_lock(4711);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step s1_call: SELECT iso_r(); <waiting ...>
+step s2_drop: DROP FUNCTION iso_r();
+step s3_unlock: SELECT pg_advisory_unlock(4711);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step s1_call: <... completed>
+iso_r   
+--------
+old code
+(1 row)
+
+step s1_call: SELECT iso_r();
+ERROR:  function iso_r() does not exist

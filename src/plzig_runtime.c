@@ -633,6 +633,13 @@ plzig_decode_result(PlzigInstance *pi, PlzigSlot *slot, PlzigTypeInfo *rt,
 		return (Datum) 0;
 	if (slot->is_null)
 	{
+		/*
+		 * NULL through the input function too: for a domain this checks its
+		 * NOT NULL and CHECK constraints (domain_in is not strict); for the
+		 * strict input functions of all other types it is a no-op.
+		 */
+		if (rt->kind == PLZIG_T_IO || rt->kind == PLZIG_T_TEXTIO)
+			(void) InputFunctionCall(&rt->in_func, NULL, rt->ioparam, -1);
 		*isnull = true;
 		return (Datum) 0;
 	}
@@ -718,7 +725,7 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 	PlzigSlot	result;
 	uint32		off;
 	uint32		status;
-	Datum		ret;
+	volatile Datum ret;			/* set inside PG_TRY, read after it */
 	int			i;
 
 	check_stack_depth();

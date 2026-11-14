@@ -1,0 +1,70 @@
+Parsed test spec with 3 sessions
+
+starting permutation: s1_call_r s2_cached s3_lock s1_call_r s2_clear s2_cached s3_unlock s1_call_r s2_cached s3_call_r s2_cached
+step s1_call_r: SELECT iso_r();
+iso_r
+-----
+ran  
+(1 row)
+
+step s2_cached: SELECT iso_cached() AS cached_modules;
+cached_modules
+--------------
+             1
+(1 row)
+
+step s3_lock: SELECT pg_advisory_lock(4712);
+pg_advisory_lock
+----------------
+                
+(1 row)
+
+step s1_call_r: SELECT iso_r(); <waiting ...>
+step s2_clear: SELECT plzig_cache_clear() >= 1 AS removed_some;
+removed_some
+------------
+t           
+(1 row)
+
+step s2_cached: SELECT iso_cached() AS cached_modules;
+cached_modules
+--------------
+             0
+(1 row)
+
+step s3_unlock: SELECT pg_advisory_unlock(4712);
+pg_advisory_unlock
+------------------
+t                 
+(1 row)
+
+step s1_call_r: <... completed>
+iso_r
+-----
+ran  
+(1 row)
+
+step s1_call_r: SELECT iso_r();
+iso_r
+-----
+ran  
+(1 row)
+
+step s2_cached: SELECT iso_cached() AS cached_modules;
+cached_modules
+--------------
+             0
+(1 row)
+
+step s3_call_r: SELECT iso_r();
+iso_r
+-----
+ran  
+(1 row)
+
+step s2_cached: SELECT iso_cached() AS cached_modules;
+cached_modules
+--------------
+             1
+(1 row)
+

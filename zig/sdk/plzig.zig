@@ -41,27 +41,47 @@ pub const std = struct {
     pub const Allocator = s.mem.Allocator;
 };
 
-/// Host imports (module "plzig"). Keep in sync with src/plzig_host.c and doc/abi.md.
-const host = struct {
-    extern "plzig" fn log(level: u32, ptr: [*]const u8, len: u32) void;
-    extern "plzig" fn raise(ptr: [*]const u8, len: u32) void;
-    extern "plzig" fn panic(ptr: [*]const u8, len: u32) void;
-    extern "plzig" fn spi_execute(sql_ptr: [*]const u8, sql_len: u32, params_ptr: [*]const Slot, nparams: u32) i64;
-    extern "plzig" fn spi_ncols() u32;
-    extern "plzig" fn spi_value_len(row: u32, col: u32) i32;
-    extern "plzig" fn spi_value_copy(row: u32, col: u32, buf: [*]u8, buf_len: u32) i32;
-    extern "plzig" fn spi_colname_len(col: u32) i32;
-    extern "plzig" fn spi_colname_copy(col: u32, buf: [*]u8, buf_len: u32) i32;
-    extern "plzig" fn spi_row_size(row: u32) i64;
-    extern "plzig" fn spi_row_read(row: u32, buf: [*]u8, buf_len: u32) i32;
-    extern "plzig" fn spi_prepare(sql_ptr: [*]const u8, sql_len: u32, kinds_ptr: [*]const u32, nkinds: u32) u64;
-    extern "plzig" fn spi_plan_free(handle: u64) void;
-    extern "plzig" fn spi_execute_plan(handle: u64, params_ptr: [*]const Value, nparams: u32) i64;
-    extern "plzig" fn spi_cursor_open(sql_ptr: [*]const u8, sql_len: u32, params_ptr: [*]const Slot, nparams: u32) u64;
-    extern "plzig" fn spi_cursor_open_plan(handle: u64, params_ptr: [*]const Value, nparams: u32) u64;
-    extern "plzig" fn spi_cursor_next(cursor: u64) i64;
-    extern "plzig" fn spi_cursor_read(cursor: u64, buf: [*]u8, buf_len: u32) i32;
-    extern "plzig" fn spi_cursor_close(cursor: u64) void;
+/// Host imports and linear memory.  In the wasm module these are the real
+/// imports (module "plzig"; keep in sync with src/plzig_host.c and
+/// doc/abi.md) and the wasm memory builtins.  Only the native unit tests
+/// (zig/sdk/test.zig, `zig test` sets builtin.is_test) supply a stand-in
+/// module "plzig_test_env" instead; it is never part of a function build.
+const env = if (@import("builtin").is_test) @import("plzig_test_env") else wasm_env;
+const host = env.host;
+
+const wasm_env = struct {
+    /// linear memory starts at address 0
+    const memory_base: usize = 0;
+
+    fn memoryPages() usize {
+        return @wasmMemorySize(0);
+    }
+
+    fn memoryGrow(pages: usize) isize {
+        return @wasmMemoryGrow(0, pages);
+    }
+
+    const host = struct {
+        extern "plzig" fn log(level: u32, ptr: [*]const u8, len: u32) void;
+        extern "plzig" fn raise(ptr: [*]const u8, len: u32) void;
+        extern "plzig" fn panic(ptr: [*]const u8, len: u32) void;
+        extern "plzig" fn spi_execute(sql_ptr: [*]const u8, sql_len: u32, params_ptr: [*]const Slot, nparams: u32) i64;
+        extern "plzig" fn spi_ncols() u32;
+        extern "plzig" fn spi_value_len(row: u32, col: u32) i32;
+        extern "plzig" fn spi_value_copy(row: u32, col: u32, buf: [*]u8, buf_len: u32) i32;
+        extern "plzig" fn spi_colname_len(col: u32) i32;
+        extern "plzig" fn spi_colname_copy(col: u32, buf: [*]u8, buf_len: u32) i32;
+        extern "plzig" fn spi_row_size(row: u32) i64;
+        extern "plzig" fn spi_row_read(row: u32, buf: [*]u8, buf_len: u32) i32;
+        extern "plzig" fn spi_prepare(sql_ptr: [*]const u8, sql_len: u32, kinds_ptr: [*]const u32, nkinds: u32) u64;
+        extern "plzig" fn spi_plan_free(handle: u64) void;
+        extern "plzig" fn spi_execute_plan(handle: u64, params_ptr: [*]const Value, nparams: u32) i64;
+        extern "plzig" fn spi_cursor_open(sql_ptr: [*]const u8, sql_len: u32, params_ptr: [*]const Slot, nparams: u32) u64;
+        extern "plzig" fn spi_cursor_open_plan(handle: u64, params_ptr: [*]const Value, nparams: u32) u64;
+        extern "plzig" fn spi_cursor_next(cursor: u64) i64;
+        extern "plzig" fn spi_cursor_read(cursor: u64, buf: [*]u8, buf_len: u32) i32;
+        extern "plzig" fn spi_cursor_close(cursor: u64) void;
+    };
 };
 
 /// 16-byte argument/result slot shared with the host (see doc/abi.md).
@@ -93,18 +113,19 @@ var heap_top: usize = 0;
 
 fn heapInit() void {
     if (heap_start == 0) {
-        heap_start = @intCast(@as(u64, @wasmMemorySize(0)) * wasm_page);
+        heap_start = env.memory_base + @as(usize, @intCast(@as(u64, env.memoryPages()) * wasm_page));
         heap_top = heap_start;
     }
 }
 
-/// Make sure linear memory extends to at least `end` bytes.
+/// Make sure linear memory extends to at least address `end`.
 fn ensureMemory(end: u64) bool {
-    const have: u64 = @as(u64, @wasmMemorySize(0)) * wasm_page;
+    const have: u64 = env.memory_base + @as(u64, env.memoryPages()) * wasm_page;
     if (end <= have) return true;
-    if (end > (1 << 32)) return false;
+    // wasm32: at most 4 GB of linear memory (the host caps it far lower)
+    if (end - env.memory_base > (1 << 32)) return false;
     const pages = (end - have + wasm_page - 1) / wasm_page;
-    return @wasmMemoryGrow(0, @intCast(pages)) >= 0;
+    return env.memoryGrow(@intCast(pages)) >= 0;
 }
 
 fn arenaAlloc(ctx: *anyopaque, len: usize, alignment: s.mem.Alignment, ret_addr: usize) ?[*]u8 {
@@ -112,7 +133,7 @@ fn arenaAlloc(ctx: *anyopaque, len: usize, alignment: s.mem.Alignment, ret_addr:
     _ = ret_addr;
     heapInit();
     const start: u64 = s.mem.alignForward(u64, heap_top, alignment.toByteUnits());
-    const end: u64 = start + len;
+    const end: u64 = s.math.add(u64, start, len) catch return null;
     if (!ensureMemory(end)) return null;
     heap_top = @intCast(end);
     return @ptrFromInt(@as(usize, @intCast(start)));
@@ -125,7 +146,7 @@ fn arenaResize(ctx: *anyopaque, memory: []u8, alignment: s.mem.Alignment, new_le
     const start = @intFromPtr(memory.ptr);
     if (start + memory.len == heap_top) {
         // the most recent allocation can grow or shrink in place
-        const end: u64 = @as(u64, start) + new_len;
+        const end: u64 = s.math.add(u64, start, new_len) catch return false;
         if (!ensureMemory(end)) return false;
         heap_top = @intCast(end);
         return true;

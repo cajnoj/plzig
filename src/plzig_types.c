@@ -193,3 +193,32 @@ plzig_param_oid_kind(Oid typid)
 			return PLZIG_KIND_NULL;
 	}
 }
+
+#ifdef PLZIG_TESTING
+/* LCOV_EXCL_START (test helpers are not part of the coverage figures) */
+/* Unit-test helpers (-DPLZIG_TESTING only; see test/sql/testing.sql). */
+#include "utils/builtins.h"
+
+PG_FUNCTION_INFO_V1(plzig_test_type_map);
+PG_FUNCTION_INFO_V1(plzig_test_param_kind_oid);
+
+/* plzig_test_type_map(t regtype) RETURNS text: "<zig type> <value kind> <param kind>" */
+Datum
+plzig_test_type_map(PG_FUNCTION_ARGS)
+{
+	Oid			t = PG_GETARG_OID(0);
+
+	PG_RETURN_TEXT_P(cstring_to_text(psprintf("%s %u %u",
+											  plzig_zig_type_name(plzig_type_kind(t)),
+											  (unsigned) plzig_value_kind(t),
+											  (unsigned) plzig_param_oid_kind(t))));
+}
+
+/* plzig_test_param_kind_oid(kind int) RETURNS regtype (0 = none) */
+Datum
+plzig_test_param_kind_oid(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_OID(plzig_param_kind_oid((uint32) PG_GETARG_INT32(0)));
+}
+/* LCOV_EXCL_STOP */
+#endif							/* PLZIG_TESTING */

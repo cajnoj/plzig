@@ -71,6 +71,23 @@ sudo make install
   at it.)
 * `make WERROR=1` builds the C code with `-Werror`.
 
+The same build can be driven with `zig build`. `build.zig` holds no build
+logic of its own: each step runs one `make` target and passes the running
+compiler as `ZIG=`, so the validator is built by the compiler you invoked
+(it refuses any Zig other than 0.17.1).
+
+```sh
+/opt/zig-0.17.1/zig build                     # make all
+sudo /opt/zig-0.17.1/zig build pg-install     # make install
+/opt/zig-0.17.1/zig build test                # unit tests of the validator and SDK
+/opt/zig-0.17.1/zig build --help              # all steps and -D options
+```
+
+The steps are called `pg-install` / `pg-uninstall` because Zig reserves
+`install` / `uninstall` for its own prefix, which PL/Zig does not use.
+Options: `-Dpg-config=`, `-Dwamr-src=`, `-Dwerror=true`, `-Dtesting=true`,
+`-Ddestdir=`, `-Djobs=`, `-Dmake=`.
+
 ### 3. Point the server at the compiler
 
 In `postgresql.conf` (these settings cannot be set any other way):
@@ -95,26 +112,47 @@ running.
 
 ## Running the tests
 
+Two entry points, both Docker-based, CI-friendly (no TTY, plain output, exit
+status non-zero on any failure):
+
 ```sh
-docker/run-tests.sh                    # all six versions, prints a summary
+docker/run-tests.sh                    # fast matrix: all six versions
 docker/run-tests.sh 18.7 14.25         # a subset
 PLZIG_PARALLEL=1 docker/run-tests.sh   # versions in parallel
+
+docker/run-all.sh                      # every layer, every version, all variants
+PLZIG_VERSIONS=18.7 PLZIG_VARIANTS="asan coverage" docker/run-all.sh
 ```
 
-Each version is built in `postgres:<version>-bookworm` with
-`docker/Dockerfile`, which installs Zig with `make install-zig` into
-`/opt/zig-0.17.1` (from `vendor/` when present) and builds against it;
-then `docker/test-in-container.sh` starts a scratch cluster with
-`plzig.zig_path` set, runs `make installcheck` (the pg_regress suite in
-`test/`) and `docker/security-checks.sh` (checks that need
-`postgresql.conf` changes: compiler path, ownership, version and checksum
-checks, a decoy `zig` on the server's `PATH`, fake compilers that emit
-modules with forbidden imports, a hostile guest calling the host imports
-directly with forged pointers, handles and values, a sandbox probe, the
-recursive delete
-against planted symbolic links, cache eviction and tampering, messages to
-unprivileged users, the `make install` file list, leftover processes). The
-suite needs Landlock ABI 6 or later and the seccomp filter (the default
+**Fast matrix** (`docker/run-tests.sh`). Each version is built in
+`postgres:<version>-bookworm` with `docker/Dockerfile`, which installs Zig
+with `make install-zig` into `/opt/zig-0.17.1` (from `vendor/` when present)
+and builds against it; then `docker/test-in-container.sh` starts a scratch
+cluster with `plzig.zig_path` set and runs its default layers:
+
+* `unit`: native Zig unit tests (`make check-zig`) of the validator
+  (`zig/validate/test.zig`: every builtin and keyword of the policy tables,
+  a check that every builtin of the vendored Zig is classified, lexing
+  corner cases, the input size limit) and of the guest SDK
+  (`zig/sdk/test.zig`: the arena allocator, value and row decoding,
+  parameter encoding, `plzig_call`; host imports and wasm memory are
+  replaced by `zig/sdk/test_env.zig`, which only `zig test` uses);
+* `regress`: `make installcheck`, the pg_regress suite in `test/`;
+* `security`: `docker/security-checks.sh` (checks that need
+  `postgresql.conf` changes: compiler path, ownership, version and checksum
+  checks, a decoy `zig` on the server's `PATH`, fake compilers that emit
+  modules with forbidden imports, a hostile guest calling the host imports
+  directly with forged pointers, handles and values, a sandbox probe, the
+  recursive delete against planted symbolic links, cache eviction and
+  tampering, messages to unprivileged users, the `make install` file list,
+  leftover processes, and that the installed `plzig.so` exports no test
+  helpers);
+* `leaks`: `docker/leak-checks.sh` (descriptors and child processes of a
+  backend across rounds of compilations and calls) and the contents of
+  `$PGDATA/plzig` after everything (only the cache, the lock file and the
+  Zig cache).
+
+The suite needs Landlock ABI 6 or later and the seccomp filter (the default
 `plzig.compiler_sandbox = require`); the summary shows how the compiler was
 confined. Two more containers per version run with seccomp profiles that
 block Landlock (`docker/seccomp-no-landlock.json`) or the installation of
@@ -124,10 +162,35 @@ seccomp filters (`docker/seccomp-no-seccomp.json`), and check that
 (`docker/no-landlock-checks.sh`, `docker/no-seccomp-checks.sh`). Logs go to
 `build/test-logs/`.
 
-To run the regression suite against an existing installation:
-`make installcheck` (the `setup` test reconnects as a test role with `\c`, so
+**Everything** (`docker/run-all.sh`, see the header of the script for the
+settings) adds, per version: the isolation tests (`test/isolation`,
+`make installcheck-isolation`), the TAP tests (`test/tap/t`: crash recovery,
+compile-lock concurrency, interrupts during guest loops, cursor loops,
+compilations and lock waits, hot standby, dump/restore, the server
+environment changing underneath, preloading), and the C unit checks
+(`test/sql/testing.sql` against a `make PLZIG_TESTING=1` build, which only
+the test image stages under `/opt/plzig-testing` and swaps in for that one
+container). Variants on subsets of versions: PostgreSQL built from the
+vendored source with `--enable-cassert` (`docker/Dockerfile.hardened`), a
+Valgrind run, an ASan/UBSan build of PL/Zig and WAMR, a gcov coverage run
+(report in `build/coverage/`), GCC and Clang builds with
+`-Wall -Wextra -Werror` (`docker/compiler-checks.sh`), and `pg_upgrade` from
+PostgreSQL 14 (`docker/Dockerfile.variant`). The scripts take
+`PLZIG_PLATFORM` (docker `--platform`) and pick the Zig tarball by
+architecture; only x86_64 has been run.
+
+Without Docker: `make check-zig ZIG=/abs/path/to/zig` runs the Zig unit
+tests; `make installcheck` the regression suite against an existing
+installation (the `setup` test reconnects as a test role with `\c`, so
 local connections must not require a password, and `plzig.zig_path` must
-be set).
+be set); `make installcheck-isolation` the isolation tests. The C unit
+checks need a test build installed in a throw-away installation
+(`make clean && make PLZIG_TESTING=1 ZIG=... && make install PLZIG_TESTING=1`,
+then `make installcheck-testing`); never install that build for real use.
+The TAP tests run with `prove` from `test/tap` with `PERL5LIB` pointing at
+the server's `pgxs/src/test/perl` and `test/tap`, and the environment that
+`docker/test-in-container.sh` sets up (`PLZIG_TEST_ZIG`, the gated test
+compiler `test/gatezig.sh`).
 
 ## Writing functions
 
@@ -153,8 +216,11 @@ library, also `plzig.std`).
   returning a Zig error raises `ERROR: plzig function failed: <ErrorName>`.
 * Returned text must be valid in the database encoding; values of other
   types go through the type's input function, so invalid dates, domain
-  constraint violations etc. are reported by PostgreSQL.
-* Unnamed parameters are called `arg1`, `arg2`, …
+  constraint violations etc. are reported by PostgreSQL (a NULL result of
+  a domain type is checked against the domain's constraints too).
+* Unnamed parameters are called `arg1`, `arg2`, …; parameter names must
+  be ASCII identifiers (`[A-Za-z_][A-Za-z0-9_]*`) other than `plzig`, `std`
+  and `call`. Zig keywords are fine as names: refer to them as `@"return"`.
 
 You can define helper functions and globals after the body by closing the
 function yourself (the generated wrapper adds the final `}`):

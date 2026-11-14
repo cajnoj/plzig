@@ -242,10 +242,11 @@ plzig_spawn(const char *prog, char *const argv[], char *const envp[],
 	pid_t		parent = getpid();
 	TimestampTz deadline;
 	char		status_buf[256];
-	int			status_len = 0;
+	/* set inside PG_TRY, read after it: volatile (setjmp/longjmp) */
+	volatile int status_len = 0;
 	bool		out_eof = false;
-	bool		status_eof = false;
-	bool		exited = false;
+	volatile bool status_eof = false;
+	volatile bool exited = false;
 	int			wstatus = 0;
 
 	memset(res, 0, sizeof(*res));

@@ -28,10 +28,10 @@ export fn plzig_alloc(len: u32) u32 {
     return @intCast(@intFromPtr(mem.ptr));
 }
 
-const Fn = @TypeOf(user.call);
+const Fn = @TypeOf(user.call); // decode/encode below are pub for zig/sdk/test.zig
 const fn_info = @typeInfo(Fn).@"fn";
 
-fn decode(comptime T: type, slot: *const Slot) T {
+pub fn decode(comptime T: type, slot: *const Slot) T {
     switch (@typeInfo(T)) {
         .optional => |o| {
             if (slot.is_null != 0) return null;
@@ -54,7 +54,7 @@ fn decode(comptime T: type, slot: *const Slot) T {
     @compileError("plzig: unsupported parameter type " ++ @typeName(T));
 }
 
-fn encode(comptime T: type, v: T, out: *Slot) void {
+pub fn encode(comptime T: type, v: T, out: *Slot) void {
     out.* = .{ .val = 0, .len = 0, .is_null = 0 };
     if (T == bool) {
         out.val = @intFromBool(v);

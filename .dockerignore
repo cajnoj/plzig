@@ -11,3 +11,8 @@ regression.diffs
 regression.out
 log
 tmp_check
+output_iso
+test/tap/log
+.zig-cache
+zig-out
+.github

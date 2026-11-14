@@ -448,12 +448,12 @@ plzig_seccomp_apply_in_child(const PlzigSandbox *sb, char *errbuf, size_t errlen
 	EMIT_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x40000000U, 0, 1);
 	EMIT_STMT(BPF_RET | BPF_K, PLZIG_SC_EPERM);
 #endif
-	for (i = 0; i < lengthof(plzig_denied_syscalls); i++)
+	for (i = 0; i < (int) lengthof(plzig_denied_syscalls); i++)
 	{
 		EMIT_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32) plzig_denied_syscalls[i], 0, 1);
 		EMIT_STMT(BPF_RET | BPF_K, PLZIG_SC_EPERM);
 	}
-	for (i = 0; i < lengthof(plzig_self_only_syscalls); i++)
+	for (i = 0; i < (int) lengthof(plzig_self_only_syscalls); i++)
 	{
 		/* if nr matches: allow iff (pid_t) args[0] == self */
 		EMIT_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32) plzig_self_only_syscalls[i], 0, 4);

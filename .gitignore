@@ -7,3 +7,7 @@ results/
 regression.diffs
 regression.out
 log/
+output_iso/
+tmp_check/
+.zig-cache/
+zig-out/

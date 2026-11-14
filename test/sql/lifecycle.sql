@@ -47,6 +47,13 @@ SET plzig.instance_cache_size = 0;
 SELECT tick(), tick();
 RESET plzig.instance_cache_size;
 SELECT tick(), tick();
+-- lowering plzig.instance_cache_size releases the idle instances of every
+-- function at the next call of any PL/Zig function
+SELECT tick();
+SET plzig.instance_cache_size = 0;
+SELECT version_fn();
+RESET plzig.instance_cache_size;
+SELECT tick() AS from_a_fresh_instance;
 
 -- dropping a function while its module is cached is harmless
 CREATE FUNCTION dropme() RETURNS int LANGUAGE plzig AS $$ return 5; $$;

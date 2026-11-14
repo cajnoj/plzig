@@ -1085,7 +1085,7 @@ plzig_find_lib_dir(const char *bin, char *lib)
 		slash = strrchr(bindir, '/');
 		if (slash != NULL)
 			*slash = '\0';
-		for (i = 0; i < lengthof(layouts); i++)
+		for (i = 0; i < (int) lengthof(layouts); i++)
 		{
 			snprintf(cand, sizeof(cand), "%s/%s", bindir, layouts[i]);
 			if (plzig_realpath(cand, lib) && plzig_is_zig_lib(lib))
@@ -1567,8 +1567,8 @@ plzig_compile(const char *root, const char *zigcache, const char *src, size_t sr
 	char	   *argv[64];
 	PlzigSandbox sb;
 	PlzigSpawnResult res;
-	char	   *wasm = NULL;
-	size_t		len = 0;
+	char	   *volatile wasm = NULL;	/* set inside PG_TRY, read after it */
+	volatile size_t len = 0;
 	int			i;
 	int			n;
 
@@ -1697,9 +1697,14 @@ plzig_compile(const char *root, const char *zigcache, const char *src, size_t sr
 		}
 
 		/* 3. collect the module */
-		plzig_path(path, "%s/out.wasm", builddir);
-		wasm = plzig_read_file(path, (size_t) plzig_max_module_size * 1024, &len,
-							   false, PLZIG_FILE_COMPILED);
+		{
+			size_t		rlen;
+
+			plzig_path(path, "%s/out.wasm", builddir);
+			wasm = plzig_read_file(path, (size_t) plzig_max_module_size * 1024, &rlen,
+								   false, PLZIG_FILE_COMPILED);
+			len = rlen;
+		}
 	}
 	PG_FINALLY();
 	{
@@ -1902,8 +1907,8 @@ plzig_get_wasm(const char *src, size_t srclen, uint32 *wasm_len, bool use_cache)
 	char		key[65];
 	char		final[MAXPGPATH];
 	char		tmp[MAXPGPATH];
-	char	   *wasm = NULL;
-	size_t		len = 0;
+	char	   *volatile wasm = NULL;	/* set inside PG_TRY, read after it */
+	volatile size_t len = 0;
 	int			lockfd;
 
 	if (!plzig_exit_registered)
@@ -1919,11 +1924,14 @@ plzig_get_wasm(const char *src, size_t srclen, uint32 *wasm_len, bool use_cache)
 
 	if (use_cache)
 	{
-		wasm = plzig_read_file(final, PLZIG_MAX_WASM_SIZE, &len, true, PLZIG_FILE_CACHED);
-		if (wasm != NULL)
+		size_t		rlen;
+		char	   *hit = plzig_read_file(final, PLZIG_MAX_WASM_SIZE, &rlen, true,
+										  PLZIG_FILE_CACHED);
+
+		if (hit != NULL)
 		{
-			*wasm_len = (uint32) len;
-			return wasm;
+			*wasm_len = (uint32) rlen;
+			return hit;
 		}
 	}
 
@@ -1932,8 +1940,13 @@ plzig_get_wasm(const char *src, size_t srclen, uint32 *wasm_len, bool use_cache)
 	{
 		/* somebody else may have compiled it while we waited */
 		if (use_cache)
-			wasm = plzig_read_file(final, PLZIG_MAX_WASM_SIZE, &len, true,
+		{
+			size_t		rlen = 0;
+
+			wasm = plzig_read_file(final, PLZIG_MAX_WASM_SIZE, &rlen, true,
 								   PLZIG_FILE_CACHED);
+			len = rlen;
+		}
 		if (wasm == NULL)
 		{
 			uint32		wlen;
@@ -1979,7 +1992,7 @@ plzig_cache_clear_files(void)
 	char		root[MAXPGPATH];
 	char		cache[MAXPGPATH];
 	char		zigcache[MAXPGPATH];
-	int64		removed = 0;
+	volatile int64 removed = 0;	/* set inside PG_TRY, read after it */
 	int			lockfd;
 
 	plzig_dirs(root, cache, zigcache);
@@ -1995,3 +2008,149 @@ plzig_cache_clear_files(void)
 	PG_END_TRY();
 	return removed;
 }
+
+#ifdef PLZIG_TESTING
+/* LCOV_EXCL_START (test helpers are not part of the coverage figures) */
+/* ---------------------------------------------------------------------
+ * Unit-test helpers, compiled only with -DPLZIG_TESTING (`make
+ * PLZIG_TESTING=1`; never in a release build).  Declared and used by
+ * test/sql/testing.sql only.
+ * ---------------------------------------------------------------------
+ */
+#include "utils/builtins.h"
+#if PG_VERSION_NUM >= 160000
+#include "varatt.h"
+#endif
+
+PG_FUNCTION_INFO_V1(plzig_test_cache_key);
+PG_FUNCTION_INFO_V1(plzig_test_zig_flags);
+PG_FUNCTION_INFO_V1(plzig_test_display_path);
+PG_FUNCTION_INFO_V1(plzig_test_path);
+PG_FUNCTION_INFO_V1(plzig_test_format_output);
+PG_FUNCTION_INFO_V1(plzig_test_cache_file_kind);
+PG_FUNCTION_INFO_V1(plzig_test_sandbox_missing);
+PG_FUNCTION_INFO_V1(plzig_test_replace_all);
+PG_FUNCTION_INFO_V1(plzig_test_is_sha256_hex);
+PG_FUNCTION_INFO_V1(plzig_test_sandbox_mode);
+
+/* plzig_test_cache_key(src bytea) RETURNS text: the module cache key */
+Datum
+plzig_test_cache_key(PG_FUNCTION_ARGS)
+{
+	bytea	   *src = PG_GETARG_BYTEA_PP(0);
+	char		key[65];
+
+	plzig_load_sdk();
+	plzig_cache_key(VARDATA_ANY(src), VARSIZE_ANY_EXHDR(src), key);
+	PG_RETURN_TEXT_P(cstring_to_text(key));
+}
+
+/* plzig_test_zig_flags() RETURNS text: the flags as hashed into the key */
+Datum
+plzig_test_zig_flags(PG_FUNCTION_ARGS)
+{
+	StringInfoData flags;
+	int			i;
+
+	initStringInfo(&flags);
+	for (i = 0; plzig_zig_flags[i]; i++)
+		appendStringInfo(&flags, "%s ", plzig_zig_flags[i]);
+	PG_RETURN_TEXT_P(cstring_to_text(flags.data));
+}
+
+/* plzig_test_display_path(path text) RETURNS text */
+Datum
+plzig_test_display_path(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_TEXT_P(cstring_to_text(plzig_display_path(text_to_cstring(PG_GETARG_TEXT_PP(0)))));
+}
+
+/*
+ * plzig_test_path(path text) RETURNS text: the path builder; paths of
+ * MAXPGPATH bytes or more are an error.  A NULL argument builds the
+ * PL/Zig directories under the data directory and returns them.
+ */
+Datum
+plzig_test_path(PG_FUNCTION_ARGS)
+{
+	char		dst[MAXPGPATH];
+
+	if (PG_ARGISNULL(0))
+	{
+		char		root[MAXPGPATH];
+		char		cache[MAXPGPATH];
+		char		zigcache[MAXPGPATH];
+
+		plzig_dirs(root, cache, zigcache);
+		PG_RETURN_TEXT_P(cstring_to_text(psprintf("%s %s %s",
+												  plzig_display_path(root),
+												  plzig_display_path(cache),
+												  plzig_display_path(zigcache))));
+	}
+	plzig_path(dst, "%s", text_to_cstring(PG_GETARG_TEXT_PP(0)));
+	PG_RETURN_TEXT_P(cstring_to_text(dst));
+}
+
+/*
+ * plzig_test_format_output(raw bytea, builddir text, validator bool) RETURNS text
+ * Compiler/validator output as shown to the user.
+ */
+Datum
+plzig_test_format_output(PG_FUNCTION_ARGS)
+{
+	bytea	   *raw = PG_GETARG_BYTEA_PP(0);
+
+	PG_RETURN_TEXT_P(cstring_to_text(plzig_format_output(VARDATA_ANY(raw),
+														 (int) VARSIZE_ANY_EXHDR(raw),
+														 text_to_cstring(PG_GETARG_TEXT_PP(1)),
+														 PG_GETARG_BOOL(2))));
+}
+
+/* plzig_test_cache_file_kind(name text) RETURNS int: 0 other, 1 module, 2 temp */
+Datum
+plzig_test_cache_file_kind(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(plzig_cache_file_kind(text_to_cstring(PG_GETARG_TEXT_PP(0))));
+}
+
+/* plzig_test_sandbox_missing(abi int, seccomp int) RETURNS text */
+Datum
+plzig_test_sandbox_missing(PG_FUNCTION_ARGS)
+{
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+	plzig_sandbox_missing(&buf, PG_GETARG_INT32(0), PG_GETARG_INT32(1));
+	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
+}
+
+/* plzig_test_replace_all(s text, from text, to text) RETURNS text */
+Datum
+plzig_test_replace_all(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_TEXT_P(cstring_to_text(plzig_replace_all(text_to_cstring(PG_GETARG_TEXT_PP(0)),
+													   text_to_cstring(PG_GETARG_TEXT_PP(1)),
+													   text_to_cstring(PG_GETARG_TEXT_PP(2)))));
+}
+
+/* plzig_test_is_sha256_hex(s text) RETURNS bool */
+Datum
+plzig_test_is_sha256_hex(PG_FUNCTION_ARGS)
+{
+	char	   *s = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	char		buf[80];
+
+	/* the check reads 65 bytes: give it a buffer that is at least that long */
+	memset(buf, 0, sizeof(buf));
+	strlcpy(buf, s, sizeof(buf));
+	PG_RETURN_BOOL(strlen(s) < sizeof(buf) && plzig_is_sha256_hex(buf));
+}
+
+/* plzig_test_sandbox_mode() RETURNS int: plzig.compiler_sandbox as parsed */
+Datum
+plzig_test_sandbox_mode(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(plzig_sandbox_mode());
+}
+/* LCOV_EXCL_STOP */
+#endif							/* PLZIG_TESTING */

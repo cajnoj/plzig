@@ -1,0 +1,69 @@
+# PostgreSQL built from the vendored source with assertions and debugging,
+# optionally with Valgrind support (-DUSE_VALGRIND), and PL/Zig built
+# against it.  --enable-cassert defines USE_ASSERT_CHECKING, and with it
+# pg_config_manual.h defines MEMORY_CONTEXT_CHECKING and CLOBBER_FREED_MEMORY
+# (checked in all six vendored versions); passing them with -D as well would
+# only make every extension build warn about the redefinition.
+#
+#   docker build -f docker/Dockerfile.hardened \
+#       --build-context pgsrc=vendor/pg-REL_14_25 [--build-arg VALGRIND=1] \
+#       -t plzig-hardened:14.25 .
+#
+# The PostgreSQL source comes in as a named build context because the main
+# context (.dockerignore) excludes vendor/postgres and vendor/pg-*.
+# Used by docker/run-all.sh; runs docker/test-in-container.sh like the
+# PGDG-based image.
+ARG BASE_IMAGE=debian:bookworm-slim
+FROM ${BASE_IMAGE} AS pgbuild
+ARG VALGRIND=0
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        build-essential bison flex perl libipc-run-perl libreadline-dev zlib1g-dev \
+        pkg-config cmake patch xz-utils ca-certificates curl git binutils \
+        $( [ "$VALGRIND" = 1 ] && echo valgrind libc6-dbg ); \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=pgsrc . /pgsrc
+RUN set -eux; \
+    cd /pgsrc; \
+    cppflags=""; \
+    [ "$VALGRIND" = 1 ] && cppflags="-DUSE_VALGRIND"; \
+    ./configure --prefix=/usr/local/pgsql --enable-cassert --enable-debug \
+        --enable-tap-tests --without-icu --without-llvm \
+        CFLAGS="-O1 -g -fno-omit-frame-pointer" CPPFLAGS="$cppflags" >/tmp/configure.log; \
+    { make -j"$(nproc)" -s all && make -j"$(nproc)" -s -C contrib all; } >/tmp/make.log 2>&1 || { tail -50 /tmp/make.log; exit 1; }; \
+    make -s install >/dev/null; \
+    make -s -C contrib install >/dev/null; \
+    make -s -C src/test/isolation install >/dev/null; \
+    make -s -C src/test/perl install >/dev/null; \
+    cp src/tools/valgrind.supp /usr/local/pgsql/valgrind.supp; \
+    cd /; rm -rf /pgsrc; \
+    useradd -m -u 999 -s /bin/bash postgres
+
+ENV PATH=/usr/local/pgsql/bin:$PATH
+ENV PLZIG_TEST_ZIG=/opt/zig-0.17.1/zig
+COPY . /src
+WORKDIR /src
+RUN set -eux; \
+    arch=$(uname -m); \
+    zt=""; [ -f "vendor/zig/zig-$arch-linux-0.17.1.tar.xz" ] && zt="ZIG_TARBALL=$PWD/vendor/zig/zig-$arch-linux-0.17.1.tar.xz"; \
+    ws=""; [ -d vendor/wamr/core ] && ws="WAMR_SRC=$PWD/vendor/wamr"; \
+    make install-zig ZIG_PREFIX=/opt/zig-0.17.1 $zt; \
+    make -j"$(nproc)" WERROR=1 ZIG="$PLZIG_TEST_ZIG" $ws; \
+    make install $ws; \
+    cp -a /src /tmp/plzig-testing-src; \
+    make -C /tmp/plzig-testing-src clean; \
+    make -C /tmp/plzig-testing-src -j"$(nproc)" WERROR=1 PLZIG_TESTING=1 ZIG="$PLZIG_TEST_ZIG" $ws; \
+    make -C /tmp/plzig-testing-src install PLZIG_TESTING=1 DESTDIR=/opt/plzig-testing $ws; \
+    rm -rf /tmp/plzig-testing-src build/dl; \
+    chown -R postgres:postgres /src; \
+    install -d -m 755 /opt/plzig-test/badowner /opt/plzig-test/baddir /opt/plzig-test/gatezig; \
+    install -m 755 -o nobody /bin/true /opt/plzig-test/badowner/zig; \
+    chown nobody /opt/plzig-test/baddir; \
+    install -m 755 /bin/true /opt/plzig-test/baddir/zig; \
+    sed -e "s|@REAL_ZIG@|$PLZIG_TEST_ZIG|" -e "s|@GATE_DIR@|/tmp/plzig-gates|" \
+        /src/test/gatezig.sh > /opt/plzig-test/gatezig/zig; \
+    chmod 755 /opt/plzig-test/gatezig/zig
+
+USER postgres
+CMD ["bash", "/src/docker/test-in-container.sh"]

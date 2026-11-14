@@ -81,14 +81,25 @@ host_catch(PlzigCallCtx *ctx, wasm_exec_env_t env, MemoryContext oldcxt)
 /*
  * Copy a guest string, check it is valid in the database encoding (this also
  * rejects NUL bytes), and return a palloc'd NUL-terminated copy.
+ *
+ * truncate: a string longer than maxlen is cut to maxlen bytes instead of
+ * being an error, and a multibyte character cut in half at the end is
+ * dropped, so that truncation never turns a valid message into an encoding
+ * error.
  */
 static char *
 guest_string(wasm_exec_env_t env, uint32 ptr, uint32 len, uint32 maxlen,
-			 const char *what)
+			 const char *what, bool truncate)
 {
 	void	   *src;
 	char	   *s;
+	bool		truncated = false;
 
+	if (len > maxlen && truncate)
+	{
+		len = maxlen;
+		truncated = true;
+	}
 	if (len > maxlen || (Size) len + 1 > MaxAllocSize)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
@@ -98,6 +109,19 @@ guest_string(wasm_exec_env_t env, uint32 ptr, uint32 len, uint32 maxlen,
 	if (len > 0)
 		memcpy(s, src, len);
 	s[len] = '\0';
+	if (truncated)
+	{
+		int			enc = GetDatabaseEncoding();
+		int			valid = pg_encoding_verifymbstr(enc, s, (int) len);
+
+		/* invalid only because the last character is incomplete? */
+		if (valid < (int) len && s[valid] != '\0' &&
+			pg_encoding_mblen(enc, s + valid) > (int) len - valid)
+		{
+			len = (uint32) valid;
+			s[len] = '\0';
+		}
+	}
 	(void) pg_verifymbstr(s, (int) len, false);
 	return s;
 }
@@ -142,9 +166,7 @@ host_log(wasm_exec_env_t env, uint32 level, uint32 ptr, uint32 len)
 						 errmsg("PL/Zig: invalid log level %u", level)));
 				elevel = LOG;	/* keep compiler quiet */
 		}
-		if (len > PLZIG_MAX_LOG_MSG)
-			len = PLZIG_MAX_LOG_MSG;	/* truncate (may cut a character: checked below) */
-		msg = guest_string(env, ptr, len, PLZIG_MAX_LOG_MSG, "log message");
+		msg = guest_string(env, ptr, len, PLZIG_MAX_LOG_MSG, "log message", true);
 		ereport(elevel, (errmsg_internal("%s", msg)));
 		pfree(msg);
 	}
@@ -167,9 +189,7 @@ host_raise(wasm_exec_env_t env, uint32 ptr, uint32 len)
 	{
 		char	   *msg;
 
-		if (len > PLZIG_MAX_LOG_MSG)
-			len = PLZIG_MAX_LOG_MSG;
-		msg = guest_string(env, ptr, len, PLZIG_MAX_LOG_MSG, "error message");
+		msg = guest_string(env, ptr, len, PLZIG_MAX_LOG_MSG, "error message", true);
 		ereport(ERROR,
 				(errcode(ERRCODE_RAISE_EXCEPTION),
 				 errmsg_internal("%s", msg)));
@@ -193,9 +213,7 @@ host_panic(wasm_exec_env_t env, uint32 ptr, uint32 len)
 	{
 		char	   *msg;
 
-		if (len > 1024)
-			len = 1024;
-		msg = guest_string(env, ptr, len, 1024, "panic message");
+		msg = guest_string(env, ptr, len, 1024, "panic message", true);
 		ereport(ERROR,
 				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
 				 errmsg("PL/Zig panic: %s", msg)));
@@ -438,7 +456,7 @@ decode_text_params(wasm_exec_env_t env, uint32 params_ptr, uint32 nparams,
 						(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
 						 errmsg("PL/Zig: invalid SPI parameter pointer")));
 			v = guest_string(env, (uint32) (copy[i].val & PG_UINT32_MAX), copy[i].len,
-							 MaxAllocSize - VARHDRSZ - 1, "SPI parameter");
+							 MaxAllocSize - VARHDRSZ - 1, "SPI parameter", false);
 			(*values)[i] = PointerGetDatum(cstring_to_text_with_len(v, (int) copy[i].len));
 			(*nulls)[i] = ' ';
 		}
@@ -579,7 +597,7 @@ decode_typed_params(wasm_exec_env_t env, SPIPlanPtr plan, uint32 params_ptr,
 					if (v->val > PG_UINT32_MAX && v->len > 0)
 						goto bad_pointer;
 					s = guest_string(env, (uint32) (v->val & PG_UINT32_MAX), v->len,
-									 MaxAllocSize - VARHDRSZ - 1, "SPI parameter");
+									 MaxAllocSize - VARHDRSZ - 1, "SPI parameter", false);
 					(*values)[i] = PointerGetDatum(cstring_to_text_with_len(s, (int) v->len));
 					pfree(s);
 					break;
@@ -917,7 +935,7 @@ host_spi_execute(wasm_exec_env_t env, uint32 sql_ptr, uint32 sql_len,
 
 		MemoryContextReset(ctx->scratch);
 		MemoryContextSwitchTo(ctx->scratch);
-		sql = guest_string(env, sql_ptr, sql_len, MaxAllocSize - 1, "SQL statement");
+		sql = guest_string(env, sql_ptr, sql_len, MaxAllocSize - 1, "SQL statement", false);
 		decode_text_params(env, params_ptr, nparams, &types, &values, &nulls);
 		check_sql(sql);
 
@@ -1274,7 +1292,7 @@ host_spi_prepare(wasm_exec_env_t env, uint32 sql_ptr, uint32 sql_len,
 
 		MemoryContextReset(ctx->scratch);
 		MemoryContextSwitchTo(ctx->scratch);
-		sql = guest_string(env, sql_ptr, sql_len, MaxAllocSize - 1, "SQL statement");
+		sql = guest_string(env, sql_ptr, sql_len, MaxAllocSize - 1, "SQL statement", false);
 		if (nkinds > PLZIG_MAX_SPI_PARAMS)
 			ereport(ERROR,
 					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
@@ -1584,7 +1602,7 @@ host_spi_cursor_open(wasm_exec_env_t env, uint32 sql_ptr, uint32 sql_len,
 
 		MemoryContextReset(ctx->scratch);
 		MemoryContextSwitchTo(ctx->scratch);
-		sql = guest_string(env, sql_ptr, sql_len, MaxAllocSize - 1, "SQL statement");
+		sql = guest_string(env, sql_ptr, sql_len, MaxAllocSize - 1, "SQL statement", false);
 		decode_text_params(env, params_ptr, nparams, &types, &values, &nulls);
 		check_sql(sql);
 		c = cursor_reserve(ctx, &idx);

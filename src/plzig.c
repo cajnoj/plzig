@@ -456,6 +456,14 @@ plzig_function_execute(PlzigFunction *fn, FunctionCallInfo fcinfo)
 	errcb.previous = error_context_stack;
 	error_context_stack = &errcb;
 
+	/*
+	 * plzig.instance_cache_size may have been lowered since instances were
+	 * cached: release the excess now, not only when the next instance is
+	 * cached (with 0, that never happens).
+	 */
+	if (plzig_lru_count > plzig_instance_cache_size)
+		plzig_lru_trim();
+
 	fn->use_count++;
 	PG_TRY();
 	{

@@ -520,6 +520,81 @@ v1 is expected to be slower than PL/pgSQL; neither weakens the sandbox.
      contain MIT-licensed Zig runtime code.
 5. Benchmark against equivalent PL/pgSQL (tight loop, string building, per-row
    call, SPI loop) before and after 1–3, to replace the current guesses.
+6. **Remove the avoidable second copy of text results** (owner request,
+   2026-11-14). A `text`/`varchar`/`bpchar` result is currently copied out of
+   guest memory into a temporary buffer (`plzig_copy_out`), validated
+   (`pg_verifymbstr`), and then copied again into the final varlena
+   (`cstring_to_text_with_len`); `bytea` results are likewise copied twice.
+   - Allocate the final varlena once, copy the guest bytes straight into
+     `VARDATA`, and validate encoding in place (the validation rules — valid
+     in the database encoding, no NUL bytes — must not change; on failure the
+     allocation is simply released by the error).
+   - Keep exactly one copy across the sandbox boundary: results must never
+     alias guest memory.
+   - Check the same pattern elsewhere and fix it where it is equally
+     mechanical: SPI text/bytea parameters (`guest_string` followed by
+     `cstring_to_text_with_len`), typed row values going into the guest, and
+     function arguments (already a single copy — confirm).
+   - Types returned through their input function (text I/O path) need the
+     NUL-terminated C string and keep the temporary buffer.
+   - Do it in phase D with the marshalling benchmark (task 10) measured
+     before and after; add a regress case for invalid encoding and embedded
+     NUL in a returned value if the suite does not already have one.
+7. **Raising SQL errors with a chosen SQLSTATE, detail and hint** (owner
+   decision, 2026-11-14). Today `plzig.raise` always uses `P0001`, and Zig
+   errors and panics use `38000`.
+   - SDK: e.g. `plzig.raiseError(.{ .sqlstate = "23514", .message = ...,
+     .detail = ..., .hint = ... })` (formatting variants as for `raise`);
+     never returns. One new host import; bump the SDK ABI version.
+   - Severity is always `ERROR`. No way to raise `FATAL`/`PANIC`, and no way
+     to raise a non-error level through this call.
+   - SQLSTATE must be exactly five characters of `[0-9A-Z]`. Refused classes
+     (the call fails with its own error naming the refused code): `00`, `01`,
+     `02` (not errors); `08` (connection exception); `53` (insufficient
+     resources); `57` (operator intervention, includes query_canceled and
+     admin_shutdown); `58` (system error); `F0` (configuration file error);
+     `XX` (internal error). Rationale: a function must not be able to make
+     its own failure look like a server-level condition that monitoring,
+     poolers and drivers act on. This is deliberately stricter than PL/pgSQL.
+   - Message, detail and hint: validated in the database encoding, no NUL
+     bytes, length-capped like `raise`; control characters handled as for
+     compiler output.
+   - Same propagation rule as every host import: stash the error, trap the
+     guest, re-throw after the interpreter has unwound.
+   - Tests: each refused class; malformed codes (length, case, non-ASCII);
+     a raised code caught by `EXCEPTION WHEN SQLSTATE '...'` in a calling
+     PL/pgSQL function; detail/hint visible; oversized and invalid text.
+   - Still cut: catching SQL errors inside guest code. That needs a
+     subtransaction around the guarded statements (see README limits).
+8. **Research: subtransactions, for catching SQL errors in guest code**
+   (owner request, 2026-11-14). Research and a written recommendation only —
+   no implementation until the owner has seen the result.
+   - Read how the in-tree languages do it, in the vendored sources for 14
+     and 19: PL/pgSQL (`exec_stmt_block` in `pl_exec.c`), PL/Python
+     (`plpy.subtransaction()`, `PLy_spi_subtransaction_*`), PL/Tcl
+     (`pltcl_subtransaction`, `pltcl_subtrans_*`), PL/Perl; plus
+     `BeginInternalSubTransaction` / `ReleaseCurrentSubTransaction` /
+     `RollbackAndReleaseCurrentSubTransaction` in `xact.c` and the SPI
+     hooks `AtEOSubXact_SPI`. Note version differences.
+   - API shape options for PL/Zig and their trade-offs: an explicit
+     scoped block (PL/Python style), an implicit subtransaction per
+     "catchable" SPI call (PL/Tcl style), or both. What the guest sees
+     (SQLSTATE, message, detail) when it catches.
+   - Interaction with what exists: cursors and typed rows opened inside a
+     rolled-back subtransaction (handles must die), prepared plans created
+     inside one, the per-call SPI connection, recursion through SPI,
+     temporary instances, the stash-trap-rethrow error path, the arena.
+   - Which errors must never be catchable (query cancel, backend
+     termination, out-of-memory?, internal errors) and how PL/pgSQL decides.
+   - Bookkeeping risks: restoring `CurrentMemoryContext` and
+     `CurrentResourceOwner` on every path; an error raised while aborting.
+   - Costs: transaction-id consumption for writing subtransactions, the
+     per-backend subtransaction cache overflow (more than 64) and its
+     server-wide effect, behaviour on a hot standby and in parallel workers.
+   - Whether a cap on subtransactions per call is warranted (GUC).
+   - Deliverable: `doc/research-subtransactions.md` with findings, a
+     recommended design or a recommendation not to do it, the tests it
+     would need, and an effort estimate.
 
 ## 13. Roadmap after v1 is operable
 
@@ -1028,3 +1103,56 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       new import with forged pointers, lengths, handles, kinds and values
       (40 cases, each must be a clean `ERROR`).
     - Item 5 (benchmarks) is not part of this change.
+24. **Phase B test layers (2026-11-14).** Implemented as §13 B describes,
+    except:
+    - *Isolation tests* cover what isolationtester can observe: it detects
+      a blocked step only through heavyweight-lock waits, and a session
+      waiting for the compile lock (`flock`) or inside a compilation is not
+      in one.  Concurrent creation/replacement, `CREATE OR REPLACE`/`DROP`
+      during a call and `plzig_cache_clear()` during a call are in
+      `test/isolation`; compile-lock waits, cancelling them and
+      `plzig_cache_clear()` during a compilation are TAP tests
+      (`test/tap/t/020_compile_lock.pl`, `030_interrupts.pl`) driven by a
+      test-only compiler wrapper (`test/gatezig.sh`, unconfined, used with
+      `plzig.compiler_sandbox = off`) that holds a marked compilation at a
+      gate until the test releases it.
+    - *C unit helpers* (`plzig_test_*`) are compiled only with
+      `make PLZIG_TESTING=1`, declared by `test/sql/testing.sql` itself and
+      never by the extension script; the test image stages that build
+      under `/opt/plzig-testing` and the security checks fail if the
+      installed `plzig.so` exports any of them.
+    - *SDK unit tests* run the production `zig/sdk/plzig.zig` and
+      `root.zig` natively: under `zig test` (`builtin.is_test`), plzig.zig
+      takes its host imports and wasm memory from a module
+      `plzig_test_env` (`zig/sdk/test_env.zig`) instead of the wasm
+      externs/builtins; a function build never has that module or
+      `is_test`.  `root.zig`'s `decode`/`encode` became `pub` for the tests.
+    - *aarch64* is parameterised (`PLZIG_PLATFORM`, Zig tarball by
+      architecture) but not run.
+    - *CI* configuration is not added (hosting not chosen).
+25. **Fixes from the phase B tests (2026-11-14), behaviour changes:**
+    - A parameter named `call` is rejected like `plzig` and `std` (it
+      shadowed the generated `pub fn call` and failed with a compiler error
+      about generated code at "line 0").
+    - A NULL result of a domain type is passed through the domain's input
+      function, so `NOT NULL` (and `CHECK`) constraints of the result
+      domain are enforced for NULL too (they were skipped).
+    - `log`/`raise`/`panic` messages longer than their limit are cut at a
+      character boundary (cutting inside a multibyte character turned a
+      valid message into an "invalid byte sequence" error, with the wrong
+      SQLSTATE for `raise`).
+    - `plzig-validate` accepts input of exactly its 4 MB buffer size (it
+      refused one byte early; unreachable through `plzig.max_source_size`).
+    - The SDK arena's size arithmetic cannot overflow (only possible on
+      64-bit hosts, i.e. in the native unit tests; no change for wasm32).
+    - Lowering `plzig.instance_cache_size` takes effect at the next call
+      of any PL/Zig function: idle instances beyond the new size are
+      destroyed then (before, only when another instance was cached, which
+      with 0 never happens: the next call still used the old instance and
+      its globals; `test/expected/lifecycle.out` changed from `4 | 1` to
+      `1 | 1` accordingly).
+    - Locals that are set inside `PG_TRY` and read after it are `volatile`
+      (GCC `-Wclobbered` with `-Wextra`; no observed failure).
+    - The SDK files changed (test seam, overflow-safe arena, `pub` in
+      root.zig); their digest is part of the cache key, so every cached
+      module is recompiled once on first use after the update.

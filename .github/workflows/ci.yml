@@ -1,0 +1,73 @@
+# PL/Zig CI: the per-version test layers of docker/run-all.sh (Zig unit
+# tests, pg_regress, security checks, leak checks, isolation tests, TAP
+# tests, C unit checks, and the no-Landlock / no-seccomp runs).
+#
+# The variants that need the vendored PostgreSQL sources (hardened, Valgrind,
+# ASan, coverage, pg_upgrade) are not run here; see docker/run-all.sh.
+#
+# The compiler sandbox defaults to "require", which needs Landlock ABI >= 6
+# (Linux 6.12) and seccomp on the runner's kernel.  The tests do not weaken
+# that: on an older runner kernel they fail, and the preflight step says why.
+name: CI
+
+on:
+  push:
+    branches: [master, review-and-hardening]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: PostgreSQL ${{ matrix.pg }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["14.25", "15.20", "16.16", "17.12", "18.7", "19rc2"]
+        arch: [x86_64]
+        runner: [ubuntu-24.04]
+        include:
+          - pg: "18.7"
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Preflight (kernel, Landlock)
+        run: |
+          uname -srm
+          docker version --format 'docker {{.Server.Version}}'
+          cat /sys/kernel/security/lsm || true
+          python3 - <<'PY'
+          import ctypes, platform
+          nr = 444  # landlock_create_ruleset, same number on x86_64 and aarch64
+          libc = ctypes.CDLL(None, use_errno=True)
+          abi = libc.syscall(nr, None, 0, 1)  # LANDLOCK_CREATE_RULESET_VERSION
+          print("Landlock ABI:", abi if abi >= 0 else "unavailable (errno %d)" % ctypes.get_errno())
+          if abi < 6:
+              print("::warning::Landlock ABI %d < 6: plzig.compiler_sandbox = require cannot be satisfied on this runner; the tests will fail" % abi)
+          PY
+
+      - name: Test
+        env:
+          PLZIG_VERSIONS: ${{ matrix.pg }}
+          PLZIG_VARIANTS: ""
+          PLZIG_LOGDIR: build/test-logs/ci
+        run: docker/run-all.sh
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.pg }}-${{ matrix.arch }}
+          path: build/test-logs/
+          if-no-files-found: ignore

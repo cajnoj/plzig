@@ -1,0 +1,615 @@
+//! Native unit tests of the guest SDK: the production zig/sdk/plzig.zig and
+//! zig/sdk/root.zig, with the host imports and wasm memory replaced by
+//! zig/sdk/test_env.zig and the user function by zig/sdk/test_user.zig.
+//!
+//!   make check-zig
+
+const std = @import("std");
+const plzig = @import("plzig");
+const sdk_root = @import("sdk_root");
+const env = @import("plzig_test_env");
+const user = @import("user");
+const testing = std.testing;
+
+const Value = plzig.Value;
+const Slot = plzig.Slot;
+const Col = env.Col;
+const page = env.page;
+const a = plzig.allocator;
+
+// the exports of root.zig, linked into this test binary
+extern fn plzig_abi_version() u32;
+extern fn plzig_begin() void;
+extern fn plzig_alloc(len: u32) u32;
+extern fn plzig_call(args: [*]const Slot, nargs: u32, result: *Slot) u32;
+
+/// Fresh simulated instance memory: 2 initial pages, growth up to `limit`
+/// pages (plzig.max_memory), and an empty arena.
+fn setup(limit: usize) !void {
+    try env.initMemory(2, limit, 4096);
+    env.reset();
+    plzig_begin();
+}
+
+fn heapStart() usize {
+    return env.memory_base + 2 * page;
+}
+
+/// address the next small 1-aligned allocation would get
+fn top() usize {
+    const p = a.rawAlloc(1, .@"1", 0).?;
+    a.rawFree(p[0..1], .@"1", 0);
+    return @intFromPtr(p);
+}
+
+// ---------------------------------------------------------------------------
+// Arena allocator
+
+test "abi version" {
+    try testing.expectEqual(@as(u32, 2), plzig_abi_version());
+    try testing.expectEqual(plzig.abi_version, plzig_abi_version());
+}
+
+test "arena: the heap starts above the initial memory" {
+    try setup(64);
+    try testing.expectEqual(heapStart(), top());
+}
+
+test "arena: every alignment up to the page size" {
+    try setup(64);
+    var shift: u6 = 0;
+    while (shift <= 16) : (shift += 1) {
+        const al: usize = @as(usize, 1) << shift;
+        // misalign the top first
+        _ = a.rawAlloc(1, .@"1", 0).?;
+        const p = a.rawAlloc(24, std.mem.Alignment.fromByteUnits(al), 0) orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(@as(usize, 0), @intFromPtr(p) % al);
+        @memset(p[0..24], 0xAA);
+    }
+    // typed allocations honour their natural alignment too
+    const x = try a.alloc(u64, 3);
+    try testing.expectEqual(@as(usize, 0), @intFromPtr(x.ptr) % 8);
+    const y = try a.alignedAlloc(u8, .fromByteUnits(4096), 1);
+    try testing.expectEqual(@as(usize, 0), @intFromPtr(y.ptr) % 4096);
+}
+
+test "arena: growth asks the host for exactly the pages needed" {
+    try setup(64);
+    try testing.expectEqual(@as(usize, 2), env.memoryPages());
+    const buf = try a.alloc(u8, 3 * page + 1);
+    @memset(buf, 1);
+    try testing.expectEqual(@as(usize, 2 + 4), env.memoryPages());
+    try testing.expectEqual(@as(usize, 1), env.grow_calls);
+    // memory that is already there is used without growing
+    plzig_begin();
+    const again = try a.alloc(u8, 3 * page);
+    @memset(again, 2);
+    try testing.expectEqual(@as(usize, 1), env.grow_calls);
+}
+
+test "arena: resize in place vs. move" {
+    try setup(64);
+    const first = try a.alloc(u8, 100);
+    @memset(first, 7);
+    // the most recent allocation grows and shrinks in place
+    try testing.expect(a.resize(first, 1000));
+    try testing.expect(a.resize(first.ptr[0..1000], 50));
+    const second = try a.alloc(u8, 10);
+    // an older allocation cannot grow in place ...
+    try testing.expect(!a.resize(first.ptr[0..50], 51));
+    // ... but can shrink (the space is not reclaimed)
+    try testing.expect(a.resize(first.ptr[0..50], 20));
+    try testing.expectEqual(@intFromPtr(second.ptr) + 10, top());
+    // realloc of an older allocation moves it and keeps the contents
+    const moved = try a.realloc(first.ptr[0..20], 4000);
+    try testing.expect(moved.ptr != first.ptr);
+    for (moved[0..20]) |c| try testing.expectEqual(@as(u8, 7), c);
+    // realloc of the newest one stays put
+    const same = try a.realloc(moved, 8000);
+    try testing.expectEqual(moved.ptr, same.ptr);
+    // remap follows resize
+    try testing.expect(a.remap(same, 9000) != null);
+    try testing.expect(a.remap(second, 11) == null);
+}
+
+test "arena: free reclaims only the most recent allocation" {
+    try setup(64);
+    const x = try a.alloc(u8, 64);
+    const y = try a.alloc(u8, 64);
+    a.free(x); // not the newest: nothing happens
+    const z = try a.alloc(u8, 1);
+    try testing.expect(@intFromPtr(z.ptr) >= @intFromPtr(y.ptr) + 64);
+    a.free(z);
+    a.free(y);
+    // y and z were reclaimed, x was not
+    try testing.expectEqual(@intFromPtr(y.ptr), top());
+}
+
+test "arena: zero-size allocations take no space" {
+    try setup(64);
+    const before = top();
+    const e = try a.alloc(u8, 0);
+    try testing.expectEqual(@as(usize, 0), e.len);
+    const e2 = try a.alloc(u64, 0);
+    try testing.expectEqual(@as(usize, 0), e2.len);
+    a.free(e);
+    a.free(e2);
+    try testing.expectEqual(before, top());
+    // a zero-length raw allocation is a valid (empty) pointer at the top
+    const p = a.rawAlloc(0, .@"8", 0) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 0), @intFromPtr(p) % 8);
+}
+
+test "arena: reset at the start of every call releases everything" {
+    try setup(64);
+    const first = try a.alloc(u8, 10);
+    _ = try a.alloc(u8, 2 * page);
+    plzig_begin();
+    const again = try a.alloc(u8, 10);
+    try testing.expectEqual(first.ptr, again.ptr);
+    try testing.expectEqual(heapStart(), @intFromPtr(again.ptr));
+    // and memory, once grown, stays (it belongs to the instance)
+    try testing.expect(env.memoryPages() > 2);
+}
+
+test "arena: exhaustion at the memory cap is error.OutOfMemory, and the arena stays usable" {
+    try setup(8); // 512 kB cap, 2 pages initial
+    const before = top();
+    try testing.expectError(error.OutOfMemory, a.alloc(u8, 8 * page));
+    try testing.expectEqual(before, top());
+    // exactly what fits
+    const fit = try a.alloc(u8, 6 * page);
+    @memset(fit, 3);
+    try testing.expectEqual(@as(usize, 8), env.memoryPages());
+    try testing.expectError(error.OutOfMemory, a.alloc(u8, 1));
+    // resize beyond the cap fails, the allocation is unchanged
+    try testing.expect(!a.resize(fit, 6 * page + 1));
+    plzig_begin();
+    _ = try a.alloc(u8, 100);
+}
+
+test "arena: size arithmetic cannot overflow" {
+    try setup(64);
+    const before = top();
+    const grows = env.grow_calls;
+    try testing.expectError(error.OutOfMemory, a.alloc(u8, std.math.maxInt(usize)));
+    try testing.expectError(error.OutOfMemory, a.alloc(u8, std.math.maxInt(usize) - 4096));
+    try testing.expectError(error.OutOfMemory, a.alloc(u64, std.math.maxInt(usize) / 8));
+    try testing.expect(a.rawAlloc(std.math.maxInt(usize) - 3, .@"8", 0) == null);
+    try testing.expect(a.rawAlloc(std.math.maxInt(usize), .fromByteUnits(65536), 0) == null);
+    // more than the 4 GB a wasm32 memory can have: refused without asking the host
+    try testing.expect(a.rawAlloc(1 << 32, .@"1", 0) == null);
+    try testing.expect(a.rawAlloc((1 << 32) - 1, .@"1", 0) == null);
+    try testing.expectEqual(grows, env.grow_calls);
+    // resize of the newest allocation to an impossible size
+    const x = try a.alloc(u8, 16);
+    try testing.expect(!a.resize(x, std.math.maxInt(usize)));
+    try testing.expect(!a.resize(x, 1 << 32));
+    a.free(x);
+    try testing.expectEqual(before, top());
+}
+
+test "plzig_alloc: 8-byte aligned guest addresses, 0 on failure" {
+    try setup(8);
+    _ = a.rawAlloc(3, .@"1", 0);
+    const p = plzig_alloc(100);
+    try testing.expect(p != 0);
+    try testing.expectEqual(@as(u32, 0), p % 8);
+    try testing.expectEqual(@as(u32, 0), plzig_alloc(std.math.maxInt(u32)));
+    try testing.expectEqual(@as(u32, 0), plzig_alloc(8 * page));
+}
+
+// ---------------------------------------------------------------------------
+// Typed rows (Row.get) for every kind
+
+fn row(cols: []const Col) !plzig.Row {
+    env.rows = &.{cols};
+    const r: plzig.spi.Result = .{ .rows = 1, .columns = @intCast(cols.len) };
+    return r.row(0);
+}
+
+test "Row.get: every kind, NULLs and empty values" {
+    try setup(64);
+    const cols = [_]Col{
+        .{ .boolean = true },          .{ .boolean = false },
+        .{ .int2 = -32768 },           .{ .int2 = 32767 },
+        .{ .int4 = std.math.minInt(i32) }, .{ .int4 = -1 },
+        .{ .int8 = std.math.minInt(i64) }, .{ .int8 = std.math.maxInt(i64) },
+        .{ .float4 = -0.0 },           .{ .float4 = std.math.inf(f32) },
+        .{ .float8 = std.math.nan(f64) }, .{ .float8 = -std.math.inf(f64) },
+        .{ .text = "héllo" },          .{ .text = "" },
+        .{ .bytea = "\x00\xff\x01" },  .{ .bytea = "" },
+        .{ .other = "{1,2,3}" },       .{ .other = "" },
+        .{ .null_of = .int4 },         .{ .null_of = .text },
+        .{ .text = "abcdefghi" },
+    };
+    const r = try row(&cols);
+    try testing.expectEqual(cols.len, r.len());
+    try testing.expectEqual(true, try r.get(bool, 0));
+    try testing.expectEqual(false, try r.get(bool, 1));
+    try testing.expectEqual(@as(i16, -32768), try r.get(i16, 2));
+    try testing.expectEqual(@as(i16, 32767), try r.get(i16, 3));
+    try testing.expectEqual(@as(i32, std.math.minInt(i32)), try r.get(i32, 4));
+    try testing.expectEqual(@as(i32, -1), try r.get(i32, 5));
+    try testing.expectEqual(@as(i64, std.math.minInt(i64)), try r.get(i64, 6));
+    try testing.expectEqual(@as(i64, std.math.maxInt(i64)), try r.get(i64, 7));
+    const nz = try r.get(f32, 8);
+    try testing.expect(nz == 0 and std.math.signbit(nz));
+    try testing.expect(std.math.isPositiveInf(try r.get(f32, 9)));
+    try testing.expect(std.math.isNan(try r.get(f64, 10)));
+    try testing.expect(std.math.isNegativeInf(try r.get(f64, 11)));
+    try testing.expectEqualStrings("héllo", try r.get([]const u8, 12));
+    try testing.expectEqual(@as(usize, 0), (try r.get([]const u8, 13)).len);
+    try testing.expectEqualSlices(u8, "\x00\xff\x01", try r.get([]const u8, 14));
+    try testing.expectEqual(@as(usize, 0), (try r.get([]const u8, 15)).len);
+    try testing.expectEqualStrings("{1,2,3}", try r.get([]const u8, 16));
+    try testing.expectEqual(@as(usize, 0), (try r.get([]const u8, 17)).len);
+    // NULL: null through an optional, an error otherwise
+    try testing.expectEqual(@as(?i32, null), try r.get(?i32, 18));
+    try testing.expectError(error.UnexpectedNull, r.get(i32, 18));
+    try testing.expectEqual(@as(?[]const u8, null), try r.get(?[]const u8, 19));
+    try testing.expectError(error.UnexpectedNull, r.get([]const u8, 19));
+    try testing.expect(try r.isNull(18));
+    try testing.expect(!try r.isNull(17));
+    try testing.expectEqual(plzig.Kind.int4, try r.kind(18));
+    // optionals of non-NULL values
+    try testing.expectEqual(@as(?i64, std.math.maxInt(i64)), try r.get(?i64, 7));
+    try testing.expectEqualStrings("abcdefghi", (try r.get(?[]const u8, 20)).?);
+    // out of range
+    try testing.expectError(error.ColumnOutOfRange, r.get(i32, cols.len));
+    try testing.expectError(error.ColumnOutOfRange, r.get(?i32, 1000));
+    try testing.expectError(error.ColumnOutOfRange, r.kind(cols.len));
+    try testing.expectError(error.ColumnOutOfRange, r.isNull(cols.len));
+}
+
+test "Row.get never converts: every (type, kind) combination" {
+    try setup(64);
+    const samples = [_]Col{
+        .{ .boolean = true }, .{ .int2 = 1 },      .{ .int4 = 1 },     .{ .int8 = 1 },
+        .{ .float4 = 1 },     .{ .float8 = 1 },    .{ .text = "1" },   .{ .bytea = "1" },
+        .{ .other = "1" },
+    };
+    const r = try row(&samples);
+    const Types = .{ bool, i16, i32, i64, f32, f64, []const u8 };
+    // which kinds (1..9) each type accepts
+    const ok = [_][]const u16{ &.{1}, &.{2}, &.{3}, &.{4}, &.{5}, &.{6}, &.{ 7, 8, 9 } };
+    inline for (Types, 0..) |T, ti| {
+        for (samples, 0..) |_, col| {
+            const kind: u16 = @intCast(col + 1);
+            const want = std.mem.indexOfScalar(u16, ok[ti], kind) != null;
+            if (r.get(T, col)) |_| {
+                try testing.expect(want);
+            } else |err| {
+                try testing.expect(!want);
+                try testing.expectEqual(error.TypeMismatch, err);
+            }
+            // the optional variant agrees, also for NULL of that kind
+            if (r.get(?T, col)) |_| try testing.expect(want) else |_| try testing.expect(!want);
+        }
+    }
+    // a NULL of a mismatching kind is a mismatch, not null
+    const n = try row(&.{.{ .null_of = .text }});
+    try testing.expectError(error.TypeMismatch, n.get(?i32, 0));
+    try testing.expectEqual(@as(?[]const u8, null), try n.get(?[]const u8, 0));
+}
+
+test "rows without columns, and an unknown kind" {
+    try setup(64);
+    const r = try row(&.{});
+    try testing.expectEqual(@as(usize, 0), r.len());
+    try testing.expectError(error.ColumnOutOfRange, r.get(i32, 0));
+    // a kind this SDK does not know is a mismatch for every type
+    const v = [_]Value{.{ .val = 1, .len = 0, .kind = 42, .is_null = 0 }};
+    const odd: plzig.Row = .{ .values = &v };
+    try testing.expectError(error.TypeMismatch, odd.get(i64, 0));
+    try testing.expectError(error.TypeMismatch, odd.get([]const u8, 0));
+}
+
+test "Result.row reuses one buffer: no growth over many rows" {
+    try setup(64);
+    const xs: [300]u8 = @splat('x');
+    const big = [_]Col{ .{ .text = &xs }, .{ .int4 = 5 } };
+    const small = [_]Col{ .{ .text = "y" }, .{ .int4 = 6 } };
+    env.rows = &.{ &big, &small };
+    const res: plzig.spi.Result = .{ .rows = 2, .columns = 2 };
+    _ = try res.row(0);
+    const t0 = top();
+    for (0..1000) |i| {
+        const r = try res.row(i % 2);
+        try testing.expectEqual(@as(i32, @intCast(5 + i % 2)), try r.get(i32, 1));
+    }
+    try testing.expectEqual(t0, top());
+}
+
+// ---------------------------------------------------------------------------
+// Text results, column names
+
+test "Result.get and columnName" {
+    try setup(64);
+    const cols = [_]Col{ .{ .text = "abc" }, .{ .null_of = .text }, .{ .text = "" }, .{ .int8 = -42 } };
+    env.rows = &.{&cols};
+    env.column_names = &.{ "a", "b", "", "d" };
+    const res = try plzig.spi.execute("SELECT 1", &.{});
+    try testing.expectEqual(@as(u64, 1), res.rows);
+    try testing.expectEqual(@as(u32, 4), res.columns);
+    try testing.expectEqualStrings("abc", (try res.get(0, 0)).?);
+    try testing.expectEqual(@as(?[]const u8, null), try res.get(0, 1));
+    try testing.expectEqualStrings("", (try res.get(0, 2)).?);
+    try testing.expectEqualStrings("-42", (try res.get(0, 3)).?);
+    try testing.expectEqualStrings("a", try res.columnName(0));
+    try testing.expectEqualStrings("", try res.columnName(2));
+}
+
+// ---------------------------------------------------------------------------
+// Parameters
+
+test "spi.execute: text parameters become slots, NULL included; the slot array is reclaimed" {
+    try setup(64);
+    const t0 = top();
+    _ = try plzig.spi.execute("SELECT $1, $2, $3", &.{ "one", null, "" });
+    try testing.expectEqualStrings("SELECT $1, $2, $3", env.last_sql[0..env.last_sql_len]);
+    try testing.expectEqual(@as(usize, 3), env.last_nslots);
+    const s0 = env.last_slots[0];
+    try testing.expectEqual(@as(u32, 0), s0.is_null);
+    try testing.expectEqual(@as(u32, 3), s0.len);
+    const p: [*]const u8 = @ptrFromInt(@as(usize, @intCast(s0.val)));
+    try testing.expectEqualStrings("one", p[0..3]);
+    try testing.expectEqual(@as(u32, 1), env.last_slots[1].is_null);
+    try testing.expectEqual(@as(u32, 0), env.last_slots[2].is_null);
+    try testing.expectEqual(@as(u32, 0), env.last_slots[2].len);
+    try testing.expectEqual(t0, top());
+    for (0..1000) |_| _ = try plzig.spi.execute("SELECT $1", &.{"x"});
+    try testing.expectEqual(t0, top());
+}
+
+test "prepared statements: declared kinds and typed parameter encoding" {
+    try setup(64);
+    var plan = try plzig.spi.prepare("SELECT $1", &.{ .boolean, .int2, .int4, .int8, .float4, .float8, .text, .bytea });
+    try testing.expectEqual(@as(usize, 8), env.last_nkinds);
+    for (0..8) |i| try testing.expectEqual(@as(u32, @intCast(i + 1)), env.last_kinds[i]);
+
+    const owned: []const u8 = "slice";
+    const empty: []const u8 = "";
+    const t0 = top();
+    _ = try plan.execute(.{
+        true,                   @as(i16, -2),         @as(i32, std.math.minInt(i32)),
+        @as(i64, -1),           @as(f32, -0.0),       @as(f64, std.math.inf(f64)),
+        "literal",              plzig.bytea("\x00\x01"), owned,
+        empty,                  null,                 @as(?i32, null),
+        @as(?[]const u8, "opt"),
+    });
+    try testing.expectEqual(t0, top()); // parameters live on the stack, not in the arena
+    const vs = env.last_values[0..env.last_nvalues];
+    try testing.expectEqual(@as(usize, 13), vs.len);
+    const expect = struct {
+        fn scalar(val: Value, kind: u16, bits: u64) !void {
+            try testing.expectEqual(kind, val.kind);
+            try testing.expectEqual(@as(u16, 0), val.is_null);
+            try testing.expectEqual(bits, val.val);
+        }
+        fn bytes(val: Value, kind: u16, want: []const u8) !void {
+            try testing.expectEqual(kind, val.kind);
+            try testing.expectEqual(@as(u16, 0), val.is_null);
+            try testing.expectEqual(@as(u32, @intCast(want.len)), val.len);
+            if (want.len > 0) {
+                const p: [*]const u8 = @ptrFromInt(@as(usize, @intCast(val.val)));
+                try testing.expectEqualSlices(u8, want, p[0..want.len]);
+            }
+        }
+    };
+    try expect.scalar(vs[0], 1, 1);
+    try expect.scalar(vs[1], 2, @bitCast(@as(i64, -2)));
+    try expect.scalar(vs[2], 3, @bitCast(@as(i64, std.math.minInt(i32))));
+    try expect.scalar(vs[3], 4, @bitCast(@as(i64, -1)));
+    try expect.scalar(vs[4], 5, @as(u32, @bitCast(@as(f32, -0.0))));
+    try expect.scalar(vs[5], 6, @bitCast(std.math.inf(f64)));
+    try expect.bytes(vs[6], 7, "literal");
+    try expect.bytes(vs[7], 8, "\x00\x01");
+    try expect.bytes(vs[8], 7, "slice");
+    try expect.bytes(vs[9], 7, "");
+    // untyped null: kind 0; typed null: the type's kind
+    try testing.expectEqual(@as(u16, 1), vs[10].is_null);
+    try testing.expectEqual(@as(u16, 0), vs[10].kind);
+    try testing.expectEqual(@as(u16, 1), vs[11].is_null);
+    try testing.expectEqual(@as(u16, 3), vs[11].kind);
+    try expect.bytes(vs[12], 7, "opt");
+
+    _ = try plan.execute(.{});
+    try testing.expectEqual(@as(usize, 0), env.last_nvalues);
+
+    plan.free();
+    try testing.expectEqual(@as(u64, 0), plan.handle);
+    plan.free(); // idempotent: the host is not called again
+    try testing.expectEqual(@as(usize, 1), env.plans_freed);
+}
+
+// ---------------------------------------------------------------------------
+// Cursors
+
+test "cursor: rows in order, end closes once, close is idempotent, scratch is bounded" {
+    try setup(64);
+    const as: [100]u8 = @splat('a');
+    const r1 = [_]Col{ .{ .int4 = 1 }, .{ .text = &as } };
+    const r2 = [_]Col{ .{ .int4 = 2 }, .{ .null_of = .text } };
+    const r3 = [_]Col{ .{ .int4 = 3 }, .{ .text = "" } };
+    env.rows = &.{ &r1, &r2, &r3 };
+    var c = try plzig.spi.open("SELECT * FROM t WHERE x = $1", &.{"7"});
+    try testing.expectEqual(@as(usize, 1), env.last_nslots);
+    var want: i32 = 1;
+    var t_after_first: usize = 0;
+    while (try c.next()) |r| : (want += 1) {
+        try testing.expectEqual(want, try r.get(i32, 0));
+        if (want == 1) t_after_first = top();
+    }
+    try testing.expectEqual(@as(i32, 4), want);
+    try testing.expectEqual(t_after_first, top()); // smaller rows reuse the buffer
+    try testing.expectEqual(@as(usize, 1), env.cursor_closes); // the end closes it
+    try testing.expectEqual(@as(?plzig.Row, null), try c.next()); // stays at the end
+    c.close(); // already closed by the host: not closed again
+    c.close();
+    try testing.expectEqual(@as(usize, 1), env.cursor_closes);
+    try testing.expectError(error.CursorClosed, c.next());
+
+    // closing an open cursor early calls the host once
+    env.reset();
+    env.rows = &.{ &r1, &r2 };
+    var plan = try plzig.spi.prepare("SELECT $1", &.{.int4});
+    var c2 = try plan.open(.{@as(i32, 5)});
+    try testing.expectEqual(@as(usize, 1), env.last_nvalues);
+    _ = try c2.next();
+    c2.close();
+    c2.close();
+    try testing.expectEqual(@as(usize, 1), env.cursor_closes);
+    try testing.expectError(error.CursorClosed, c2.next());
+}
+
+test "cursor: an empty result" {
+    try setup(64);
+    env.rows = &.{};
+    var c = try plzig.spi.open("SELECT 1 WHERE false", &.{});
+    try testing.expectEqual(@as(?plzig.Row, null), try c.next());
+    try testing.expectEqual(@as(usize, 1), env.cursor_closes);
+}
+
+// ---------------------------------------------------------------------------
+// Logging
+
+test "print formats into the arena and passes the level" {
+    try setup(64);
+    plzig.notice("{d} rows in {s}", .{ 42, "t" });
+    try testing.expectEqualStrings("42 rows in t", env.last_log[0..env.last_log_len]);
+    try testing.expectEqual(@as(u32, 3), env.last_log_level);
+    plzig.debug("d", .{});
+    try testing.expectEqual(@as(u32, 0), env.last_log_level);
+    plzig.info("i", .{});
+    try testing.expectEqual(@as(u32, 2), env.last_log_level);
+    plzig.warning("w", .{});
+    try testing.expectEqual(@as(u32, 4), env.last_log_level);
+    plzig.print(.log, "l", .{});
+    try testing.expectEqual(@as(u32, 1), env.last_log_level);
+    // out of guest memory while formatting: a warning, not a trap
+    try setup(3);
+    _ = a.rawAlloc(page - 8, .@"1", 0) orelse return error.TestUnexpectedResult;
+    const xs: [64]u8 = @splat('x');
+    plzig.notice("{s}", .{&xs});
+    try testing.expectEqual(@as(u32, 4), env.last_log_level);
+    try testing.expect(std.mem.indexOf(u8, env.last_log[0..env.last_log_len], "out of memory") != null);
+}
+
+// ---------------------------------------------------------------------------
+// The SDK root: argument decoding, result encoding, plzig_call
+
+test "root.decode: every parameter type, NULL and empty slices" {
+    try setup(64);
+    const s = struct {
+        fn slot(val: u64, len: u32, is_null: u32) Slot {
+            return .{ .val = val, .len = len, .is_null = is_null };
+        }
+    };
+    try testing.expectEqual(true, sdk_root.decode(bool, &s.slot(1, 0, 0)));
+    try testing.expectEqual(false, sdk_root.decode(bool, &s.slot(0, 0, 0)));
+    try testing.expectEqual(@as(i16, -5), sdk_root.decode(i16, &s.slot(@bitCast(@as(i64, -5)), 0, 0)));
+    try testing.expectEqual(@as(i32, std.math.minInt(i32)), sdk_root.decode(i32, &s.slot(@bitCast(@as(i64, std.math.minInt(i32))), 0, 0)));
+    try testing.expectEqual(@as(i64, std.math.minInt(i64)), sdk_root.decode(i64, &s.slot(@bitCast(@as(i64, std.math.minInt(i64))), 0, 0)));
+    try testing.expectEqual(@as(f32, 1.5), sdk_root.decode(f32, &s.slot(@as(u32, @bitCast(@as(f32, 1.5))), 0, 0)));
+    try testing.expect(std.math.isNan(sdk_root.decode(f64, &s.slot(@bitCast(std.math.nan(f64)), 0, 0))));
+    const text = "bytes";
+    try testing.expectEqualStrings(text, sdk_root.decode([]const u8, &s.slot(@intFromPtr(text.ptr), 5, 0)));
+    // empty slices: the pointer is not looked at (the host passes anything)
+    try testing.expectEqual(@as(usize, 0), sdk_root.decode([]const u8, &s.slot(0, 0, 0)).len);
+    try testing.expectEqual(@as(usize, 0), sdk_root.decode([]const u8, &s.slot(0xdead_beef, 0, 0)).len);
+    // optionals
+    try testing.expectEqual(@as(?i32, null), sdk_root.decode(?i32, &s.slot(7, 0, 1)));
+    try testing.expectEqual(@as(?i32, 7), sdk_root.decode(?i32, &s.slot(7, 0, 0)));
+    try testing.expectEqual(@as(?[]const u8, null), sdk_root.decode(?[]const u8, &s.slot(0, 0, 1)));
+    try testing.expectEqual(@as(?bool, null), sdk_root.decode(?bool, &s.slot(1, 0, 1)));
+}
+
+test "root.encode: every result type" {
+    var out: Slot = undefined;
+    sdk_root.encode(bool, true, &out);
+    try testing.expectEqual(Slot{ .val = 1, .len = 0, .is_null = 0 }, out);
+    sdk_root.encode(i16, -1, &out);
+    try testing.expectEqual(@as(u64, @bitCast(@as(i64, -1))), out.val);
+    sdk_root.encode(i32, std.math.minInt(i32), &out);
+    try testing.expectEqual(@as(u64, @bitCast(@as(i64, std.math.minInt(i32)))), out.val);
+    sdk_root.encode(i64, std.math.maxInt(i64), &out);
+    try testing.expectEqual(@as(u64, std.math.maxInt(i64)), out.val);
+    sdk_root.encode(f32, -std.math.inf(f32), &out);
+    try testing.expectEqual(@as(u64, @as(u32, @bitCast(-std.math.inf(f32)))), out.val);
+    sdk_root.encode(f64, -0.0, &out);
+    try testing.expectEqual(@as(u64, @bitCast(@as(f64, -0.0))), out.val);
+    const t: []const u8 = "res";
+    sdk_root.encode([]const u8, t, &out);
+    try testing.expectEqual(@as(u64, @intFromPtr(t.ptr)), out.val);
+    try testing.expectEqual(@as(u32, 3), out.len);
+    try testing.expectEqual(@as(u32, 0), out.is_null);
+    var m = [_]u8{ 1, 2 };
+    sdk_root.encode([]u8, &m, &out);
+    try testing.expectEqual(@as(u32, 2), out.len);
+}
+
+/// Lay out argument slots in guest memory like the host does
+/// (plzig_instance_call): slots, then the bytes, 8-byte aligned.
+fn callUser(args: []const ?union(enum) { int: u64, bytes: []const u8 }, result: *Slot) !u32 {
+    plzig_begin();
+    var total: usize = (args.len + 1) * @sizeOf(Slot);
+    for (args) |arg| {
+        if (arg) |x| switch (x) {
+            .bytes => |b| total += (b.len + 7) & ~@as(usize, 7),
+            else => {},
+        };
+    }
+    const base = plzig_alloc(@intCast(total));
+    try testing.expect(base != 0);
+    const mem: [*]u8 = @ptrFromInt(base);
+    const slots: [*]Slot = @ptrFromInt(base);
+    var off: usize = (args.len + 1) * @sizeOf(Slot);
+    for (args, 0..) |arg, i| {
+        slots[i] = .{ .val = 0, .len = 0, .is_null = 1 };
+        if (arg) |x| switch (x) {
+            .int => |n| slots[i] = .{ .val = n, .len = 0, .is_null = 0 },
+            .bytes => |b| {
+                @memcpy(mem[off..][0..b.len], b);
+                slots[i] = .{ .val = base + off, .len = @intCast(b.len), .is_null = 0 };
+                off += (b.len + 7) & ~@as(usize, 7);
+            },
+        };
+    }
+    return plzig_call(slots, @intCast(args.len), result);
+}
+
+test "plzig_call: arguments in, result or error out" {
+    try setup(64);
+    var res: Slot = undefined;
+    const f4: u64 = @as(u32, @bitCast(@as(f32, 2.5)));
+    const f8: u64 = @bitCast(@as(f64, -1.25));
+
+    // mode 3: returns a fresh string in the arena
+    try testing.expectEqual(@as(u32, 0), try callUser(&.{
+        .{ .int = 1 },                    .{ .int = @bitCast(@as(i64, -7)) },
+        .{ .int = @bitCast(@as(i64, 70000)) }, .{ .int = @bitCast(@as(i64, -1)) },
+        .{ .int = f4 },                   .{ .int = f8 },
+        .{ .bytes = "héllo" },            .{ .bytes = "strict" },
+        .{ .int = 3 },
+    }, &res));
+    try testing.expectEqualStrings("true|-7|70000|-1|2.5|-1.25|héllo|strict|3", user.seen[0..user.seen_len]);
+    try testing.expectEqual(@as(u32, 0), res.is_null);
+    const p: [*]const u8 = @ptrFromInt(@as(usize, @intCast(res.val)));
+    try testing.expectEqualStrings("got 6 bytes", p[0..res.len]);
+
+    // NULLs for every optional parameter, empty strict text; mode 0 returns null
+    try testing.expectEqual(@as(u32, 0), try callUser(&.{ null, null, null, null, null, null, null, .{ .bytes = "" }, .{ .int = 0 } }, &res));
+    try testing.expectEqualStrings("null|null|null|null|null|null|null||0", user.seen[0..user.seen_len]);
+    try testing.expectEqual(@as(u32, 1), res.is_null);
+
+    // mode 2: an empty (non-NULL) string
+    try testing.expectEqual(@as(u32, 0), try callUser(&.{ null, null, null, null, null, null, .{ .bytes = "" }, .{ .bytes = "x" }, .{ .int = 2 } }, &res));
+    try testing.expectEqual(@as(u32, 0), res.is_null);
+    try testing.expectEqual(@as(u32, 0), res.len);
+
+    // mode 1: a returned Zig error is status 1 with the error name
+    try testing.expectEqual(@as(u32, 1), try callUser(&.{ null, null, null, null, null, null, null, .{ .bytes = "x" }, .{ .int = 1 } }, &res));
+    const e: [*]const u8 = @ptrFromInt(@as(usize, @intCast(res.val)));
+    try testing.expectEqualStrings("SomethingFailed", e[0..res.len]);
+}

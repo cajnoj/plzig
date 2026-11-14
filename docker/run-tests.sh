@@ -1,17 +1,23 @@
 #!/bin/bash
-# Build PL/Zig and run its pg_regress suite against each PostgreSQL version.
+# The fast matrix: build PL/Zig and run its quick test layers against each
+# PostgreSQL version.  (Everything else -- isolation, TAP, C unit checks,
+# hardened/Valgrind/sanitizer/coverage/compiler/upgrade runs -- is in
+# docker/run-all.sh.)
 #
 #   docker/run-tests.sh                 # all six versions
 #   docker/run-tests.sh 18.7 14.25      # a subset
 #
 # Environment:
 #   PLZIG_PARALLEL=1           build/test versions concurrently
+#   PLZIG_PLATFORM=linux/arm64 docker --platform (default: the host's)
 #
-# Each version runs three times: the full suite (which needs Landlock and
-# the seccomp filter, since plzig.compiler_sandbox defaults to require), the
-# no-Landlock checks in a container whose seccomp profile blocks the Landlock
-# syscalls, and the no-seccomp checks in a container whose profile makes
-# installing a seccomp filter fail.
+# Each version runs three times: the default layers of
+# docker/test-in-container.sh (Zig unit tests, the pg_regress suite, the
+# security checks, leak checks; these need Landlock and the seccomp filter,
+# since plzig.compiler_sandbox defaults to require), the no-Landlock checks
+# in a container whose seccomp profile blocks the Landlock syscalls, and the
+# no-seccomp checks in a container whose profile makes installing a seccomp
+# filter fail.
 #
 # Prints a per-version PASS/FAIL summary, including whether the compiler was
 # Landlock-confined; exits non-zero on any failure.
@@ -25,6 +31,8 @@ fi
 
 logdir=build/test-logs
 mkdir -p "$logdir"
+plat=()
+[ -n "${PLZIG_PLATFORM:-}" ] && plat=(--platform "$PLZIG_PLATFORM")
 
 run_one() {
     local v=$1
@@ -32,7 +40,7 @@ run_one() {
     local log="$logdir/$v.log"
     {
         echo "### building for postgres:${v}-bookworm"
-        if ! docker build -f docker/Dockerfile \
+        if ! docker build "${plat[@]}" -f docker/Dockerfile \
                 --build-arg "PG_IMAGE=postgres:${v}-bookworm" \
                 -t "$tag" . ; then
             echo "RESULT: FAIL (build)"
@@ -41,13 +49,13 @@ run_one() {
             return 1
         fi
         echo "### testing"
-        docker run --rm "$tag"
+        docker run "${plat[@]}" --rm --init "$tag"
         echo "### testing without Landlock (seccomp)"
-        docker run --rm -e PLZIG_NO_LANDLOCK=1 \
+        docker run "${plat[@]}" --rm --init -e PLZIG_NO_LANDLOCK=1 \
             --security-opt "seccomp=$PWD/docker/seccomp-no-landlock.json" "$tag" |
             sed 's/^RESULT:/NOLANDLOCK:/'
         echo "### testing without seccomp filters"
-        docker run --rm -e PLZIG_NO_SECCOMP=1 \
+        docker run "${plat[@]}" --rm --init -e PLZIG_NO_SECCOMP=1 \
             --security-opt "seccomp=$PWD/docker/seccomp-no-seccomp.json" "$tag" |
             sed 's/^RESULT:/NOSECCOMP:/'
     } >"$log" 2>&1
@@ -87,6 +95,7 @@ for v in "${versions[@]}"; do
         fail=1
     fi
     printf '%-8s %s  %s\n' "$v" "${result#RESULT: }" "$counts"
+    awk '/^=== summary/ { f = 1; next } f && /^LAYER / { sub(/^LAYER /, "         "); print }' "$log"
     printf '%-8s no-Landlock run: %s\n' "" "${nolandlock#NOLANDLOCK: }"
     printf '%-8s no-seccomp run: %s\n' "" "${noseccomp#NOSECCOMP: }"
 done

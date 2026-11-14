@@ -19,7 +19,7 @@ const Token = std.zig.Token;
 
 /// Builtins that only compute. Everything else is denied (allowlist).
 /// Derived from lib/std/zig/BuiltinFn.zig of Zig 0.17.1.
-const allowed_builtins = [_][]const u8{
+pub const allowed_builtins = [_][]const u8{
     "@addWithOverflow", "@alignOf",      "@as",            "@bitCast",
     "@bitOffsetOf",     "@intFromBool",  "@bitSizeOf",     "@branchHint",
     "@mulAdd",          "@byteSwap",     "@bitReverse",    "@offsetOf",
@@ -44,7 +44,25 @@ const allowed_builtins = [_][]const u8{
     "@typeName",        "@TypeOf",       "@unionInit",     "@Vector",
 };
 
-const denied_keywords = [_]Token.Tag{
+/// The remaining builtins of Zig 0.17.1, denied.  Not consulted by the check
+/// (anything not on the allowlist is denied); listed so that the unit tests
+/// (zig/validate/test.zig) can require every builtin of the compiler to be
+/// classified explicitly: a new Zig version with a new builtin fails them.
+pub const denied_builtins = [_][]const u8{
+    "@addrSpaceCast",   "@alignCast",       "@atomicLoad",     "@atomicRmw",
+    "@atomicStore",     "@breakpoint",      "@cmpxchgStrong",  "@cmpxchgWeak",
+    "@constCast",       "@cVaArg",          "@cVaCopy",        "@cVaEnd",
+    "@cVaStart",        "@disableInstrumentation", "@disableIntrinsics",
+    "@embedFile",       "@errorReturnTrace", "@export",        "@extern",
+    "@fieldParentPtr",  "@Fn",              "@frame",          "@Frame",
+    "@frameAddress",    "@intFromPtr",      "@Pointer",        "@prefetch",
+    "@ptrCast",         "@ptrFromInt",      "@returnAddress",  "@setEvalBranchQuota",
+    "@setFloatMode",    "@setRuntimeSafety", "@SpirvType",     "@volatileCast",
+    "@wasmMemoryGrow",  "@wasmMemorySize",  "@workGroupId",    "@workGroupSize",
+    "@workItemId",
+};
+
+pub const denied_keywords = [_]Token.Tag{
     .keyword_extern,
     .keyword_export,
     .keyword_asm,
@@ -55,12 +73,24 @@ const denied_keywords = [_]Token.Tag{
     .keyword_volatile,
 };
 
-const max_source = 4 * 1024 * 1024;
+pub const max_source = 4 * 1024 * 1024;
+/// one byte more than max_source: reading it shows that the input is too large
 var source_buf: [max_source + 1]u8 = undefined;
 
 var out_buf: [16 * 1024]u8 = undefined;
 var out_len: usize = 0;
 var n_errors: usize = 0;
+
+/// Diagnostics collected so far (for the unit tests; main writes them to stderr).
+pub fn diagnostics() []const u8 {
+    return out_buf[0..out_len];
+}
+
+/// Forget diagnostics and the error count (unit tests run many checks).
+pub fn reset() void {
+    out_len = 0;
+    n_errors = 0;
+}
 
 fn emit(bytes: []const u8) void {
     const n = @min(bytes.len, out_buf.len - out_len);
@@ -117,10 +147,12 @@ fn isAllowedBuiltin(name: []const u8) bool {
     return false;
 }
 
-fn validate(src: [:0]const u8) void {
+/// Check src; diagnostics are appended to the output buffer.  Returns the
+/// number of problems found (0 = accepted).
+pub fn validate(src: [:0]const u8) usize {
     if (std.mem.indexOfScalar(u8, src, 0)) |pos| {
         report(src, pos, "NUL byte in source", "");
-        return;
+        return n_errors;
     }
     var tok = Tokenizer.init(src);
     while (true) {
@@ -153,32 +185,38 @@ fn validate(src: [:0]const u8) void {
             },
         }
     }
+    return n_errors;
 }
 
-pub fn main() u8 {
+pub const ReadError = error{ TooLarge, ReadFailed };
+
+/// Read fd to the end into buf, whose last byte is never part of a valid
+/// input: an input that fills buf entirely is too large.  So with
+/// buf.len == max_source + 1, inputs of up to max_source bytes are accepted.
+pub fn readSource(fd: i32, buf: []u8) ReadError!usize {
     var len: usize = 0;
     while (true) {
-        if (len >= max_source) {
-            emit("source too large\n");
-            flush();
-            return 2;
-        }
-        const rc = linux.read(0, source_buf[len..].ptr, max_source - len);
+        if (len == buf.len) return error.TooLarge;
+        const rc = linux.read(fd, buf[len..].ptr, buf.len - len);
         switch (linux.errno(rc)) {
             .SUCCESS => {},
             .INTR => continue,
-            else => {
-                emit("read error\n");
-                flush();
-                return 2;
-            },
+            else => return error.ReadFailed,
         }
-        if (rc == 0) break;
+        if (rc == 0) return len;
         len += rc;
     }
+}
+
+pub fn main() u8 {
+    const len = readSource(0, &source_buf) catch |err| {
+        emit(if (err == error.TooLarge) "source too large\n" else "read error\n");
+        flush();
+        return 2;
+    };
     source_buf[len] = 0;
     const src: [:0]const u8 = source_buf[0..len :0];
-    validate(src);
+    _ = validate(src);
     if (n_errors > 20) emit("too many errors\n");
     flush();
     return if (n_errors == 0) 0 else 1;

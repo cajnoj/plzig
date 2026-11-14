@@ -375,8 +375,14 @@ SELECT pt_hold(0, false), pt_plans();
 -- from here on, count only pt_hold's plans (it holds 2 now)
 SELECT set_config('pt.base', (count(*) - 2)::text, false) IS NOT NULL AS rebased
   FROM pg_backend_memory_contexts WHERE name = 'SPI Plan';
--- LRU eviction (no idle instances kept)
+-- LRU eviction (no idle instances kept): lowering plzig.instance_cache_size
+-- destroys the idle instances, with their plans, at the next PL/Zig call
 SET plzig.instance_cache_size = 0;
+SELECT pt_hold(0, false) AS from_a_fresh_instance;
+SELECT pt_plans() <= -2 AS its_two_plans_freed;
+-- (that also freed the plans of other functions' idle instances: rebase)
+SELECT set_config('pt.base', count(*)::text, false) IS NOT NULL AS rebased
+  FROM pg_backend_memory_contexts WHERE name = 'SPI Plan';
 SELECT pt_hold(2, false);
 SELECT pt_plans() AS after_lru;
 RESET plzig.instance_cache_size;

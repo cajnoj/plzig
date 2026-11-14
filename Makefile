@@ -25,8 +25,11 @@ OBJS = src/plzig.o src/plzig_source.o src/plzig_build.o src/plzig_spawn.o \
 DATA = sql/plzig--1.0.sql
 PGFILEDESC = "PL/Zig - procedural language"
 
-REGRESS = setup basics types spi spi_prepared spi_cursor sandbox resources lifecycle
+REGRESS = setup basics types types_more signatures usage encoding spi spi_prepared spi_cursor \
+          sandbox resources leaks lifecycle
 REGRESS_OPTS = --inputdir=test --load-extension=plzig
+# only against a PLZIG_TESTING=1 build: make installcheck-testing
+REGRESS_TESTING = testing
 
 PG_CONFIG ?= pg_config
 
@@ -57,6 +60,12 @@ PG_CPPFLAGS = -I$(WAMR_BUILD_SRC)/core/iwasm/include -DPLZIG_ZIG_VERSION='"$(ZIG
 PG_CFLAGS = -Wall -Wmissing-prototypes -Wdeclaration-after-statement
 ifeq ($(WERROR),1)
 PG_CFLAGS += -Werror
+endif
+# Test build only (`make PLZIG_TESTING=1`): adds the SQL-callable unit-test
+# helpers (plzig_test_*) used by test/sql/testing.sql.  Never for a release:
+# docker/security-checks.sh fails if an installed plzig.so exports them.
+ifeq ($(PLZIG_TESTING),1)
+PG_CPPFLAGS += -DPLZIG_TESTING
 endif
 SHLIB_LINK = $(WAMR_LIB) -lm -Wl,--exclude-libs,ALL -Wl,-z,noexecstack
 
@@ -90,6 +99,29 @@ $(shlib): $(WAMR_LIB)
 
 all: $(VALIDATOR)
 
+# ---- isolation tests (test/isolation) -------------------------------
+PLZIG_ISOLATION = concurrent_create replace_during_call cache_clear
+installcheck-isolation:
+	$(pg_isolation_regress_installcheck) --inputdir=test/isolation \
+	    --outputdir=output_iso --load-extension=plzig $(PLZIG_ISOLATION)
+
+# ---- C unit tests: pg_regress against a PLZIG_TESTING=1 build ----------
+installcheck-testing:
+	$(pg_regress_installcheck) $(REGRESS_OPTS) $(REGRESS_TESTING)
+
+# ---- unit tests of the validator and the guest SDK (native `zig test`) ----
+# Nothing here is built by `make` or installed by `make install`.
+ZIG_TEST_CACHE = --global-cache-dir $(BUILD_DIR)/zig-cache-host --cache-dir $(BUILD_DIR)/zig-cache-test
+check-zig:
+	sh third_party/check-zig.sh "$(ZIG)" "$(ZIG_VERSION)"
+	"$(ZIG)" test $(ZIG_TEST_CACHE) zig/validate/test.zig
+	"$(ZIG)" test $(ZIG_TEST_CACHE) \
+	    --dep plzig --dep sdk_root --dep plzig_test_env --dep user -Mroot=zig/sdk/test.zig \
+	    --dep plzig_test_env -Mplzig=zig/sdk/plzig.zig \
+	    --dep plzig -Mplzig_test_env=zig/sdk/test_env.zig \
+	    --dep plzig --dep user -Msdk_root=zig/sdk/root.zig \
+	    --dep plzig -Muser=zig/sdk/test_user.zig
+
 # ---- optional: obtain the pinned Zig (never part of build or install) ----
 fetch-zig:
 	sh third_party/fetch-zig.sh "$(ZIG_TARBALL)" "$(ZIG_URL)" "$(ZIG_SHA256)" \
@@ -122,9 +154,9 @@ uninstall-plzig:
 clean: clean-plzig
 
 clean-plzig:
-	rm -rf results regression.diffs regression.out
+	rm -rf results regression.diffs regression.out output_iso tmp_check
 
 distclean-plzig: clean-plzig
 	rm -rf $(BUILD_DIR)
 
-.PHONY: install-plzig uninstall-plzig clean-plzig distclean-plzig fetch-zig install-zig
+.PHONY: install-plzig uninstall-plzig clean-plzig distclean-plzig fetch-zig install-zig check-zig installcheck-testing installcheck-isolation

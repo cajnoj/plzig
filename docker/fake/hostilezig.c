@@ -7,7 +7,8 @@
  * "zig version" and "zig build-exe ..." are passed on to the real compiler
  * (REAL_ZIG, so this only works with plzig.compiler_sandbox = off); before
  * building, the SDK copy in the build directory (sdk/plzig.zig) is patched:
- * the host import table becomes public (plzig.host) and helpers
+ * the host import table becomes public (plzig.host, which is the import
+ * struct inside wasm_env) and helpers
  * plzig.rawPtr(T, address) and plzig.addrOf(pointer) are added (user code
  * may not use @ptrFromInt/@intFromPtr).  The module is then compiled as usual
  * and must still pass the loader's import allowlist.
@@ -22,10 +23,10 @@
 #error "REAL_ZIG must be defined"
 #endif
 
-static const char needle[] = "\nconst host = struct {";
-static const char repl[] = "\npub const host = struct {";
-static const char ext_needle[] = "\n    extern \"plzig\" fn ";
-static const char ext_repl[] = "\n    pub extern \"plzig\" fn ";
+static const char needle[] = "\nconst host = env.host;";
+static const char repl[] = "\npub const host = env.host;";
+static const char ext_needle[] = "\n        extern \"plzig\" fn ";
+static const char ext_repl[] = "\n        pub extern \"plzig\" fn ";
 static const char helper[] =
 	"\npub fn rawPtr(comptime T: type, addr: usize) T {\n"
 	"    return @ptrFromInt(addr);\n"

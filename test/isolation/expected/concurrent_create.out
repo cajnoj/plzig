@@ -1,0 +1,76 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1_begin s1_create s2_create s1_commit s2_call s1_call
+cleared
+-------
+t      
+(1 row)
+
+step s1_begin: BEGIN;
+step s1_create: CREATE FUNCTION iso_same() RETURNS text LANGUAGE plzig AS $$ return "from s1"; $$;
+step s2_create: CREATE FUNCTION iso_same() RETURNS text LANGUAGE plzig AS $$ return "from s2"; $$; <waiting ...>
+step s1_commit: COMMIT;
+step s2_create: <... completed>
+ERROR:  duplicate key value violates unique constraint "pg_proc_proname_args_nsp_index"
+step s2_call: SELECT iso_same();
+iso_same
+--------
+from s1 
+(1 row)
+
+step s1_call: SELECT iso_same();
+iso_same
+--------
+from s1 
+(1 row)
+
+
+starting permutation: s1_begin s1_create s2_create s1_rollback s2_call s1_call
+cleared
+-------
+t      
+(1 row)
+
+step s1_begin: BEGIN;
+step s1_create: CREATE FUNCTION iso_same() RETURNS text LANGUAGE plzig AS $$ return "from s1"; $$;
+step s2_create: CREATE FUNCTION iso_same() RETURNS text LANGUAGE plzig AS $$ return "from s2"; $$; <waiting ...>
+step s1_rollback: ROLLBACK;
+step s2_create: <... completed>
+step s2_call: SELECT iso_same();
+iso_same
+--------
+from s2 
+(1 row)
+
+step s1_call: SELECT iso_same();
+iso_same
+--------
+from s2 
+(1 row)
+
+
+starting permutation: s2_create s1_begin s1_replace s2_replace s1_commit s2_call s1_call
+cleared
+-------
+t      
+(1 row)
+
+step s2_create: CREATE FUNCTION iso_same() RETURNS text LANGUAGE plzig AS $$ return "from s2"; $$;
+step s1_begin: BEGIN;
+step s1_replace: CREATE OR REPLACE FUNCTION iso_same() RETURNS text LANGUAGE plzig AS $$ return "replaced by s1"; $$;
+step s2_replace: CREATE OR REPLACE FUNCTION iso_same() RETURNS text LANGUAGE plzig AS $$ return "replaced by s2"; $$; <waiting ...>
+step s1_commit: COMMIT;
+step s2_replace: <... completed>
+ERROR:  tuple concurrently updated
+step s2_call: SELECT iso_same();
+iso_same      
+--------------
+replaced by s1
+(1 row)
+
+step s1_call: SELECT iso_same();
+iso_same      
+--------------
+replaced by s1
+(1 row)
+

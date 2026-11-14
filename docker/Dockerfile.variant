@@ -1,0 +1,73 @@
+# Test variants built on top of a docker/Dockerfile image (plzig-test:<version>)
+# or a docker/Dockerfile.hardened one:
+#
+#   --build-arg VARIANT=asan       PL/Zig and WAMR rebuilt with AddressSanitizer
+#                                  and UndefinedBehaviorSanitizer (GCC), loaded
+#                                  into an uninstrumented server with
+#                                  LD_PRELOAD=libasan; use BASE=plzig-hardened:<v>
+#                                  (docker/run-all.sh explains why not PGDG)
+#   --build-arg VARIANT=coverage   PL/Zig rebuilt with gcov instrumentation (our
+#                                  C sources only, not WAMR), PLZIG_TESTING=1 so
+#                                  the C unit checks run against the same build;
+#                                  lcov for the report (docker/coverage-report.sh).
+#                                  GCC routes fork/execve through libgcov, so the
+#                                  child's counters are dumped just before execve;
+#                                  docker/test-in-container.sh points GCOV_PREFIX
+#                                  at a place the sandboxed child may write
+#   --build-arg VARIANT=compilers  GCC and Clang for docker/compiler-checks.sh
+#   --build-arg VARIANT=upgrade    PostgreSQL 14 from PGDG next to the image's
+#                                  version, PL/Zig built for both
+#                                  (test/tap/t/080_upgrade.pl)
+#
+#   docker build -f docker/Dockerfile.variant --build-arg BASE=plzig-test:18.7 \
+#       --build-arg VARIANT=asan -t plzig-asan:18.7 .
+ARG BASE=plzig-test:18.7
+FROM ${BASE}
+ARG VARIANT
+USER root
+RUN set -eux; \
+    case "$VARIANT" in \
+      asan|coverage|compilers|upgrade) ;; \
+      *) echo "unknown VARIANT '$VARIANT'" >&2; exit 1 ;; \
+    esac; \
+    pkgs=""; \
+    [ "$VARIANT" = coverage ] && pkgs="lcov"; \
+    [ "$VARIANT" = compilers ] && pkgs="clang"; \
+    if [ "$VARIANT" = upgrade ]; then \
+        sed -n 's/ main [0-9]*$/ main 14/p' /etc/apt/sources.list.d/pgdg.list > /etc/apt/sources.list.d/pgdg14.list; \
+        pkgs="postgresql-14 postgresql-server-dev-14"; \
+    fi; \
+    if [ -n "$pkgs" ]; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends $pkgs; \
+        rm -rf /var/lib/apt/lists/*; \
+    fi; \
+    cd /src; \
+    ws=""; [ -d vendor/wamr/core ] && ws="WAMR_SRC=$PWD/vendor/wamr"; \
+    case "$VARIANT" in \
+      asan) \
+        san="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"; \
+        rm -rf build/wamr; \
+        # WAMR without UBSan's alignment check: its instance layout puts
+        # WASMTableInstance at 4-byte offsets (wasm_runtime.c, tables_instantiate;
+        # reported, not patched: vendor code, harmless on x86_64/aarch64)
+        cmake -S third_party/wamr -B build/wamr -DWAMR_ROOT_DIR=/src/build/wamr-src \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="$san -fno-sanitize=alignment -g" >/dev/null; \
+        cmake --build build/wamr -j"$(nproc)" >/dev/null; \
+        make clean; \
+        make -j"$(nproc)" WERROR=1 ZIG="$PLZIG_TEST_ZIG" COPT="$san" $ws; \
+        make install $ws; \
+        ldd "$(pg_config --pkglibdir)/plzig.so" | grep -q libasan ;; \
+      coverage) \
+        make clean; \
+        make -j"$(nproc)" WERROR=1 PLZIG_TESTING=1 ZIG="$PLZIG_TEST_ZIG" COPT="--coverage -O0" $ws; \
+        make install PLZIG_TESTING=1 $ws ;; \
+      upgrade) \
+        cp -a /src /tmp/plzig14; \
+        make -C /tmp/plzig14 clean; \
+        make -C /tmp/plzig14 -j"$(nproc)" WERROR=1 PG_CONFIG=/usr/lib/postgresql/14/bin/pg_config ZIG="$PLZIG_TEST_ZIG" $ws; \
+        make -C /tmp/plzig14 install PG_CONFIG=/usr/lib/postgresql/14/bin/pg_config $ws; \
+        rm -rf /tmp/plzig14 ;; \
+    esac; \
+    chown -R postgres:postgres /src
+USER postgres
