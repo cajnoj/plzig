@@ -31,7 +31,7 @@ A module is accepted by the loader (`plzig_module_load`) only if
   (checked before WAMR sees the module, see doc/security.md §4.5);
 * WAMR's loader validates it (full validation, classic interpreter);
 * every import is a **function** imported from module **`plzig`**, its name
-  is one of the 19 host functions below, and WAMR linked it (i.e. the
+  is one of the 18 host functions below, and WAMR linked it (i.e. the
   signature matched the registered one) — anything else is rejected;
 * it instantiates under the current `plzig.max_memory`;
 * it exports a linear memory and the four functions below with exactly the
@@ -147,7 +147,7 @@ parentheses). Every import:
   guest memory across anything that could run guest code;
 * validates every handle on every use (*Handles*).
 
-19 imports, the complete list (the loader's allowlist,
+18 imports, the complete list (the loader's allowlist,
 `plzig_known_imports` in `src/plzig_runtime.c`, and the registration table
 in `src/plzig_host.c` must match):
 
@@ -169,8 +169,7 @@ in `src/plzig_host.c` must match):
 | `spi_execute_plan(plan, params_ptr, nparams)` | `(Iii)I` | Execute a plan with `nparams` typed values (*Values*); `nparams` must equal the plan's parameter count and each value's `kind` must equal the kind of the plan's parameter type (`SPI_getargtypeid`), or be `0` with `is_null` = 1. Values must be in range for the type (`int2`/`int4` sign-extended within range, `bool` 0/1, `float4` upper 32 bits zero); text must be valid in the database encoding without NUL. `read_only` as for `spi_execute`, decided at every execution. The result replaces the last result. Returns `SPI_processed`. |
 | `spi_cursor_open(sql_ptr, sql_len, params_ptr, nparams)` | `(iiii)I` | Open a cursor on `sql` with text parameters (as `spi_execute`): `SPI_cursor_open_with_args(NULL, ..., read_only, CURSOR_OPT_NO_SCROLL)`. More than `plzig.max_open_cursors` open cursors in this call → `ERROR`. Returns a cursor handle (never 0). |
 | `spi_cursor_open_plan(plan, params_ptr, nparams)` | `(Iii)I` | Open a cursor on a plan with typed values (checked as for `spi_execute_plan`): `SPI_cursor_open(NULL, plan, ..., read_only)`. Only plans that return rows (`SELECT`, `... RETURNING`) can be opened. |
-| `spi_cursor_next(cursor)` | `(I)I` | Advance to the next row and return the size of its encoding, or `-1` at the end. Rows are fetched from the portal `PLZIG_CURSOR_BATCH` (50) at a time with `SPI_cursor_fetch(portal, forward, 50)`; the previous batch is freed first. At the end the portal is closed (the handle stays valid until `spi_cursor_close`). |
-| `spi_cursor_read(cursor, buf, buf_len)` | `(Iii)i` | Write the encoding of the current row to `[buf, buf + buf_len)` (`buf_len` ≥ size, else `ERROR`; no current row → `ERROR`). Returns the number of columns. |
+| `spi_cursor_fetch(cursor, buf, buf_len)` | `(Iii)I` | The next row: returns `-1` at the end, else `ncols << 32 \| size` (size of the row's encoding, see *Rows*). If `size ≤ buf_len` the row has been written to `[buf, buf + size)` (range validated) and is consumed; otherwise nothing is written and the row stays current: the next call delivers the same, already converted row (so a guest grows its buffer and calls again; a row is taken from the portal exactly once). Rows are fetched from the portal `PLZIG_CURSOR_BATCH` (50) at a time with `SPI_cursor_fetch(portal, forward, 50)`; the previous batch is freed first. At the end the portal is closed (the handle stays valid until `spi_cursor_close`; further calls return `-1`). |
 | `spi_cursor_close(cursor)` | `(I)` | Close the cursor and free its handle. |
 
 Text values of `spi_value_*` are produced with `SPI_getvalue` (type output
@@ -216,15 +215,17 @@ every result and every cursor; it is never taken from the guest.
 
 ### Rows
 
-`spi_row_read` and `spi_cursor_read` write a row as `ncols` Values followed
+`spi_row_read` and `spi_cursor_fetch` write a row as `ncols` Values followed
 by the bytes of the byte-kind values (kinds 7–9), each starting 8-byte
 aligned; their `val` holds the guest address of the bytes. Size =
 `16 * ncols` + the sum of the byte lengths rounded up to 8, at most
 `MaxAllocSize` (larger rows → `ERROR`). The host converts the row when it is
-selected (`spi_row_size`, `spi_cursor_next`: detoasting, output functions)
-into a per-row context that is reset for the next row, so its size is known
-before the guest provides a buffer, and copies it when the guest reads it.
-Rows with 0 columns have size 0.
+selected (`spi_row_size`, or `spi_cursor_fetch` when it takes the next row
+from the batch: detoasting, output functions; the per-column arrays are
+allocated once per result/cursor, the values in a per-row context that is
+reset for the next row), so its size is known before it is copied, and
+copies it into guest memory when the guest reads it (never aliasing host
+memory). Rows with 0 columns have size 0.
 
 ### Handles
 
@@ -303,7 +304,8 @@ grows only through the `memory.grow` instruction, bounded by
   The SDK closes the cursor when `next` reaches the end. Each Cursor has a
   scratch buffer in the arena that grows to the largest row seen and is
   reused for every row, so a Row and all slices from it are invalid after
-  the next `next()`. `Result.row` uses one such buffer shared by all
+  the next `next()`. `next` calls `spi_cursor_fetch` once per row, twice
+  when the buffer has to grow first. `Result.row` uses one such buffer shared by all
   Results (invalid after the next `Result.row`; reset with the arena).
 * `Row.len()`, `Row.kind(col) !Kind`, `Row.isNull(col) !bool`,
   `Row.get(T, col)` with `T` = `bool`, `i16`, `i32`, `i64`, `f32`, `f64`

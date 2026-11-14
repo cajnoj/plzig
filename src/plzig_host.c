@@ -284,18 +284,26 @@ typedef struct PlzigRowCol
 /*
  * Typed access to rows of one tuple source (the last execute result, or one
  * cursor).  The current row is converted when it is selected (size known
- * before the guest provides a buffer) and copied when the guest reads it.
+ * before it is copied into a guest buffer) and copied when the guest reads
+ * it (result rows) or as soon as the guest's buffer is large enough
+ * (cursor rows).
  */
 struct PlzigRowBuf
 {
-	MemoryContext desc_cxt;		/* column info; reset when the source changes */
-	MemoryContext row_cxt;		/* current row; reset for every row */
+	MemoryContext desc_cxt;		/* column info and the per-row arrays below;
+								 * reset when the source changes */
+	MemoryContext row_cxt;		/* data of the current row (detoasted values,
+								 * output function results); reset for every
+								 * row */
 	bool		have_desc;
 	int			natts;
 	PlzigColInfo *cols;
+	/* natts entries each, allocated once per descriptor, reused per row */
+	Datum	   *values;
+	bool	   *nulls;
+	PlzigRowCol *row;
 	bool		have_row;
 	int64		rowno;			/* result rows: number of the current row */
-	PlzigRowCol *row;
 	uint64		size;			/* encoded size of the current row */
 };
 
@@ -679,9 +687,8 @@ rowbuf_forget_row(PlzigRowBuf *rb)
 {
 	rb->have_row = false;
 	rb->rowno = -1;
-	rb->row = NULL;
 	rb->size = 0;
-	MemoryContextReset(rb->row_cxt);
+	MemoryContextReset(rb->row_cxt);	/* cheap when nothing was allocated */
 }
 
 /* The source changed (new result): column info must be rebuilt. */
@@ -692,6 +699,9 @@ rowbuf_forget_desc(PlzigRowBuf *rb)
 	rb->have_desc = false;
 	rb->natts = 0;
 	rb->cols = NULL;
+	rb->values = NULL;
+	rb->nulls = NULL;
+	rb->row = NULL;
 	MemoryContextReset(rb->desc_cxt);
 }
 
@@ -705,6 +715,9 @@ rowbuf_set_desc(PlzigRowBuf *rb, TupleDesc td)
 	rowbuf_forget_desc(rb);
 	old = MemoryContextSwitchTo(rb->desc_cxt);
 	rb->cols = palloc0(sizeof(PlzigColInfo) * (td->natts > 0 ? td->natts : 1));
+	rb->values = palloc(sizeof(Datum) * (td->natts > 0 ? td->natts : 1));
+	rb->nulls = palloc(sizeof(bool) * (td->natts > 0 ? td->natts : 1));
+	rb->row = palloc(sizeof(PlzigRowCol) * (td->natts > 0 ? td->natts : 1));
 	for (i = 0; i < td->natts; i++)
 	{
 		Form_pg_attribute att = TupleDescAttr(td, i);
@@ -735,15 +748,17 @@ align8(uint64 n)
 /*
  * Make tup (described by td, which has the same shape as the descriptor
  * given to rowbuf_set_desc) the current row: convert it and compute its
- * encoded size.  Everything is allocated in the row context.
+ * encoded size.  The per-column arrays were allocated with the descriptor
+ * (natts entries) and are overwritten; detoasted values and output function
+ * results are allocated in the row context.
  */
 static void
 rowbuf_load(PlzigRowBuf *rb, HeapTuple tup, TupleDesc td)
 {
 	MemoryContext old;
-	Datum	   *values;
-	bool	   *nulls;
-	PlzigRowCol *row;
+	Datum	   *values = rb->values;
+	bool	   *nulls = rb->nulls;
+	PlzigRowCol *row = rb->row;
 	uint64		size;
 	int			natts = rb->natts;
 	int			i;
@@ -753,11 +768,8 @@ rowbuf_load(PlzigRowBuf *rb, HeapTuple tup, TupleDesc td)
 		elog(ERROR, "PL/Zig: row descriptor changed");
 	rowbuf_forget_row(rb);
 	old = MemoryContextSwitchTo(rb->row_cxt);
-	values = palloc(sizeof(Datum) * (natts > 0 ? natts : 1));
-	nulls = palloc(sizeof(bool) * (natts > 0 ? natts : 1));
 	if (natts > 0)
 		heap_deform_tuple(tup, td, values, nulls);
-	row = palloc0(sizeof(PlzigRowCol) * (natts > 0 ? natts : 1));
 	size = (uint64) natts * sizeof(PlzigValue);
 	for (i = 0; i < natts; i++)
 	{
@@ -765,6 +777,7 @@ rowbuf_load(PlzigRowBuf *rb, HeapTuple tup, TupleDesc td)
 		PlzigColInfo *ci = &rb->cols[i];
 		uint64		len = 0;
 
+		memset(c, 0, sizeof(*c));
 		c->kind = ci->kind;
 		if (nulls[i] || ci->dropped)
 		{
@@ -823,7 +836,6 @@ rowbuf_load(PlzigRowBuf *rb, HeapTuple tup, TupleDesc td)
 			goto too_large;
 	}
 	MemoryContextSwitchTo(old);
-	rb->row = row;
 	rb->size = size;
 	rb->have_row = true;
 	return;
@@ -1688,12 +1700,18 @@ host_spi_cursor_open_plan(wasm_exec_env_t env, uint64 handle, uint32 params_ptr,
 }
 
 /*
- * Advance to the next row.  Returns the encoded size of the row (read it
- * with spi_cursor_read), or -1 at the end.  Rows are fetched from the portal
+ * The next row of a cursor, written to [buf, buf + buf_len) if it fits.
+ *
+ * Returns -1 at the end, else ncols << 32 | size, where size is the encoded
+ * size of the row (doc/abi.md, "Rows").  If size <= buf_len the row has been
+ * written and is consumed; otherwise nothing was written and the row stays
+ * the cursor's current row, so that the guest can grow its buffer and ask
+ * again: the next call delivers the same, already converted row (a row is
+ * taken from the portal exactly once).  Rows are fetched from the portal
  * PLZIG_CURSOR_BATCH at a time; the previous batch is freed first.
  */
 static int64
-host_spi_cursor_next(wasm_exec_env_t env, uint64 handle)
+host_spi_cursor_fetch(wasm_exec_env_t env, uint64 handle, uint32 buf, uint32 buf_len)
 {
 	PlzigCallCtx *ctx = host_ctx(env);
 	MemoryContext oldcxt = CurrentMemoryContext;
@@ -1704,11 +1722,10 @@ host_spi_cursor_next(wasm_exec_env_t env, uint64 handle)
 	PG_TRY();
 	{
 		PlzigCursor *c = cursor_lookup(ctx, handle);
+		PlzigRowBuf *rb = c->rb;
 
-		rowbuf_forget_row(c->rb);	/* the old row may point into the batch */
-		if (c->finished)
-			result = -1;
-		else
+		/* a row that did not fit last time is still current: deliver it */
+		if (!rb->have_row && !c->finished)
 		{
 			if (c->batch == NULL || c->batch_pos >= c->batch->numvals)
 			{
@@ -1728,40 +1745,27 @@ host_spi_cursor_next(wasm_exec_env_t env, uint64 handle)
 					rowbuf_set_desc(c->rb, c->batch->tupdesc);
 			}
 			if (c->batch == NULL || c->batch_pos >= c->batch->numvals)
-			{
 				cursor_finish(c);
-				result = -1;
-			}
 			else
 			{
-				rowbuf_load(c->rb, c->batch->vals[c->batch_pos], c->batch->tupdesc);
+				rowbuf_load(rb, c->batch->vals[c->batch_pos], c->batch->tupdesc);
 				c->batch_pos++;
-				result = (int64) c->rb->size;
 			}
 		}
+		if (rb->have_row)
+		{
+			/* size <= PLZIG_MAX_ROW_SIZE < 2^32, natts <= 1664 */
+			result = ((int64) rb->natts << 32) | (int64) rb->size;
+			if (rb->size <= (uint64) buf_len)
+			{
+				(void) rowbuf_write(env, rb, buf, buf_len);
+				/* consumed; the row may point into the batch, which stays */
+				rowbuf_forget_row(rb);
+			}
+		}
+		else
+			result = -1;
 		MemoryContextSwitchTo(oldcxt);
-	}
-	PG_CATCH();
-	{
-		host_catch(ctx, env, oldcxt);
-		result = -1;
-	}
-	PG_END_TRY();
-	return result;
-}
-
-static int32
-host_spi_cursor_read(wasm_exec_env_t env, uint64 handle, uint32 buf, uint32 buf_len)
-{
-	PlzigCallCtx *ctx = host_ctx(env);
-	MemoryContext oldcxt = CurrentMemoryContext;
-	int32		result = -1;
-
-	if (ctx == NULL)
-		return -1;
-	PG_TRY();
-	{
-		result = rowbuf_write(env, cursor_lookup(ctx, handle)->rb, buf, buf_len);
 	}
 	PG_CATCH();
 	{
@@ -1838,8 +1842,7 @@ static NativeSymbol plzig_native_symbols[] = {
 	{"spi_execute_plan", (void *) host_spi_execute_plan, "(Iii)I", NULL},
 	{"spi_cursor_open", (void *) host_spi_cursor_open, "(iiii)I", NULL},
 	{"spi_cursor_open_plan", (void *) host_spi_cursor_open_plan, "(Iii)I", NULL},
-	{"spi_cursor_next", (void *) host_spi_cursor_next, "(I)I", NULL},
-	{"spi_cursor_read", (void *) host_spi_cursor_read, "(Iii)i", NULL},
+	{"spi_cursor_fetch", (void *) host_spi_cursor_fetch, "(Iii)I", NULL},
 	{"spi_cursor_close", (void *) host_spi_cursor_close, "(I)", NULL},
 };
 

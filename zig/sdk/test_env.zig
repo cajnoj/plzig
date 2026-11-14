@@ -110,7 +110,11 @@ pub var last_log: [256]u8 = undefined;
 pub var last_log_len: usize = 0;
 pub var last_log_level: u32 = 0;
 pub var cursor_pos: usize = 0;
+pub var cursor_pending: bool = false;
 pub var cursor_closes: usize = 0;
+/// spi_cursor_fetch calls, and rows taken from the (simulated) portal
+pub var fetch_calls: usize = 0;
+pub var rows_taken: usize = 0;
 pub var plans_freed: usize = 0;
 
 pub fn reset() void {
@@ -122,7 +126,10 @@ pub fn reset() void {
     last_nkinds = 0;
     last_log_len = 0;
     cursor_pos = 0;
+    cursor_pending = false;
     cursor_closes = 0;
+    fetch_calls = 0;
+    rows_taken = 0;
     plans_freed = 0;
 }
 
@@ -276,6 +283,7 @@ pub const host = struct {
         recordSql(sql_ptr, sql_len);
         recordSlots(params_ptr, nparams);
         cursor_pos = 0;
+        cursor_pending = false;
         return 0x77_0003;
     }
 
@@ -283,20 +291,29 @@ pub const host = struct {
         std.debug.assert(handle == 0x1234_0001);
         recordValues(params_ptr, nparams);
         cursor_pos = 0;
+        cursor_pending = false;
         return 0x77_0003;
     }
 
-    /// size of the next row, which becomes current; -1 at the end
-    pub fn spi_cursor_next(cursor: u64) i64 {
+    /// as src/plzig_host.c host_spi_cursor_fetch: the next row (or the
+    /// current one, if it did not fit last time) is written if it fits;
+    /// returns ncols << 32 | size, or -1 at the end
+    pub fn spi_cursor_fetch(cursor: u64, buf: [*]u8, buf_len: u32) i64 {
         std.debug.assert(cursor == 0x77_0003);
-        if (cursor_pos >= rows.len) return -1;
-        cursor_pos += 1;
-        return @intCast(rowSize(rows[cursor_pos - 1]));
-    }
-
-    pub fn spi_cursor_read(cursor: u64, buf: [*]u8, buf_len: u32) i32 {
-        std.debug.assert(cursor == 0x77_0003);
-        return writeRow(rows[cursor_pos - 1], buf, buf_len);
+        fetch_calls += 1;
+        if (!cursor_pending) {
+            if (cursor_pos >= rows.len) return -1;
+            cursor_pos += 1;
+            rows_taken += 1;
+            cursor_pending = true;
+        }
+        const row = rows[cursor_pos - 1];
+        const size = rowSize(row);
+        if (size <= buf_len) {
+            _ = writeRow(row, buf, buf_len);
+            cursor_pending = false;
+        }
+        return @intCast((@as(u64, row.len) << 32) | size);
     }
 
     pub fn spi_cursor_close(cursor: u64) void {

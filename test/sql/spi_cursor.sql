@@ -45,6 +45,30 @@ $$;
 SELECT ct_plan(1, 5);
 SELECT ct_plan(5, 1);
 
+-- rows of very different sizes: the cursor's scratch buffer grows on demand,
+-- and a row that did not fit is delivered by the next host call (never
+-- skipped, never repeated)
+CREATE FUNCTION ct_sizes() RETURNS text LANGUAGE plzig AS $$
+    var cur = try plzig.spi.open("SELECT g, repeat(chr(65 + g % 26), (g * 7919) % 20000) FROM generate_series(1, 300) g ORDER BY g", &.{});
+    var n: i64 = 0;
+    var ids: i64 = 0;
+    var total: i64 = 0;
+    var ok = true;
+    while (try cur.next()) |row| {
+        n += 1;
+        const g = try row.get(i32, 0);
+        const s = try row.get([]const u8, 1);
+        ids += g;
+        total += @intCast(s.len);
+        const want: u8 = @intCast(65 + @mod(g, 26));
+        for (s) |ch| ok = ok and ch == want;
+    }
+    return try std.fmt.allocPrint(plzig.allocator, "{d} rows, ids {d}, {d} bytes, content ok: {any}", .{ n, ids, total, ok });
+$$;
+SELECT ct_sizes();
+SELECT count(*) || ' rows, ids ' || sum(g) || ', ' || sum((g * 7919) % 20000) || ' bytes' AS expected
+  FROM generate_series(1, 300) g;
+
 -- forward only, not holdable, visible while open; closed when the call ends
 CREATE FUNCTION ct_visible(close_it bool) RETURNS text STRICT LANGUAGE plzig AS $$
     var cur = try plzig.spi.open("SELECT 1 FROM ct", &.{});

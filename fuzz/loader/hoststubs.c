@@ -119,17 +119,11 @@ h_Iii_I(wasm_exec_env_t env, uint64 a, uint32 b, uint32 c)
 	return 0;
 }
 
-static int32
-h_Iii_i(wasm_exec_env_t env, uint64 a, uint32 b, uint32 c)
+/* spi_cursor_fetch: never a row here (no cursor can be opened), so -1 */
+static int64
+h_Iii_I_fetch(wasm_exec_env_t env, uint64 a, uint32 b, uint32 c)
 {
 	(void) stub_range(env, b, c);
-	stub_trap(env, "plzig: host error");
-	return -1;
-}
-
-static int64
-h_I_I(wasm_exec_env_t env, uint64 a)
-{
 	stub_trap(env, "plzig: host error");
 	return -1;
 }
@@ -152,8 +146,7 @@ static NativeSymbol stub_symbols[] = {
 	{"spi_execute_plan", (void *) h_Iii_I, "(Iii)I", NULL},
 	{"spi_cursor_open", (void *) h_iiii_I, "(iiii)I", NULL},
 	{"spi_cursor_open_plan", (void *) h_Iii_I, "(Iii)I", NULL},
-	{"spi_cursor_next", (void *) h_I_I, "(I)I", NULL},
-	{"spi_cursor_read", (void *) h_Iii_i, "(Iii)i", NULL},
+	{"spi_cursor_fetch", (void *) h_Iii_I_fetch, "(Iii)I", NULL},
 	{"spi_cursor_close", (void *) h_I, "(I)", NULL},
 };
 

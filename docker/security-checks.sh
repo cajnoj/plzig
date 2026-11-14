@@ -240,15 +240,33 @@ CREATE OR REPLACE FUNCTION hostile(what int) RETURNS int STRICT LANGUAGE plzig A
         22 => { const pf = try plzig.spi.prepare("SELECT $1", &.{.float4}); vals[0] = .{ .val = 1 << 40, .len = 0, .kind = 5, .is_null = 0 }; _ = h.spi_execute_plan(pf.handle, &vals, 1); },
         23 => { const pt = try plzig.spi.prepare("SELECT $1", &.{.text}); const s = "\xc3"; vals[0] = .{ .val = plzig.addrOf(s), .len = 1, .kind = 7, .is_null = 0 }; _ = h.spi_execute_plan(pt.handle, &vals, 1); },
         24, 25, 26, 27, 28 => {
+            // spi_cursor_fetch writes the row only if it fits; otherwise
+            // the row stays current and only its size is returned
             const q = "SELECT 'abc'::text, 42";
             const c = h.spi_cursor_open(q.ptr, q.len, &slots, 0);
-            if (what == 26) _ = h.spi_cursor_read(c, &buf, buf.len);
-            const n: u32 = @intCast(h.spi_cursor_next(c));
+            const r0 = h.spi_cursor_fetch(c, P([*]u8, bad), 0);   // too small: nothing written
+            const n: u32 = @truncate(@as(u64, @bitCast(r0)));
             switch (what) {
-                24 => _ = h.spi_cursor_read(c, P([*]u8, bad), n),
-                25 => _ = h.spi_cursor_read(c, &buf, n - 1),
-                27 => { _ = h.spi_cursor_next(c); _ = h.spi_cursor_read(c, &buf, buf.len); },
-                28 => _ = h.spi_cursor_read(c, P([*]u8, 0xffff_fff8), n),
+                24 => _ = h.spi_cursor_fetch(c, P([*]u8, bad), n),
+                25 => {
+                    // one byte short: still not written, still the same row
+                    const r1 = h.spi_cursor_fetch(c, &buf, n - 1);
+                    const r2 = h.spi_cursor_fetch(c, &buf, buf.len);
+                    const v = plzig.rawPtr(*const [2]plzig.Value, plzig.addrOf(&buf));
+                    const t = plzig.rawPtr([*]const u8, @intCast(v[0].val));
+                    const r3 = h.spi_cursor_fetch(c, &buf, buf.len);
+                    if (r0 == r1 and r1 == r2 and r0 >> 32 == 2 and v[1].val == 42 and
+                        std.mem.eql(u8, t[0..v[0].len], "abc") and r3 == -1)
+                        plzig.raiseMsg("fetch retry delivered the same row once");
+                },
+                26 => if (r0 > 0 and n > 0) plzig.raiseMsg("too-small fetch wrote nothing"),
+                27 => {
+                    // past the end: -1, again and again
+                    _ = h.spi_cursor_fetch(c, &buf, buf.len);
+                    if (h.spi_cursor_fetch(c, &buf, buf.len) == -1 and h.spi_cursor_fetch(c, &buf, buf.len) == -1)
+                        plzig.raiseMsg("fetch past the end is -1");
+                },
+                28 => _ = h.spi_cursor_fetch(c, P([*]u8, 0xffff_fff8), n),
                 else => {},
             }
         },
@@ -266,7 +284,8 @@ CREATE OR REPLACE FUNCTION hostile(what int) RETURNS int STRICT LANGUAGE plzig A
         38 => _ = h.spi_execute(sql.ptr, 0xffff_fff0, &slots, 0),
         39 => _ = h.spi_cursor_open_plan(p2.handle ^ (1 << 20), &vals, 2),
         40 => { const pc = try plzig.spi.prepare("SELECT 1", &.{}); const c = h.spi_cursor_open_plan(pc.handle, &vals, 0);
-                _ = h.spi_cursor_next(c); _ = h.spi_cursor_read(c ^ 1, &buf, buf.len); },
+                _ = h.spi_cursor_fetch(c, &buf, 0); _ = h.spi_cursor_fetch(c ^ 1, &buf, buf.len); },
+        41 => { _ = try plzig.spi.execute("SELECT 'x'::text", &.{}); const n: u32 = @intCast(h.spi_row_size(0)); _ = h.spi_row_read(0, &buf, n - 1); },
         else => return 0,
     }
     return 1;
@@ -308,9 +327,9 @@ done <<'CASES'
 22|value of parameter $1 is out of range for type real
 23|invalid byte sequence for encoding
 24|guest passed an invalid memory range
-25|row buffer is too small
-26|there is no current row
-27|there is no current row
+25|fetch retry delivered the same row once
+26|too-small fetch wrote nothing
+27|fetch past the end is -1
 28|guest passed an invalid memory range
 29|no SPI result available
 30|guest passed an invalid memory range
@@ -324,9 +343,10 @@ done <<'CASES'
 38|SQL statement is too long
 39|invalid prepared statement handle
 40|invalid cursor handle
+41|row buffer is too small
 0|0
 CASES
-if [ "$n" -eq 41 ]; then pass "hostile guest: all 40 forged calls end in a clean ERROR"; fi
+if [ "$n" -eq 42 ]; then pass "hostile guest: all 41 forged calls end in a clean ERROR"; fi
 expect "hostile guest: backend still healthy" "4242" "SELECT 4242;"
 if grep -qE "terminated by signal|server process .* was terminated" /tmp/server.log; then fail "hostile guest: no backend crash in the server log"; else pass "hostile guest: no backend crash in the server log"; fi
 psqlq -c "DROP FUNCTION hostile(int); SELECT plzig_cache_clear();" >/dev/null

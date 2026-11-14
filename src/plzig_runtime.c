@@ -298,7 +298,7 @@ static const char *const plzig_known_imports[] = {
 	"spi_value_copy", "spi_colname_len", "spi_colname_copy",
 	"spi_row_size", "spi_row_read", "spi_prepare", "spi_plan_free",
 	"spi_execute_plan", "spi_cursor_open", "spi_cursor_open_plan",
-	"spi_cursor_next", "spi_cursor_read", "spi_cursor_close", NULL
+	"spi_cursor_fetch", "spi_cursor_close", NULL
 };
 
 static bool

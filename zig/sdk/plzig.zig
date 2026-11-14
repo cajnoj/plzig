@@ -82,8 +82,7 @@ const wasm_env = struct {
         extern "plzig" fn spi_execute_plan(handle: u64, params_ptr: [*]const Value, nparams: u32) i64;
         extern "plzig" fn spi_cursor_open(sql_ptr: [*]const u8, sql_len: u32, params_ptr: [*]const Slot, nparams: u32) u64;
         extern "plzig" fn spi_cursor_open_plan(handle: u64, params_ptr: [*]const Value, nparams: u32) u64;
-        extern "plzig" fn spi_cursor_next(cursor: u64) i64;
-        extern "plzig" fn spi_cursor_read(cursor: u64, buf: [*]u8, buf_len: u32) i32;
+        extern "plzig" fn spi_cursor_fetch(cursor: u64, buf: [*]u8, buf_len: u32) i64;
         extern "plzig" fn spi_cursor_close(cursor: u64) void;
     };
 };
@@ -446,6 +445,11 @@ pub const Result = struct {
     }
 };
 
+/// size part of a spi_cursor_fetch result (ncols << 32 | size)
+fn fetchedSize(r: i64) u32 {
+    return @truncate(@as(u64, @bitCast(r)));
+}
+
 /// A cursor: rows are fetched one at a time (the host fetches them from the
 /// portal in small batches). Forward only. Cursors never outlive the
 /// function call: the host closes every cursor still open when the call
@@ -457,22 +461,30 @@ pub const Cursor = struct {
     scratch: Scratch = .{},
 
     /// The next row, or null at the end. The Row and every slice obtained
-    /// from it are invalid after the next call of `next`.
+    /// from it are invalid after the next call of `next`. One host call per
+    /// row; two when the row is larger than the scratch buffer, which then
+    /// grows (on `error.OutOfMemory` the row is not lost: the next call of
+    /// `next` returns it).
     pub fn next(self: *Cursor) error{ OutOfMemory, CursorClosed }!?Row {
         switch (self.state) {
             .open => {},
             .finished => return null,
             .closed => return error.CursorClosed,
         }
-        const n = host.spi_cursor_next(self.handle);
-        if (n < 0) {
+        var r = host.spi_cursor_fetch(self.handle, self.scratch.buf.ptr, @intCast(self.scratch.buf.len));
+        if (r >= 0 and fetchedSize(r) > self.scratch.buf.len) {
+            // not written: the host keeps the row for the second call
+            _ = try self.scratch.ensure(fetchedSize(r));
+            const want = fetchedSize(r);
+            r = host.spi_cursor_fetch(self.handle, self.scratch.buf.ptr, @intCast(self.scratch.buf.len));
+            if (r < 0 or fetchedSize(r) != want) raiseMsg("plzig: cursor row changed size");
+        }
+        if (r < 0) {
             host.spi_cursor_close(self.handle);
             self.state = .finished;
             return null;
         }
-        const buf = try self.scratch.ensure(@intCast(n));
-        const ncols = host.spi_cursor_read(self.handle, buf.ptr, @intCast(buf.len));
-        return rowFrom(buf, ncols);
+        return rowFrom(self.scratch.buf, @intCast(@as(u64, @bitCast(r)) >> 32));
     }
 
     pub fn close(self: *Cursor) void {

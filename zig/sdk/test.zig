@@ -489,6 +489,50 @@ test "cursor: rows in order, end closes once, close is idempotent, scratch is bo
     try testing.expectError(error.CursorClosed, c2.next());
 }
 
+test "cursor: one host call per row, two when the buffer must grow; every row taken once" {
+    try setup(64);
+    const big: [1000]u8 = @splat('z');
+    const r1 = [_]Col{ .{ .int4 = 1 }, .{ .text = "a" } }; // 40 bytes: grows the empty buffer to 256
+    const r2 = [_]Col{ .{ .int4 = 2 }, .{ .text = "b" } };
+    const r3 = [_]Col{ .{ .int4 = 3 }, .{ .text = &big } }; // larger than 256: grows again
+    const r4 = [_]Col{ .{ .int4 = 4 }, .{ .null_of = .text } };
+    env.rows = &.{ &r1, &r2, &r3, &r4 };
+    var c = try plzig.spi.open("SELECT 1", &.{});
+    var calls = env.fetch_calls;
+    const expect_calls = [_]usize{ 2, 1, 2, 1 };
+    var i: usize = 0;
+    while (try c.next()) |r| : (i += 1) {
+        try testing.expectEqual(expect_calls[i], env.fetch_calls - calls);
+        calls = env.fetch_calls;
+        try testing.expectEqual(@as(i32, @intCast(i + 1)), try r.get(i32, 0));
+        if (i == 2) try testing.expectEqualSlices(u8, &big, try r.get([]const u8, 1));
+        if (i == 3) try testing.expectEqual(@as(?[]const u8, null), try r.get(?[]const u8, 1));
+    }
+    try testing.expectEqual(@as(usize, 4), i);
+    try testing.expectEqual(@as(usize, 4), env.rows_taken);
+    try testing.expectEqual(@as(usize, 1), env.cursor_closes);
+}
+
+test "cursor: out of memory while growing keeps the row for the next call" {
+    try setup(3); // 1 page of heap
+    const big: [40000]u8 = @splat('q');
+    const huge: [70000]u8 = @splat('h');
+    const r1 = [_]Col{.{ .text = &huge }};
+    const r2 = [_]Col{.{ .text = &big }};
+    env.rows = &.{ &r1, &r2 };
+    var c = try plzig.spi.open("SELECT 1", &.{});
+    try testing.expectError(error.OutOfMemory, c.next());
+    try testing.expectEqual(@as(usize, 1), env.rows_taken);
+    // more memory: the same row comes, not the next one
+    env.setLimit(64);
+    const r = (try c.next()).?;
+    try testing.expectEqualSlices(u8, &huge, try r.get([]const u8, 0));
+    try testing.expectEqual(@as(usize, 1), env.rows_taken);
+    const n = (try c.next()).?;
+    try testing.expectEqual(@as(usize, 40000), (try n.get([]const u8, 0)).len);
+    try testing.expectEqual(@as(?plzig.Row, null), try c.next());
+}
+
 test "cursor: an empty result" {
     try setup(64);
     env.rows = &.{};

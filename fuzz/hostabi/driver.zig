@@ -276,10 +276,13 @@ fn run(script: []const u8) i32 {
                 keep(&cursors, h.spi_cursor_open_plan(hd, P([*]const Value, typedParams(&sc, n)), n));
             },
             17, 18 => if (anyHandle(&cursors) or sc.byte() > 220) {
-                last_size = @truncate(@as(u64, @bitCast(h.spi_cursor_next(handleArg(&sc, &cursors)))));
+                // forged buffer: written only if the row fits, else the row
+                // stays current and its size is reported
+                last_size = @truncate(@as(u64, @bitCast(h.spi_cursor_fetch(handleArg(&sc, &cursors), P([*]u8, ptrArg(&sc)), lenArg(&sc)))));
             },
             19 => if (anyHandle(&cursors) or sc.byte() > 220) {
-                _ = h.spi_cursor_read(handleArg(&sc, &cursors), P([*]u8, ptrArg(&sc)), lenArg(&sc));
+                // a buffer that usually fits (the retry after a too-small one)
+                _ = h.spi_cursor_fetch(handleArg(&sc, &cursors), P([*]u8, gbase()), @intCast(gbuf.len));
             },
             20 => if (anyHandle(&cursors) or sc.byte() > 220) h.spi_cursor_close(handleArg(&sc, &cursors)),
             21 => {
