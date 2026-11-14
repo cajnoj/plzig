@@ -35,7 +35,7 @@ echo "--- fuzz_validator"
 "$cc" -c -O1 "$here/validator/selftest.c" -o "$work/selftest.o"
 "$cc" -fsanitize=fuzzer "$work/validator.o" "$work/sancov_init.o" "$work/selftest.o" \
     -o "$out/fuzz_validator"
-"$out/fuzz_validator" -runs=0 "$here/validator/corpus" >"$work/v.log" 2>&1 ||
+(ulimit -s 1048576 2>/dev/null || ulimit -s unlimited 2>/dev/null; "$out/fuzz_validator" -runs=0 "$here/validator/corpus") >"$work/v.log" 2>&1 ||
     { cat "$work/v.log"; echo "fuzz_validator: seed corpus fails"; exit 1; }
 grep -q "inline 8-bit counters" "$work/v.log" ||
     { cat "$work/v.log"; echo "fuzz_validator: no coverage counters registered"; exit 1; }

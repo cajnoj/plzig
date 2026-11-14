@@ -33,6 +33,12 @@ cp -n "$seeds"/* "$out/corpus/" 2>/dev/null
 
 export ASAN_OPTIONS=detect_leaks=1:abort_on_error=0:symbolize=1
 export UBSAN_OPTIONS=suppressions=$bin/loader.ubsan.supp:halt_on_error=1:print_stacktrace=1
+# The validator target's oracle is Zig's recursive-descent parser: its stack
+# use grows with the nesting depth of the input (about 3 kB per level in this
+# build), so 16 kB of "(" overflows the default 8 MB stack.  That is a limit
+# of the oracle, not a finding: give it room for the deepest -max_len input.
+ulimit -s 1048576 2>/dev/null || ulimit -s unlimited 2>/dev/null ||
+    echo "warning: could not raise the stack limit (now $(ulimit -s) kB)" >&2
 mode=()
 [ "$jobs" -gt 1 ] && mode=(-fork="$jobs")
 start=$(date +%s)
