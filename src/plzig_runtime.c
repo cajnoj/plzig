@@ -363,12 +363,23 @@ plzig_module_load(const char *wasm, uint32 len)
 		}
 	}
 
-	/* instantiate once to check exports and ABI version */
+	/*
+	 * Instantiate once to check exports and ABI version.  This can fail (for
+	 * example when the module's initial memory exceeds plzig.max_memory); the
+	 * module must not be leaked in the long-lived runtime context then.
+	 */
+	PG_TRY();
 	{
 		PlzigInstance *inst = plzig_instance_create(mod);
 
 		plzig_instance_destroy(inst);
 	}
+	PG_CATCH();
+	{
+		plzig_module_unload(mod);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 	return mod;
 }
 

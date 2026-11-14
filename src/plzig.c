@@ -21,6 +21,7 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/hsearch.h"
+#include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/regproc.h"
 #include "utils/syscache.h"
@@ -72,6 +73,7 @@ typedef struct PlzigHashEnt
 } PlzigHashEnt;
 
 static HTAB *plzig_fn_hash = NULL;
+static bool plzig_fn_sweep_needed = false;
 static MemoryContext plzig_fn_cxt = NULL;
 static dlist_head plzig_lru = DLIST_STATIC_INIT(plzig_lru);
 static int	plzig_lru_count = 0;
@@ -283,6 +285,57 @@ plzig_function_build(Oid fn_oid, HeapTuple proctup)
 	return fn;
 }
 
+/*
+ * pg_proc changed somewhere.  Nothing can be freed from inside an
+ * invalidation callback, so only note that the cache needs a sweep.
+ */
+static void
+plzig_proc_inval_callback(Datum arg, int cacheid, uint32 hashvalue)
+{
+	plzig_fn_sweep_needed = true;
+}
+
+/*
+ * Drop cache entries whose function was dropped or replaced.  Without this
+ * an entry (and its loaded module) would stay until backend exit, because a
+ * dropped function is never looked up again.  Entries with active calls are
+ * left to plzig_function_lookup/plzig_function_execute.
+ */
+static void
+plzig_function_sweep(void)
+{
+	HASH_SEQ_STATUS seq;
+	PlzigHashEnt *ent;
+	List	   *stale = NIL;
+	ListCell   *lc;
+
+	plzig_fn_sweep_needed = false;
+
+	hash_seq_init(&seq, plzig_fn_hash);
+	while ((ent = hash_seq_search(&seq)) != NULL)
+	{
+		PlzigFunction *fn = ent->fn;
+		HeapTuple	tup;
+
+		if (fn->use_count > 0)
+			continue;
+		tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn->fn_oid));
+		if (!HeapTupleIsValid(tup))
+			stale = lappend(stale, fn);
+		else
+		{
+			if (fn->fn_xmin != HeapTupleHeaderGetRawXmin(tup->t_data) ||
+				!ItemPointerEquals(&fn->fn_tid, &tup->t_self))
+				stale = lappend(stale, fn);
+			ReleaseSysCache(tup);
+		}
+	}
+	/* remove after the scan: do not modify the table while iterating */
+	foreach(lc, stale)
+		plzig_function_invalidate((PlzigFunction *) lfirst(lc));
+	list_free(stale);
+}
+
 static PlzigFunction *
 plzig_function_lookup(Oid fn_oid)
 {
@@ -304,7 +357,10 @@ plzig_function_lookup(Oid fn_oid)
 		ctl.hcxt = plzig_fn_cxt;
 		plzig_fn_hash = hash_create("PL/Zig functions", 64, &ctl,
 									HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		CacheRegisterSyscacheCallback(PROCOID, plzig_proc_inval_callback, (Datum) 0);
 	}
+	if (plzig_fn_sweep_needed)
+		plzig_function_sweep();
 
 	proctup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn_oid));
 	if (!HeapTupleIsValid(proctup))
