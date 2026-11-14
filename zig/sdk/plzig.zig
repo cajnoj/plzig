@@ -9,7 +9,11 @@
 const s = @import("std");
 
 /// ABI version implemented by this SDK. Checked by the host at load time.
-pub const abi_version: u32 = 2;
+pub const abi_version: u32 = 3;
+
+/// Size of the argument buffer (root.zig, plzig_init): argument blocks up to
+/// this size need no allocation and no extra guest entry.
+pub const arg_buffer_size: u32 = 4096;
 
 /// Curated subset of the Zig standard library: pure computation only.
 /// This is a convenience policy, not the security boundary (the wasm sandbox is).

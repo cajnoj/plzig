@@ -60,9 +60,15 @@ struct PlzigInstance
 	PlzigModule *mod;
 	wasm_module_inst_t inst;
 	wasm_exec_env_t env;
-	wasm_function_inst_t f_begin;
-	wasm_function_inst_t f_alloc;
+	wasm_function_inst_t f_alloc_args;
 	wasm_function_inst_t f_call;
+	/*
+	 * The guest's argument buffer, as reported once by plzig_init.  Checked
+	 * at instantiation and again (with the actual block size) on every call;
+	 * only guest addresses are kept, never a native pointer.
+	 */
+	uint32		argbuf;
+	uint32		argbuf_cap;
 	uint32		max_pages;		/* plzig.max_memory at instantiation */
 	PlzigPlanTable plans;		/* prepared statements (plzig_host.c) */
 };
@@ -572,15 +578,32 @@ plzig_module_unload(PlzigModule *mod)
  * Instances
  * ---------------------------------------------------------------------
  */
+/*
+ * An export with exactly these parameter and result types (WASM_I32 /
+ * WASM_I64 kinds; anything else is treated as a missing entry point).
+ */
 static wasm_function_inst_t
-plzig_lookup(PlzigInstance *pi, const char *name, uint32 nparams, uint32 nresults)
+plzig_lookup(PlzigInstance *pi, const char *name, uint32 nparams,
+			 const wasm_valkind_t *params, uint32 nresults,
+			 const wasm_valkind_t *results)
 {
 	wasm_function_inst_t f = wasm_runtime_lookup_function(pi->inst, name);
+	wasm_valkind_t types[4];
+	uint32		i;
 
+	Assert(nparams <= lengthof(types) && nresults <= lengthof(types));
 	if (f == NULL ||
 		wasm_func_get_param_count(f, pi->inst) != nparams ||
 		wasm_func_get_result_count(f, pi->inst) != nresults)
 		return NULL;
+	wasm_func_get_param_types(f, pi->inst, types);
+	for (i = 0; i < nparams; i++)
+		if (types[i] != params[i])
+			return NULL;
+	wasm_func_get_result_types(f, pi->inst, types);
+	for (i = 0; i < nresults; i++)
+		if (types[i] != results[i])
+			return NULL;
 	return f;
 }
 
@@ -591,13 +614,34 @@ plzig_guest_call(PlzigInstance *pi, wasm_function_inst_t f, uint32 argc, uint32 
 	return wasm_runtime_call_wasm(pi->env, f, argc, argv);
 }
 
+/*
+ * A guest call made while creating an instance trapped: an interrupt is
+ * acted on at once (destroying the instance first), anything else is
+ * returned as the reason to reject the module.
+ */
+static const char *
+plzig_create_trapped(PlzigInstance *pi, const char *what)
+{
+	const char *exc = wasm_runtime_get_exception(pi->inst);
+
+	if (exc && strstr(exc, PLZIG_INTERRUPT_MSG) != NULL)
+	{
+		plzig_instance_destroy(pi);
+		CHECK_FOR_INTERRUPTS();
+		ereport(ERROR,
+				(errcode(ERRCODE_QUERY_CANCELED),
+				 errmsg("canceling statement due to interrupt in PL/Zig function")));
+	}
+	return what;
+}
+
 PlzigInstance *
 plzig_instance_create(PlzigModule *mod)
 {
 	PlzigInstance *pi;
 	InstantiationArgs ia;
 	char		err[256];
-	uint32		argv[1];
+	uint32		argv[2];
 	const char *problem = NULL;
 
 	plzig_runtime_init();
@@ -627,36 +671,50 @@ plzig_instance_create(PlzigModule *mod)
 		problem = "could not create execution environment";
 	else
 	{
-		wasm_runtime_set_user_data(pi->env, NULL);
-		pi->f_begin = plzig_lookup(pi, "plzig_begin", 0, 0);
-		pi->f_alloc = plzig_lookup(pi, "plzig_alloc", 1, 1);
-		pi->f_call = plzig_lookup(pi, "plzig_call", 3, 1);
-		{
-			wasm_function_inst_t fv = plzig_lookup(pi, "plzig_abi_version", 0, 1);
+		static const wasm_valkind_t i32x4[4] = {WASM_I32, WASM_I32, WASM_I32, WASM_I32};
+		static const wasm_valkind_t i64x1[1] = {WASM_I64};
+		wasm_function_inst_t fv;
+		wasm_function_inst_t finit;
 
-			if (!pi->f_begin || !pi->f_alloc || !pi->f_call || !fv)
-				problem = "missing or malformed PL/Zig entry points";
-			else if (wasm_runtime_get_default_memory(pi->inst) == NULL)
-				problem = "module has no linear memory";
+		wasm_runtime_set_user_data(pi->env, NULL);
+		fv = plzig_lookup(pi, "plzig_abi_version", 0, NULL, 1, i32x4);
+		finit = plzig_lookup(pi, "plzig_init", 0, NULL, 1, i64x1);
+		pi->f_alloc_args = plzig_lookup(pi, "plzig_alloc_args", 1, i32x4, 1, i32x4);
+		pi->f_call = plzig_lookup(pi, "plzig_call", 4, i32x4, 1, i32x4);
+
+		if (!fv || !finit || !pi->f_alloc_args || !pi->f_call)
+			problem = "missing or malformed PL/Zig entry points";
+		else if (wasm_runtime_get_default_memory(pi->inst) == NULL)
+			problem = "module has no linear memory";
+		else
+		{
+			argv[0] = 0;
+			if (!plzig_guest_call(pi, fv, 0, argv))
+				problem = plzig_create_trapped(pi, "plzig_abi_version trapped");
+			else if (argv[0] != PLZIG_ABI_VERSION)
+				problem = "ABI version mismatch";
 			else
 			{
-				argv[0] = 0;
-				if (!plzig_guest_call(pi, fv, 0, argv))
+				/* only now: plzig_init of another ABI version may mean anything */
+				argv[0] = argv[1] = 0;
+				if (!plzig_guest_call(pi, finit, 0, argv))
+					problem = plzig_create_trapped(pi, "plzig_init trapped");
+				else
 				{
-					const char *exc = wasm_runtime_get_exception(pi->inst);
+					uint64		v;
 
-					if (exc && strstr(exc, PLZIG_INTERRUPT_MSG) != NULL)
+					/* an i64 result occupies two cells (stored as by memcpy) */
+					memcpy(&v, argv, sizeof(v));
+					pi->argbuf = (uint32) (v & PG_UINT32_MAX);
+					pi->argbuf_cap = (uint32) (v >> 32);
+					if (pi->argbuf_cap < PLZIG_MIN_ARGBUF ||
+						pi->argbuf_cap > PLZIG_MAX_ARGBUF ||
+						!plzig_guest_range(pi->inst, pi->argbuf, pi->argbuf_cap))
 					{
-						plzig_instance_destroy(pi);
-						CHECK_FOR_INTERRUPTS();
-						ereport(ERROR,
-								(errcode(ERRCODE_QUERY_CANCELED),
-								 errmsg("canceling statement due to interrupt in PL/Zig function")));
+						wasm_runtime_clear_exception(pi->inst);
+						problem = "invalid argument buffer";
 					}
-					problem = "plzig_abi_version trapped";
 				}
-				else if (argv[0] != PLZIG_ABI_VERSION)
-					problem = "ABI version mismatch";
 			}
 		}
 	}
@@ -895,8 +953,9 @@ plzig_decode_result(PlzigInstance *pi, PlzigSlot *slot, PlzigTypeInfo *rt,
 /*
  * Run one call of the guest function.
  *
- * Arguments are copied into guest memory (allocated by the guest's arena),
- * the guest runs, and the result is copied out.  Any host-import error
+ * Arguments are copied into guest memory (the guest's argument buffer, or a
+ * block of its arena when they do not fit), the guest runs, and the result
+ * is copied out.  Any host-import error
  * was stashed in ctx->edata and is re-thrown here, after WAMR unwound.
  */
 Datum
@@ -911,7 +970,8 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 	uint32	   *lens;
 	uint64		total;
 	uint32		guest_base;
-	uint32		argv[3];
+	uint32		begin;
+	uint32		argv[4];
 	uint8	   *base;
 	PlzigSlot	result;
 	uint32		off;
@@ -970,21 +1030,33 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 
 	PG_TRY();
 	{
-		/* 1. reset the guest arena */
-		if (!plzig_guest_call(pi, pi->f_begin, 0, argv))
-			plzig_report_trap(pi, &ctx);
+		/*
+		 * 1. Where the argument block goes: the guest's argument buffer if
+		 * it fits (the arena is then reset inside plzig_call: one guest
+		 * entry per call), else a block from plzig_alloc_args, which resets
+		 * the arena itself.  Either way the range is validated below, on
+		 * every call, before anything is written.
+		 */
+		if (total <= pi->argbuf_cap)
+		{
+			guest_base = pi->argbuf;
+			begin = 1;
+		}
+		else
+		{
+			argv[0] = (uint32) total;
+			if (!plzig_guest_call(pi, pi->f_alloc_args, 1, argv))
+				plzig_report_trap(pi, &ctx);
+			guest_base = argv[0];
+			if (guest_base == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_OUT_OF_MEMORY),
+						 errmsg("PL/Zig: out of guest memory for arguments"),
+						 errhint("Increase plzig.max_memory.")));
+			begin = 0;
+		}
 
-		/* 2. allocate and fill argument slots */
-		argv[0] = (uint32) total;
-		if (!plzig_guest_call(pi, pi->f_alloc, 1, argv))
-			plzig_report_trap(pi, &ctx);
-		guest_base = argv[0];
-		if (guest_base == 0)
-			ereport(ERROR,
-					(errcode(ERRCODE_OUT_OF_MEMORY),
-					 errmsg("PL/Zig: out of guest memory for arguments"),
-					 errhint("Increase plzig.max_memory.")));
-
+		/* 2. fill the argument slots and payloads */
 		base = plzig_guest_ptr(pi->inst, guest_base, (uint32) total);
 		off = (uint32) ((nargs + 1) * sizeof(PlzigSlot));
 		for (i = 0; i < nargs; i++)
@@ -1037,8 +1109,9 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 				}
 			}
 			/*
-			 * byte offsets, not &slots[i]: the address comes from the
-			 * guest's plzig_alloc and need not be aligned for PlzigSlot
+			 * byte offsets, not &slots[i]: the address comes from the guest
+			 * (plzig_init or plzig_alloc_args) and need not be aligned for
+			 * PlzigSlot
 			 */
 			memcpy(base + (Size) i * sizeof(PlzigSlot), &s, sizeof(s));
 		}
@@ -1049,7 +1122,8 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 		argv[0] = guest_base;
 		argv[1] = (uint32) nargs;
 		argv[2] = guest_base + (uint32) (nargs * sizeof(PlzigSlot));
-		if (!plzig_guest_call(pi, pi->f_call, 3, argv))
+		argv[3] = begin;
+		if (!plzig_guest_call(pi, pi->f_call, 4, argv))
 			plzig_report_trap(pi, &ctx);
 		if (ctx.edata)			/* belt and braces: never lose a host error */
 			ReThrowError(ctx.edata);

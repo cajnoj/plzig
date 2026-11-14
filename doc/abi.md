@@ -1,4 +1,4 @@
-# PL/Zig host/guest ABI (version 2)
+# PL/Zig host/guest ABI (version 3)
 
 This describes the interface between the PostgreSQL backend (host, `src/`)
 and a compiled PL/Zig function (guest, a `wasm32-freestanding` module built
@@ -19,7 +19,7 @@ zig build-exe --global-cache-dir <PGDATA>/plzig/pgsql_tmp.zig-cache --cache-dir 
     --zig-lib-dir <checked Zig lib directory>
     --color off -fno-reference-trace -target wasm32-freestanding -mcpu mvp
     -O ReleaseSafe -fstrip -fno-entry -fsingle-threaded --stack 262144
-    --export=plzig_abi_version --export=plzig_begin --export=plzig_alloc --export=plzig_call
+    --export=plzig_abi_version --export=plzig_init --export=plzig_alloc_args --export=plzig_call
     --dep plzig --dep user -Mroot=sdk/root.zig --dep plzig -Muser=src/user.zig
     -Mplzig=sdk/plzig.zig --name plzig_module -femit-bin=out.wasm
 ```
@@ -34,11 +34,12 @@ A module is accepted by the loader (`plzig_module_load`) only if
   is one of the 19 host functions below, and WAMR linked it (i.e. the
   signature matched the registered one) — anything else is rejected;
 * it instantiates under the current `plzig.max_memory`;
-* it exports a linear memory and the four functions below with the listed
-  parameter/result counts;
-* `plzig_abi_version()` returns `2` (`PLZIG_ABI_VERSION`; the version is
-  part of the module cache key, so modules built for version 1 are
-  recompiled, never loaded).
+* it exports a linear memory and the four functions below with exactly the
+  listed parameter and result types;
+* `plzig_abi_version()` returns `3` (`PLZIG_ABI_VERSION`; the version is
+  part of the module cache key, so modules built for earlier versions are
+  recompiled, never loaded);
+* `plzig_init()` reports a valid argument buffer (below).
 
 Size limit for the module file: 16 MB.
 
@@ -46,10 +47,10 @@ Size limit for the module file: 16 MB.
 
 | Export | Signature | Meaning |
 |--------|-----------|---------|
-| `plzig_abi_version` | `() -> i32` | Returns 2. |
-| `plzig_begin` | `() -> ()` | Start of a call: resets the per-call arena (everything allocated by the previous call is released). |
-| `plzig_alloc` | `(len: i32) -> i32` | Allocate `len` bytes, 8-byte aligned, in the per-call arena. 0 on failure. |
-| `plzig_call` | `(args: i32, nargs: i32, result: i32) -> i32` | Run the user function. `args` points to `nargs` slots, `result` to one slot. Returns a status. |
+| `plzig_abi_version` | `() -> i32` | Returns 3. |
+| `plzig_init` | `() -> i64` | Called once per instance, right after `plzig_abi_version`: the guest's argument buffer as `capacity << 32 \| address`. The SDK returns a 4096-byte static buffer outside the arena. |
+| `plzig_alloc_args` | `(len: i32) -> i32` | Fallback for argument blocks larger than the buffer: start a call (reset the per-call arena: everything allocated by the previous call is released), then allocate `len` bytes, 8-byte aligned, in the arena. 0 on failure. |
+| `plzig_call` | `(args: i32, nargs: i32, result: i32, begin: i32) -> i32` | Run the user function. `args` points to `nargs` slots, `result` to one slot. `begin` ≠ 0: start the call first (reset the arena); `begin` = 0: `plzig_alloc_args` has already done that. Returns a status. |
 
 Status codes of `plzig_call`: `0` = ok (result slot filled), `1` = the
 user function returned a Zig error; the result slot then holds the error
@@ -86,18 +87,32 @@ types are additionally passed through the type's input function (so domain
 constraints, enum labels, array syntax etc. are enforced by PostgreSQL);
 `bytea` is copied verbatim.
 
+### Argument buffer
+
+At instantiation (`plzig_instance_create`, so also in the trial
+instantiation of every module load) the host calls `plzig_init()` once and
+keeps the two guest numbers, never a native pointer. The module is rejected
+(`module rejected: invalid argument buffer`) unless the capacity is between
+16 bytes (`PLZIG_MIN_ARGBUF`, the result slot of a call without arguments)
+and 1 MB (`PLZIG_MAX_ARGBUF`) and `[address, address + capacity)` lies in
+the linear memory (`wasm_runtime_validate_app_addr`, 64-bit arithmetic); a
+trap in `plzig_init` rejects it too. The address need not be aligned.
+
 ### Call sequence (host side, `plzig_instance_call`)
 
 1. `check_stack_depth()`; set the exec-env user data to the call context.
-2. `plzig_begin()`.
-3. Compute the argument block size: `(nargs + 1) * 16` plus every byte
-   argument rounded up to 8; `plzig_alloc(total)`. 0 → `ERROR` (out of
-   guest memory).
-4. Validate `[base, base+total)` with `wasm_runtime_validate_app_addr`, write
-   the slots, then the byte payloads after them; the result slot is the
-   slot right after the arguments. The native pointer is not used after
-   this step (the guest may grow, and so move, its memory).
-5. `plzig_call(base, nargs, base + nargs*16)`.
+2. Compute the argument block size: `(nargs + 1) * 16` plus every byte
+   argument rounded up to 8 (more than 4 GB − 16 → `ERROR`).
+3. If the block fits the argument buffer, `base` = the buffer's address and
+   `begin` = 1: the call enters the guest once. Otherwise
+   `plzig_alloc_args(total)`, `base` = its result (0 → `ERROR`, out of guest
+   memory) and `begin` = 0.
+4. Validate `[base, base+total)` with `wasm_runtime_validate_app_addr` (on
+   every call, in both cases), write the slots, then the byte payloads after
+   them, with byte copies at byte offsets (`base` may be misaligned); the
+   result slot is the slot right after the arguments. The native pointer is
+   not used after this step (the guest may grow, and so move, its memory).
+5. `plzig_call(base, nargs, base + nargs*16, begin)`.
 6. If the call trapped: if a host import stashed an `ErrorData`, re-throw
    it; if the trap is the interrupt trap, run `CHECK_FOR_INTERRUPTS()` and
    otherwise raise `57014`; else raise `38000 PL/Zig function trapped: <WAMR message>`.

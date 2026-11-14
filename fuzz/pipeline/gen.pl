@@ -82,6 +82,7 @@ my @fragments = (
     "return 1;\n}\npub fn evil() void {",
     "return 1;\n}\ncomptime { \@compileError(\"top level\"); }\nfn z() void {",
     "return 1;\n}\nexport fn plzig_call() u32 { return 0; }\nfn z() void {",
+    "return 1;\n}\nexport fn plzig_init() u64 { return 1 << 40; }\nfn z() void {",
     "return 1;\n}\npub const panic = \@import(\"std\").debug.FullPanic(f);\nfn f(m: []const u8, r: ?usize) noreturn { _ = m; _ = r; while (true) {} }\nfn z() void {",
     "}\n}\n}\n",
     '/* not a comment */',

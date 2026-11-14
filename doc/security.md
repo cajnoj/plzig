@@ -155,9 +155,11 @@ freshly compiled or read from the cache:
 * full WAMR validation (`wasm_runtime_load`);
 * every import must be a *function* from module `plzig`, one of the 19
   known names, and linked by WAMR (signature equal to the registered one);
-* a trial instantiation under `plzig.max_memory`, the four exports with the
-  right parameter/result counts, a linear memory, and
-  `plzig_abi_version() == 2`.
+* a trial instantiation under `plzig.max_memory`, the four exports with
+  exactly the right parameter/result types, a linear memory,
+  `plzig_abi_version() == 3`, and an argument buffer from `plzig_init()`
+  of 16 bytes to 1 MB inside the linear memory (re-validated on every call
+  with the actual argument size; `doc/abi.md`).
 
 Cache files are opened with `O_NOFOLLOW | O_NONBLOCK` and must be regular
 files owned by the server user with mode `0600` (`plzig_read_file`,
@@ -218,7 +220,7 @@ Tests: `test/sql/spi*.sql`, `test/sql/adversarial.sql` (row-level security
 and column privileges through `spi.execute`, prepared statements and
 cursors; a kept plan re-checked after `SET ROLE`; definer/invoker nesting;
 refused identity changes; read-only transactions and data-modifying CTEs),
-`docker/security-checks.sh` (40 hostile-guest calls), fuzz target `hostabi`
+`docker/security-checks.sh` (40 hostile-guest calls, forged argument buffers), fuzz target `hostabi`
 (§7), TAP `040_standby.pl` (read-only on a standby).
 
 ### 4.8 The compiler process
@@ -490,7 +492,10 @@ because the cache is writable by nobody but the server's OS user (§2).
    were written through a `PlzigSlot *` made from the guest-chosen (possibly
    misaligned) `plzig_alloc` address — undefined behaviour, though the
    copies were `memcpy`; now byte offsets
-   (`fuzz/loader/findings/plzig-misaligned-args.wasm`).
+   (`fuzz/loader/findings/plzig-misaligned-args.wasm`, an ABI 2 module; in
+   ABI 3 the addresses come from `plzig_init` and `plzig_alloc_args`, and
+   the misaligned cases are regression tests in
+   `docker/security-checks.sh`, "hostile entry points").
 
    Known UBSan reports, reproduced and judged harmless on x86_64/aarch64
    (not patched: vendor code; see `fuzz/loader/ubsan.supp`):

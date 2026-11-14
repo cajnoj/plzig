@@ -17,7 +17,7 @@
 #include "lib/stringinfo.h"
 
 #define PLZIG_VERSION_STR		"1.0"
-#define PLZIG_ABI_VERSION		2
+#define PLZIG_ABI_VERSION		3
 /*
  * The Zig version the source validator was built with, from the Makefile
  * (ZIG_VERSION).  The backend runs only a compiler reporting exactly this.
@@ -36,6 +36,9 @@
 #define PLZIG_CURSOR_BATCH		50	/* rows fetched from a portal at a time */
 #define PLZIG_MAX_SPI_PARAMS	65535
 #define PLZIG_MAX_ROW_SIZE		((uint64) MaxAllocSize)	/* encoded row (doc/abi.md) */
+/* bounds for the argument buffer a guest reports from plzig_init (doc/abi.md) */
+#define PLZIG_MIN_ARGBUF		16	/* one slot: the result of a call without arguments */
+#define PLZIG_MAX_ARGBUF		(1024 * 1024)
 
 /* Compiler sandbox modes (plzig.compiler_sandbox) */
 typedef enum PlzigSandboxMode

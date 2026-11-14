@@ -11,6 +11,10 @@
  * struct inside wasm_env) and helpers
  * plzig.rawPtr(T, address), plzig.addrOf(pointer) and plzig.memSize() are
  * added (user code may not use @ptrFromInt/@intFromPtr/@wasmMemorySize).
+ * The SDK root (sdk/root.zig) is patched too: if the user module declares
+ * `pub fn hostileInit() u64` or `pub fn hostileAllocArgs(len: u32) u32`,
+ * plzig_init / plzig_alloc_args return what those return, so that a test
+ * can hand the host forged argument-buffer addresses and capacities.
  * The module is then compiled as usual and must still pass the loader's
  * import allowlist.  Also used by the host-ABI fuzz target (fuzz/hostabi).
  */
@@ -38,6 +42,69 @@ static const char helper[] =
 	"pub fn memSize() usize {\n"
 	"    return @wasmMemorySize(0) * 65536;\n"
 	"}\n";
+
+/* entry points of sdk/root.zig and what is inserted at their start */
+static const char *const root_patch[][2] = {
+	{"export fn plzig_init() u64 {\n",
+	"    if (@hasDecl(user, \"hostileInit\")) return user.hostileInit();\n"},
+	{"export fn plzig_alloc_args(len: u32) u32 {\n",
+	"    if (@hasDecl(user, \"hostileAllocArgs\")) return user.hostileAllocArgs(len);\n"},
+};
+
+static char *
+read_all(const char *path)
+{
+	FILE	   *f = fopen(path, "rb");
+	char	   *buf;
+	long		n;
+
+	if (f == NULL || fseek(f, 0, SEEK_END) != 0 || (n = ftell(f)) < 0)
+	{
+		perror(path);
+		exit(1);
+	}
+	rewind(f);
+	buf = calloc(1, (size_t) n + 1);
+	if (buf == NULL || fread(buf, 1, (size_t) n, f) != (size_t) n)
+	{
+		perror(path);
+		exit(1);
+	}
+	fclose(f);
+	return buf;
+}
+
+static void
+patch_root(void)
+{
+	char	   *buf = read_all("sdk/root.zig");
+	FILE	   *f;
+	const char *p = buf;
+	size_t		i;
+
+	if (unlink("sdk/root.zig") != 0 || (f = fopen("sdk/root.zig", "wb")) == NULL)
+	{
+		perror("hostilezig: rewrite sdk/root.zig");
+		exit(1);
+	}
+	for (i = 0; i < sizeof(root_patch) / sizeof(root_patch[0]); i++)
+	{
+		const char *q = strstr(p, root_patch[i][0]);
+
+		if (q == NULL)
+		{
+			fprintf(stderr, "hostilezig: entry point not found in the SDK root: %s", root_patch[i][0]);
+			exit(1);
+		}
+		q += strlen(root_patch[i][0]);
+		fwrite(p, 1, (size_t) (q - p), f);
+		fputs(root_patch[i][1], f);
+		p = q;
+	}
+	fputs(p, f);
+	fclose(f);
+	free(buf);
+}
 
 int
 main(int argc, char **argv)
@@ -89,6 +156,7 @@ main(int argc, char **argv)
 		fputs(p, f);
 		fputs(helper, f);
 		fclose(f);
+		patch_root();
 	}
 	argv[0] = (char *) REAL_ZIG;
 	execv(REAL_ZIG, argv);

@@ -12,9 +12,13 @@
  *	    plzig_module_load()      WAMR load + validation, import allowlist,
  *	                             trial instantiation, exports, ABI version
  *	    plzig_instance_create()  instantiate under plzig.max_memory
- *	    plzig_instance_call()    begin / alloc / call with one int argument
- *	                             and copy the result out (int, text or
- *	                             bytea, chosen by the input)
+ *	    plzig_instance_call()    with one int argument (argument block in
+ *	                             the guest's argument buffer: one guest
+ *	                             entry), twice, then with one 5000-byte text
+ *	                             argument (too large for the buffer:
+ *	                             plzig_alloc_args first), and copy the
+ *	                             result out (int, text or bytea, chosen by
+ *	                             the input)
  *
  *	  all under a CPU-time timer that sets QueryCancelPending (the patched
  *	  interpreter polls it, the runtime then runs CHECK_FOR_INTERRUPTS), so
@@ -45,6 +49,10 @@
 #include "catalog/pg_type.h"
 #include "miscadmin.h"
 #include "utils/memutils.h"
+
+#if PG_VERSION_NUM >= 160000
+#include "varatt.h"
+#endif
 
 #include "pgshim.h"
 
@@ -118,8 +126,11 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	PlzigModule *volatile mod = NULL;
 	PlzigInstance *volatile inst = NULL;
 	PlzigTypeInfo argt;
+	PlzigTypeInfo targt;
 	PlzigTypeInfo rett;
 	NullableDatum arg;
+	NullableDatum targ;
+	struct varlena *big;
 	bool		isnull;
 	Size		bytes;
 	Size		chunks;
@@ -157,6 +168,15 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	}
 	arg.value = Int32GetDatum((int32) (sel >> 2) - 8);
 	arg.isnull = false;
+	/* a text argument larger than any argument buffer the SDK reports */
+	memset(&targt, 0, sizeof(targt));
+	targt.typid = TEXTOID;
+	targt.kind = PLZIG_T_TEXT;
+	big = palloc(VARHDRSZ + 5000);
+	SET_VARSIZE(big, VARHDRSZ + 5000);
+	memset(VARDATA(big), 'a' + sel % 26, 5000);
+	targ.value = PointerGetDatum(big);
+	targ.isnull = false;
 
 	arm_timer();
 	PG_TRY();
@@ -166,6 +186,8 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 		(void) plzig_instance_call(inst, &argt, 1, &arg, &rett, true, &isnull);
 		/* a second call reuses the instance, like a cached one */
 		(void) plzig_instance_call(inst, &argt, 1, &arg, &rett, true, &isnull);
+		/* the allocating path for arguments that do not fit the buffer */
+		(void) plzig_instance_call(inst, &targt, 1, &targ, &rett, true, &isnull);
 	}
 	PG_CATCH();
 	{

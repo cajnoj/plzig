@@ -19,9 +19,15 @@ const a = plzig.allocator;
 
 // the exports of root.zig, linked into this test binary
 extern fn plzig_abi_version() u32;
-extern fn plzig_begin() void;
-extern fn plzig_alloc(len: u32) u32;
-extern fn plzig_call(args: [*]const Slot, nargs: u32, result: *Slot) u32;
+extern fn plzig_init() u64;
+extern fn plzig_alloc_args(len: u32) u32;
+extern fn plzig_call(args: [*]const Slot, nargs: u32, result: *Slot, begin: u32) u32;
+
+/// what the start of a call does to the arena (plzig_call with begin = 1,
+/// or plzig_alloc_args)
+fn plzig_begin() void {
+    plzig.resetArena();
+}
 
 /// Fresh simulated instance memory: 2 initial pages, growth up to `limit`
 /// pages (plzig.max_memory), and an empty arena.
@@ -46,7 +52,7 @@ fn top() usize {
 // Arena allocator
 
 test "abi version" {
-    try testing.expectEqual(@as(u32, 2), plzig_abi_version());
+    try testing.expectEqual(@as(u32, 3), plzig_abi_version());
     try testing.expectEqual(plzig.abi_version, plzig_abi_version());
 }
 
@@ -189,14 +195,34 @@ test "arena: size arithmetic cannot overflow" {
     try testing.expectEqual(before, top());
 }
 
-test "plzig_alloc: 8-byte aligned guest addresses, 0 on failure" {
+test "plzig_alloc_args: resets the arena, 8-byte aligned guest addresses, 0 on failure" {
     try setup(8);
     _ = a.rawAlloc(3, .@"1", 0);
-    const p = plzig_alloc(100);
+    const p = plzig_alloc_args(100);
     try testing.expect(p != 0);
     try testing.expectEqual(@as(u32, 0), p % 8);
-    try testing.expectEqual(@as(u32, 0), plzig_alloc(std.math.maxInt(u32)));
-    try testing.expectEqual(@as(u32, 0), plzig_alloc(8 * page));
+    // the block is the first thing in the freshly reset arena
+    try testing.expectEqual(heapStart(), @as(usize, p));
+    try testing.expectEqual(heapStart() + 100, top());
+    try testing.expectEqual(@as(u32, 0), plzig_alloc_args(std.math.maxInt(u32)));
+    try testing.expectEqual(@as(u32, 0), plzig_alloc_args(8 * page));
+    // a failed allocation still started the call: the arena is empty
+    try testing.expectEqual(heapStart(), top());
+}
+
+test "plzig_init: the argument buffer, outside the arena" {
+    try setup(64);
+    const v = plzig_init();
+    const addr: usize = @intCast(v & 0xffff_ffff);
+    const cap: usize = @intCast(v >> 32);
+    try testing.expectEqual(@as(usize, plzig.arg_buffer_size), cap);
+    try testing.expectEqual(@as(usize, 0), addr % 8);
+    try testing.expect(addr != 0);
+    // not in the arena: arena allocations never overlap it
+    const x = try a.alloc(u8, 2 * page);
+    try testing.expect(addr + cap <= @intFromPtr(x.ptr) or addr >= @intFromPtr(x.ptr) + x.len);
+    // the same buffer every time
+    try testing.expectEqual(v, plzig_init());
 }
 
 // ---------------------------------------------------------------------------
@@ -549,10 +575,14 @@ test "root.encode: every result type" {
     try testing.expectEqual(@as(u32, 2), out.len);
 }
 
+const Arg = ?union(enum) { int: u64, bytes: []const u8 };
+
 /// Lay out argument slots in guest memory like the host does
-/// (plzig_instance_call): slots, then the bytes, 8-byte aligned.
-fn callUser(args: []const ?union(enum) { int: u64, bytes: []const u8 }, result: *Slot) !u32 {
-    plzig_begin();
+/// (plzig_instance_call): slots, then the bytes, 8-byte aligned; in the
+/// argument buffer if the block fits (plzig_call with begin = 1), else in a
+/// block from plzig_alloc_args (begin = 0).  `force_alloc` takes the second
+/// path even for small blocks.
+fn callUserHow(args: []const Arg, result: *Slot, force_alloc: bool) !u32 {
     var total: usize = (args.len + 1) * @sizeOf(Slot);
     for (args) |arg| {
         if (arg) |x| switch (x) {
@@ -560,8 +590,18 @@ fn callUser(args: []const ?union(enum) { int: u64, bytes: []const u8 }, result: 
             else => {},
         };
     }
-    const base = plzig_alloc(@intCast(total));
-    try testing.expect(base != 0);
+    const info = plzig_init();
+    const cap: usize = @intCast(info >> 32);
+    var base: usize = undefined;
+    var begin: u32 = undefined;
+    if (total <= cap and !force_alloc) {
+        base = @intCast(info & 0xffff_ffff);
+        begin = 1;
+    } else {
+        base = plzig_alloc_args(@intCast(total));
+        try testing.expect(base != 0);
+        begin = 0;
+    }
     const mem: [*]u8 = @ptrFromInt(base);
     const slots: [*]Slot = @ptrFromInt(base);
     var off: usize = (args.len + 1) * @sizeOf(Slot);
@@ -576,7 +616,34 @@ fn callUser(args: []const ?union(enum) { int: u64, bytes: []const u8 }, result: 
             },
         };
     }
-    return plzig_call(slots, @intCast(args.len), result);
+    return plzig_call(slots, @intCast(args.len), result, begin);
+}
+
+fn callUser(args: []const Arg, result: *Slot) !u32 {
+    return callUserHow(args, result, false);
+}
+
+test "plzig_call: begin = 1 resets the arena, begin = 0 does not" {
+    try setup(64);
+    var res: Slot = undefined;
+    const old = try a.alloc(u8, 100);
+    // mode 3 allocates its result string at the start of the fresh arena
+    const args = [_]Arg{ null, null, null, null, null, null, null, .{ .bytes = "x" }, .{ .int = 3 } };
+    try testing.expectEqual(@as(u32, 0), try callUser(&args, &res));
+    try testing.expectEqual(@as(usize, @intFromPtr(old.ptr)), @as(usize, @intCast(res.val)));
+    // through plzig_alloc_args: the block comes first, the result after it
+    try testing.expectEqual(@as(u32, 0), try callUserHow(&args, &res, true));
+    try testing.expect(@as(usize, @intCast(res.val)) > heapStart());
+    try testing.expectEqualStrings("x", user.seen[user.seen_len - 3 ..][0..1]);
+}
+
+test "plzig_call: arguments larger than the argument buffer" {
+    try setup(64);
+    var res: Slot = undefined;
+    const big: [plzig.arg_buffer_size]u8 = @splat('b');
+    try testing.expectEqual(@as(u32, 0), try callUser(&.{ null, null, null, null, null, null, .{ .bytes = "y" }, .{ .bytes = &big }, .{ .int = 3 } }, &res));
+    const p: [*]const u8 = @ptrFromInt(@as(usize, @intCast(res.val)));
+    try testing.expectEqualStrings("got 4096 bytes", p[0..res.len]);
 }
 
 test "plzig_call: arguments in, result or error out" {

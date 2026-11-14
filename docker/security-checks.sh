@@ -330,6 +330,55 @@ if [ "$n" -eq 41 ]; then pass "hostile guest: all 40 forged calls end in a clean
 expect "hostile guest: backend still healthy" "4242" "SELECT 4242;"
 if grep -qE "terminated by signal|server process .* was terminated" /tmp/server.log; then fail "hostile guest: no backend crash in the server log"; else pass "hostile guest: no backend crash in the server log"; fi
 psqlq -c "DROP FUNCTION hostile(int); SELECT plzig_cache_clear();" >/dev/null
+
+# 9b: forged entry points (doc/abi.md, "Call sequence"): plzig_init reports
+# the argument buffer once per instance, plzig_alloc_args gives the block
+# for arguments that do not fit it.  The wrapper lets the function choose
+# what they return.  Every function returns x + length(t).
+echo "--- hostile entry points"
+hentry() {   # hentry <name> <zig declarations after the body>
+    psqlq -c "CREATE OR REPLACE FUNCTION $1(x int, t text) RETURNS int STRICT LANGUAGE plzig AS \$\$
+    return x + @as(i32, @intCast(t.len));
+}
+var hbuf: [8192]u8 align(8) = undefined;
+$2
+fn unused() void {
+\$\$;"
+}
+# rejected when the module is loaded (CREATE FUNCTION's trial instantiation)
+while IFS='|' read -r name decl; do
+    [ -z "$name" ] && continue
+    out=$(hentry "$name" "$decl")
+    if grep -qF "module rejected: $( [ "$name" = he_trap ] && echo "plzig_init trapped" || echo "invalid argument buffer")" <<<"$out"; then
+        pass "hostile entry points: $name rejected at load"
+    else
+        fail "hostile entry points: $name rejected at load"; echo "$out" | sed 's/^/         /'
+    fi
+done <<'CASES'
+he_cap0|pub fn hostileInit() u64 { return @as(u64, plzig.addrOf(&hbuf)); }
+he_cap8|pub fn hostileInit() u64 { return (@as(u64, 8) << 32) | plzig.addrOf(&hbuf); }
+he_caphuge|pub fn hostileInit() u64 { return (@as(u64, 2 << 20) << 32) | plzig.addrOf(&hbuf); }
+he_beyond|pub fn hostileInit() u64 { return (@as(u64, 4096) << 32) | 0x7fff_ff00; }
+he_tail|pub fn hostileInit() u64 { return (@as(u64, 4096) << 32) | (plzig.memSize() - 100); }
+he_wrap|pub fn hostileInit() u64 { return (@as(u64, 16) << 32) | 0xffff_fff8; }
+he_trap|pub fn hostileInit() u64 { @panic("no"); }
+CASES
+# accepted: a misaligned buffer is written with byte copies
+out=$(hentry he_misaligned "pub fn hostileInit() u64 { return (@as(u64, 4000) << 32) | (plzig.addrOf(&hbuf) + 3); }")
+expect "hostile entry points: misaligned argument buffer works" "1236" "SELECT he_misaligned(1000, repeat('x', 236));"
+# the block for large arguments
+hentry he_alloc0 "pub fn hostileAllocArgs(len: u32) u32 { _ = len; return 0; }" >/dev/null
+expect "hostile entry points: plzig_alloc_args failing is out of memory" "out of guest memory for arguments" "SELECT he_alloc0(1, repeat('x', 5000));"
+expect "hostile entry points: small arguments do not need plzig_alloc_args" "11" "SELECT he_alloc0(1, repeat('x', 10));"
+hentry he_allocbad "pub fn hostileAllocArgs(len: u32) u32 { _ = len; return 0x7fff_ff00; }" >/dev/null
+expect "hostile entry points: plzig_alloc_args beyond memory" "guest passed an invalid memory range" "SELECT he_allocbad(1, repeat('x', 5000));"
+hentry he_alloctail "pub fn hostileAllocArgs(len: u32) u32 { _ = len; return @intCast(plzig.memSize() - 64); }" >/dev/null
+expect "hostile entry points: plzig_alloc_args block running past the end" "guest passed an invalid memory range" "SELECT he_alloctail(1, repeat('x', 5000));"
+hentry he_allocodd "pub fn hostileAllocArgs(len: u32) u32 { if (len > hbuf.len - 8) return 0; return @intCast(plzig.addrOf(&hbuf) + 5); }" >/dev/null
+expect "hostile entry points: misaligned plzig_alloc_args block works" "5001" "SELECT he_allocodd(1, repeat('x', 5000));"
+expect "hostile entry points: backend still healthy" "4242" "SELECT 4242;"
+if grep -qE "terminated by signal|server process .* was terminated" /tmp/server.log; then fail "hostile entry points: no backend crash in the server log"; else pass "hostile entry points: no backend crash in the server log"; fi
+psqlq -c "DROP FUNCTION IF EXISTS he_misaligned(int, text), he_alloc0(int, text), he_allocbad(int, text), he_alloctail(int, text), he_allocodd(int, text); SELECT plzig_cache_clear();" >/dev/null
 set_conf compiler_sandbox ""
 set_real
 

@@ -23,7 +23,7 @@ for f in "$here"/seeds-src/*.zig; do
     (cd "$tmp" && "$zig" build-exe --global-cache-dir "$tmp/gc" --cache-dir .zig-cache \
         --color off -fno-reference-trace -target wasm32-freestanding -mcpu mvp \
         -O ReleaseSafe -fstrip -fno-entry -fsingle-threaded --stack 262144 \
-        --export=plzig_abi_version --export=plzig_begin --export=plzig_alloc --export=plzig_call \
+        --export=plzig_abi_version --export=plzig_init --export=plzig_alloc_args --export=plzig_call \
         --dep plzig --dep user -Mroot=sdk/root.zig --dep plzig -Muser=src/user.zig \
         -Mplzig=sdk/plzig.zig --name plzig_module -femit-bin=out.wasm)
     cp "$tmp/out.wasm" "$here/corpus/$name.wasm"

@@ -17,17 +17,29 @@ export fn plzig_abi_version() u32 {
     return plzig.abi_version;
 }
 
-/// Start a new call: releases everything allocated by the previous call.
-export fn plzig_begin() void {
-    plzig.resetArena();
+/// The argument buffer: the host writes the argument block of a call here
+/// when it fits, so that a call enters the guest once (plzig_call with
+/// begin = 1).  Outside the arena, so the arena reset at the start of the
+/// call does not touch it; argument slices point into it and are valid
+/// until the call returns, like everything in the arena.
+var arg_buffer: [plzig.arg_buffer_size]u8 align(8) = undefined;
+
+/// Called once per instance: where the argument buffer is and how large,
+/// as `capacity << 32 | address`.
+export fn plzig_init() u64 {
+    return (@as(u64, arg_buffer.len) << 32) | @as(u64, @intCast(@intFromPtr(&arg_buffer)));
 }
 
-/// Allocate `len` bytes (8-byte aligned) in the per-call arena; 0 on failure.
+/// Fallback for argument blocks larger than the argument buffer: start a
+/// call (release everything allocated by the previous call) and allocate
+/// `len` bytes (8-byte aligned) in the arena for the block; 0 on failure.
+/// The host then calls plzig_call with begin = 0.
 /// rawAlloc, not alignedAlloc: in ReleaseSafe the latter first fills the
 /// block with 0xAA (@memset undefined), byte by byte in the interpreter, ~10
 /// ns per byte; the host writes every slot and payload (alignment padding
 /// keeps this instance's old bytes: guest memory, never host data).
-export fn plzig_alloc(len: u32) u32 {
+export fn plzig_alloc_args(len: u32) u32 {
+    plzig.resetArena();
     const p = plzig.allocator.rawAlloc(len, .@"8", 0) orelse return 0;
     return @intCast(@intFromPtr(p));
 }
@@ -82,8 +94,12 @@ fn setError(out: *Slot, err: anyerror) u32 {
     return STATUS_ERROR;
 }
 
-/// Call the user function. `args` points to `nargs` slots, `result` to one slot.
-export fn plzig_call(args: [*]const Slot, nargs: u32, result: *Slot) u32 {
+/// Call the user function. `args` points to `nargs` slots, `result` to one
+/// slot. `begin` != 0 starts the call by releasing everything allocated by
+/// the previous call (the arguments are in the argument buffer); 0 means
+/// plzig_alloc_args has already done that (the arguments are in the arena).
+export fn plzig_call(args: [*]const Slot, nargs: u32, result: *Slot, begin: u32) u32 {
+    if (begin != 0) plzig.resetArena();
     if (nargs != fn_info.param_types.len) plzig.raiseMsg("plzig: argument count mismatch");
     var tuple: s.meta.ArgsTuple(Fn) = undefined;
     inline for (fn_info.param_types, 0..) |PT, i| {

@@ -6,7 +6,7 @@ const plzig = @import("plzig");
 const std = plzig.std;
 
 /// what the last call received, rendered as text
-pub var seen: [512]u8 = undefined;
+pub var seen: [8192]u8 = undefined;
 pub var seen_len: usize = 0;
 
 pub fn call(b: ?bool, s2: ?i16, s4: ?i32, s8: ?i64, f4: ?f32, f8: ?f64, t: ?[]const u8, strict_t: []const u8, mode: i32) anyerror!?[]const u8 {
