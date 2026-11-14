@@ -245,9 +245,12 @@ dest=/tmp/plzig-destdir
 rm -rf "$dest"
 if make -s -C /src install DESTDIR="$dest" >/tmp/plzig-install.log 2>&1; then
     files=$(cd "$dest" && find . -type f -o -type l | sort)
-    zigfiles=$(grep -E '(^|/)zig$|/zig-[0-9]|/lib/std/|std\.zig$|compiler_rt|/lib/libc/|LICENSE' <<<"$files")
+    # 6 program/data files plus 4 license files (ours, the notices, and the
+    # Apache and Zig-MIT texts for the code linked into the binaries)
+    zigfiles=$(grep -E '(^|/)zig$|/zig-[0-9]|/lib/std/|std\.zig$|compiler_rt|/lib/libc/' <<<"$files")
     n=$(wc -l <<<"$files")
-    if [ -z "$zigfiles" ] && [ "$n" -eq 6 ] && grep -q 'plzig-validate$' <<<"$files"; then
+    nlic=$(grep -cE '/extension/plzig/(LICENSE|THIRD-PARTY-NOTICES|LICENSES/[^/]+)$' <<<"$files")
+    if [ -z "$zigfiles" ] && [ "$n" -eq 10 ] && [ "$nlic" -eq 4 ] && grep -q 'plzig-validate$' <<<"$files"; then
         pass "make install tree contains no Zig files ($n files)"
     else
         fail "make install tree contains no Zig files"; echo "$files" | sed 's/^/         /'

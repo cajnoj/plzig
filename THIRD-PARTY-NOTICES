@@ -1,0 +1,82 @@
+PL/Zig third-party notices
+==========================
+
+PL/Zig's own source code is licensed under The PostgreSQL License (see
+LICENSE). Binary builds additionally contain or are built from the
+third-party software listed here. As a result, a built plzig.so is
+effectively licensed "PostgreSQL AND Apache-2.0 WITH LLVM-exception", and
+the plzig-validate tool "PostgreSQL AND MIT".
+
+PL/Zig is an independent project. It is not affiliated with, sponsored by or
+endorsed by the PostgreSQL Global Development Group, the PostgreSQL Community
+Association of Canada, the Zig Software Foundation or the Bytecode Alliance.
+
+
+1. WebAssembly Micro Runtime (WAMR)
+-----------------------------------
+
+Used for: executing compiled functions. Statically linked into plzig.so
+(classic interpreter only).
+
+Version:  2.4.5 (tag WAMR-2.4.5,
+          commit 25bd7eb63e828e4bd242cc9b38d260b4b31c6605)
+Source:   https://github.com/bytecodealliance/wasm-micro-runtime
+License:  Apache License 2.0 with LLVM Exceptions
+          (SPDX: Apache-2.0 WITH LLVM-exception)
+          Full text: LICENSES/Apache-2.0-WITH-LLVM-exception.txt
+
+Copyright notices of the compiled-in files:
+    Copyright (C) 2019 Intel Corporation. All rights reserved.
+    Copyright (C) 2019-21 Intel Corporation and others. All rights reserved.
+    Copyright (C) 2023 Amazon Inc. All rights reserved.
+    Copyright (C) 2023 Midokura Japan KK. All rights reserved.
+    Copyright (C) 2024 Tencent Corporation. All rights reserved.
+    (see the individual source files for the exact notices)
+
+Statement of changes (Apache License 2.0, section 4(b)): the PL/Zig project
+modified one file of WAMR,
+
+    core/iwasm/interpreter/wasm_interp_classic.c
+
+so that CHECK_SUSPEND_FLAGS() is also defined when the thread manager is
+disabled and WASM_ENABLE_PLZIG_INTERRUPT is set, in which case it polls two
+host-provided interrupt flags and raises a WebAssembly exception when either
+is set. The complete change is third_party/wamr-interrupt.patch in the PL/Zig
+source distribution; the modified file carries a notice at its top. The
+modifications are Copyright (c) 2026 Jonathan Jacobson and are licensed under
+the same terms as WAMR. No other WAMR file is modified.
+
+WAMR contains core/iwasm/include/wasm_c_api.h, which originates from the
+WebAssembly C API project (https://github.com/WebAssembly/wasm-c-api),
+licensed under the Apache License 2.0.
+
+WAMR does not ship a NOTICE file for the components used here.
+
+
+2. Zig standard library and compiler runtime
+--------------------------------------------
+
+Used for: the plzig-validate tool is compiled from PL/Zig source together
+with parts of the Zig standard library (including its tokenizer) and
+compiler runtime. The WebAssembly modules that the server compiles from
+users' functions likewise contain code from the Zig standard library and
+compiler runtime; this matters only if such modules are redistributed.
+
+Version:  0.17.1
+Source:   https://ziglang.org/
+License:  MIT (Expat). Copyright (c) Zig contributors.
+          Full text: LICENSES/MIT-Zig.txt
+
+PL/Zig does not include or install the Zig compiler. Administrators obtain
+Zig 0.17.1 separately, under its own license terms.
+
+
+3. PostgreSQL
+-------------
+
+PL/Zig is built against PostgreSQL's server headers and build infrastructure
+(PGXS) and contains no PostgreSQL source code. PostgreSQL is released under
+The PostgreSQL License:
+
+    Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
+    Portions Copyright (c) 1994, The Regents of the University of California

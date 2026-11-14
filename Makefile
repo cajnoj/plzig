@@ -108,11 +108,16 @@ install-plzig: $(VALIDATOR)
 	$(INSTALL_PROGRAM) $(VALIDATOR) '$(DESTDIR)$(pkglibdir)/plzig/plzig-validate'
 	$(MKDIR_P) '$(DESTDIR)$(datadir)/plzig/sdk'
 	$(INSTALL_DATA) zig/sdk/plzig.zig zig/sdk/root.zig '$(DESTDIR)$(datadir)/plzig/sdk/'
+	$(MKDIR_P) '$(DESTDIR)$(docdir)/$(docmoduledir)/plzig/LICENSES'
+	$(INSTALL_DATA) LICENSE THIRD-PARTY-NOTICES '$(DESTDIR)$(docdir)/$(docmoduledir)/plzig/'
+	$(INSTALL_DATA) LICENSES/Apache-2.0-WITH-LLVM-exception.txt LICENSES/MIT-Zig.txt \
+	    '$(DESTDIR)$(docdir)/$(docmoduledir)/plzig/LICENSES/'
 
 uninstall: uninstall-plzig
 
 uninstall-plzig:
-	rm -rf '$(DESTDIR)$(pkglibdir)/plzig' '$(DESTDIR)$(datadir)/plzig'
+	rm -rf '$(DESTDIR)$(pkglibdir)/plzig' '$(DESTDIR)$(datadir)/plzig' \
+	    '$(DESTDIR)$(docdir)/$(docmoduledir)/plzig'
 
 clean: clean-plzig
 

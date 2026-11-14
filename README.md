@@ -370,3 +370,25 @@ cache must be regular 0600 files owned by the server user and opened with
   validator or interpreter would be a sandbox escape. The build disables
   every optional feature (AOT/JIT, WASI, threads, SIMD, GC, multi-module…)
   to keep that surface small.
+
+## License
+
+PL/Zig is released under [The PostgreSQL License](LICENSE).
+Copyright (c) 2026, Jonathan Jacobson.
+
+Binary builds statically link the WebAssembly Micro Runtime (Apache License
+2.0 with LLVM Exceptions, with one file modified by this project) and the
+`plzig-validate` tool contains parts of the Zig standard library (MIT). See
+[THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES) and [LICENSES/](LICENSES); these
+files are installed with the extension under PostgreSQL's documentation
+directory (`pg_config --docdir`, subdirectory `extension/plzig`). Package
+metadata for a binary build should state
+`PostgreSQL AND Apache-2.0 WITH LLVM-exception AND MIT`.
+
+PL/Zig does not include the Zig compiler; you install Zig 0.17.1 yourself
+under its own license. WebAssembly modules compiled from your functions
+contain MIT-licensed code from the Zig standard library and compiler
+runtime, which only matters if you redistribute those modules.
+
+PL/Zig is an independent project and is not affiliated with or endorsed by
+the PostgreSQL project, the Zig Software Foundation or the Bytecode Alliance.

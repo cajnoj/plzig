@@ -1,6 +1,36 @@
+PL/Zig patch for WebAssembly Micro Runtime (WAMR) 2.4.5,
+commit 25bd7eb63e828e4bd242cc9b38d260b4b31c6605.
+
+Makes the classic interpreter poll two host-provided interrupt flags at
+every branch, call and function entry when built without the thread
+manager and with -DWASM_ENABLE_PLZIG_INTERRUPT=1, so that PostgreSQL query
+cancel and backend termination stop running guest code.
+
+This patch is a derivative of WAMR and is licensed, like the file it
+modifies, under the Apache License 2.0 with LLVM Exceptions
+(SPDX: Apache-2.0 WITH LLVM-exception); see LICENSES/ in this repository.
+Modifications Copyright (c) 2026 Jonathan Jacobson.
+
+Applied by third_party/prepare-wamr.sh with: patch -p1 --fuzz=0
+
 --- a/core/iwasm/interpreter/wasm_interp_classic.c
 +++ b/core/iwasm/interpreter/wasm_interp_classic.c
-@@ -1452,6 +1452,20 @@
+@@ -3,6 +3,14 @@
+  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+  */
+ 
++/*
++ * NOTICE: this file was modified by the PL/Zig project
++ * (Copyright (c) 2026 Jonathan Jacobson): CHECK_SUSPEND_FLAGS() is also
++ * defined when the thread manager is disabled and
++ * WASM_ENABLE_PLZIG_INTERRUPT is set, polling host-provided interrupt flags.
++ * The modifications are licensed under the same terms as this file.
++ */
++
+ #include "wasm_interp.h"
+ #include "bh_log.h"
+ #include "wasm_runtime.h"
+@@ -1452,6 +1460,20 @@
      } while (0)
  #endif /* WASM_ENABLE_DEBUG_INTERP */
  #endif /* WASM_ENABLE_THREAD_MGR */
@@ -21,7 +51,7 @@
  
  #if WASM_ENABLE_THREAD_MGR != 0 && WASM_ENABLE_DEBUG_INTERP != 0
  #if BH_ATOMIC_32_IS_ATOMIC != 0
-@@ -2218,7 +2232,7 @@
+@@ -2218,7 +2240,7 @@
  
              HANDLE_OP(WASM_OP_BR)
              {
@@ -30,7 +60,7 @@
                  CHECK_SUSPEND_FLAGS();
  #endif
                  read_leb_uint32(frame_ip, frame_ip_end, depth);
-@@ -2239,7 +2253,7 @@
+@@ -2239,7 +2261,7 @@
  
              HANDLE_OP(WASM_OP_BR_IF)
              {
@@ -39,7 +69,7 @@
                  CHECK_SUSPEND_FLAGS();
  #endif
                  read_leb_uint32(frame_ip, frame_ip_end, depth);
-@@ -2251,7 +2265,7 @@
+@@ -2251,7 +2273,7 @@
  
              HANDLE_OP(WASM_OP_BR_TABLE)
              {
@@ -48,7 +78,7 @@
                  CHECK_SUSPEND_FLAGS();
  #endif
                  read_leb_uint32(frame_ip, frame_ip_end, count);
-@@ -2268,7 +2282,7 @@
+@@ -2268,7 +2290,7 @@
                      bh_list_first_elem(module->module->br_table_cache_list);
                  BrTableCache *node_next;
  
@@ -57,7 +87,7 @@
                  CHECK_SUSPEND_FLAGS();
  #endif
                  lidx = POP_I32();
-@@ -2306,7 +2320,7 @@
+@@ -2306,7 +2328,7 @@
  
              HANDLE_OP(WASM_OP_CALL)
              {
@@ -66,7 +96,7 @@
                  CHECK_SUSPEND_FLAGS();
  #endif
                  read_leb_uint32(frame_ip, frame_ip_end, fidx);
-@@ -2324,7 +2338,7 @@
+@@ -2324,7 +2346,7 @@
  #if WASM_ENABLE_TAIL_CALL != 0
              HANDLE_OP(WASM_OP_RETURN_CALL)
              {
@@ -75,7 +105,7 @@
                  CHECK_SUSPEND_FLAGS();
  #endif
                  read_leb_uint32(frame_ip, frame_ip_end, fidx);
-@@ -2352,7 +2366,7 @@
+@@ -2352,7 +2374,7 @@
  #if WASM_ENABLE_TAIL_CALL != 0
                  opcode = *(frame_ip - 1);
  #endif
@@ -84,7 +114,7 @@
                  CHECK_SUSPEND_FLAGS();
  #endif
  
-@@ -2631,7 +2645,7 @@
+@@ -2631,7 +2653,7 @@
  #if WASM_ENABLE_GC != 0
              HANDLE_OP(WASM_OP_CALL_REF)
              {
@@ -93,7 +123,7 @@
                  CHECK_SUSPEND_FLAGS();
  #endif
                  read_leb_uint32(frame_ip, frame_ip_end, type_index);
-@@ -2648,7 +2662,7 @@
+@@ -2648,7 +2670,7 @@
  
              HANDLE_OP(WASM_OP_RETURN_CALL_REF)
              {
@@ -102,7 +132,7 @@
                  CHECK_SUSPEND_FLAGS();
  #endif
                  read_leb_uint32(frame_ip, frame_ip_end, type_index);
-@@ -2686,7 +2700,7 @@
+@@ -2686,7 +2708,7 @@
  
              HANDLE_OP(WASM_OP_BR_ON_NULL)
              {
@@ -111,7 +141,7 @@
                  CHECK_SUSPEND_FLAGS();
  #endif
                  read_leb_uint32(frame_ip, frame_ip_end, depth);
-@@ -2701,7 +2715,7 @@
+@@ -2701,7 +2723,7 @@
  
              HANDLE_OP(WASM_OP_BR_ON_NON_NULL)
              {
@@ -120,7 +150,7 @@
                  CHECK_SUSPEND_FLAGS();
  #endif
                  read_leb_uint32(frame_ip, frame_ip_end, depth);
-@@ -3305,7 +3319,7 @@
+@@ -3305,7 +3327,7 @@
                          int32 heap_type, heap_type_dst;
                          uint8 castflags;
  
@@ -129,7 +159,7 @@
                          CHECK_SUSPEND_FLAGS();
  #endif
                          castflags = *frame_ip++;
-@@ -6200,7 +6214,7 @@
+@@ -6200,7 +6222,7 @@
                          if (ret == (uint32)-1)
                              goto got_exception;
  
@@ -138,7 +168,7 @@
                          CHECK_SUSPEND_FLAGS();
  #endif
  
-@@ -6224,7 +6238,7 @@
+@@ -6224,7 +6246,7 @@
                          if (ret == (uint32)-1)
                              goto got_exception;
  
@@ -147,7 +177,7 @@
                          CHECK_SUSPEND_FLAGS();
  #endif
  
-@@ -6836,7 +6850,7 @@
+@@ -6836,7 +6858,7 @@
  
              wasm_exec_env_set_cur_frame(exec_env, frame);
          }
