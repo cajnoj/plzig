@@ -48,6 +48,12 @@ fz_check() {
     fi
     new=$(tail -n +"$((fz_log_pos + 1))" /tmp/server.log 2>/dev/null)
     fz_log_pos=$(wc -l </tmp/server.log)
+    # The Zig compiler itself crashing (SIGSEGV) in its sandboxed child is
+    # not a server problem: the backend reports it as an ordinary error
+    # (58000), which the SQL oracles count.  Only that exact message is
+    # exempt; a backend killed by a signal is reported by the postmaster
+    # with a different line ("server process ... was terminated by signal").
+    new=$(grep -vE 'ERROR:  PL/Zig compiler terminated by signal 11$' <<<"$new" || true)
     if grep -qE "terminated by signal|was terminated|server process .* exited with exit code [^0]|TRAP:|PANIC:|could not remove|stuck" <<<"$new"; then
         fz_finding "server log after $ctx: $(grep -E 'terminated by signal|was terminated|exited with exit code|TRAP:|PANIC:|could not remove|stuck' <<<"$new" | head -5)" "$ctx"
     fi
