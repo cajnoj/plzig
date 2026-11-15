@@ -975,8 +975,13 @@ plzig_decode_result(PlzigInstance *pi, PlzigSlot *slot, PlzigTypeInfo *rt,
 			}
 		case PLZIG_T_TEXTIO:
 		case PLZIG_T_IO:
+		case PLZIG_T_JSONB:
 			{
-				/* input functions need a NUL-terminated C string */
+				/*
+				 * input functions need a NUL-terminated C string; a jsonb
+				 * result is JSON text parsed by jsonb_in (a binary jsonb from
+				 * the guest is never stored)
+				 */
 				char	   *s = plzig_copy_out(pi, slot->val, slot->len);
 
 				(void) pg_verifymbstr(s, (int) slot->len, false);
@@ -1081,7 +1086,8 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 
 			if (args[i].isnull)
 				continue;
-			if (k == PLZIG_T_TEXT || k == PLZIG_T_TEXTIO || k == PLZIG_T_BYTEA)
+			if (k == PLZIG_T_TEXT || k == PLZIG_T_TEXTIO || k == PLZIG_T_BYTEA ||
+				k == PLZIG_T_JSONB)
 			{
 				struct varlena *v = PG_DETOAST_DATUM_PACKED(args[i].value);
 
@@ -1214,6 +1220,7 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 					case PLZIG_T_INTERVAL:
 					case PLZIG_T_UUID:
 					case PLZIG_T_NUMERIC:
+					case PLZIG_T_JSONB:
 						plzig_put_bytes(base, &off, &s, guest_base, bytes[i], lens[i]);
 						break;
 					case PLZIG_T_VOID:

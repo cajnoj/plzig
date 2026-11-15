@@ -117,9 +117,10 @@ SELECT tm_num('NaN') AS nan, tm_num(12345678901234567890.123456789) AS big,
        tm_num(-0.000000000000000000001) AS small, tm_num(1e-300) = 1e-300 AS tiny;
 SELECT tm_num('Infinity') AS inf, tm_num('-Infinity') AS minf;
 
--- json and jsonb: json keeps the text, jsonb is normalised
+-- json and jsonb: json keeps the text, jsonb is normalised (a jsonb
+-- argument is read in place, a jsonb result is JSON text; more in types_jsonb)
 CREATE FUNCTION tm_json(j json, b jsonb) RETURNS jsonb STRICT LANGUAGE plzig AS $$
-    return try std.fmt.allocPrint(plzig.allocator, "[{s}, {s}]", .{ j, b });
+    return plzig.jsonText(try std.fmt.allocPrint(plzig.allocator, "[{s}, {s}]", .{ j, (try b.toJsonText()).text }));
 $$;
 SELECT tm_json('{"a": 1,  "a": 2}', '{"b": [1, 2.50],  "a": null}');
 CREATE FUNCTION tm_json_text(j json) RETURNS json STRICT LANGUAGE plzig AS $$
@@ -127,7 +128,7 @@ CREATE FUNCTION tm_json_text(j json) RETURNS json STRICT LANGUAGE plzig AS $$
 $$;
 SELECT tm_json_text('{"a": 1,  "a": 2}');
 CREATE FUNCTION tm_badjson() RETURNS jsonb LANGUAGE plzig AS $$
-    return "{bad";
+    return plzig.jsonText("{bad");
 $$;
 SELECT tm_badjson();
 

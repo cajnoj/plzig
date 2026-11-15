@@ -15,6 +15,8 @@
 #              names through the source generator
 #   pipeline   mutated and generated Zig bodies through CREATE FUNCTION on
 #              the ASan server
+#   jsonb      the guest SDK's jsonb reader and numeric decoders, natively,
+#              on mutated jsonb/numeric bytes that PostgreSQL produced
 #
 # Exits non-zero on a finding (or if the run could not be done).  Results
 # go to build/fuzz/<target>/ (fuzz.log, corpus, artifacts, coverage); a
@@ -33,7 +35,7 @@ secs=${2:-60}
 v=${PLZIG_FUZZ_VERSION:-18.7}
 plat=()
 [ -n "${PLZIG_PLATFORM:-}" ] && plat=(--platform "$PLZIG_PLATFORM")
-all_targets="validator loader hostabi marshal pipeline"
+all_targets="validator loader jsonb hostabi marshal pipeline"
 
 pgsrc() {
     case $1 in
@@ -63,7 +65,7 @@ run_one() {   # run_one <target> <seconds>
     c=plzig-fuzz-run-$t-$$
     docker rm -f "$c" >/dev/null 2>&1
     case $t in
-        validator|loader)
+        validator|loader|jsonb)
             docker create "${plat[@]}" --init --name "$c" -e PLZIG_FUZZ_JOBS="${PLZIG_FUZZ_JOBS:-1}" \
                 "plzig-fuzz:$v" bash /src/fuzz/run-native.sh "$t" "$s" /tmp/fuzz-out /tmp/fuzz-prev >/dev/null ;;
         hostabi|marshal|pipeline)

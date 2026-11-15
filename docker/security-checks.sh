@@ -338,6 +338,13 @@ CREATE OR REPLACE FUNCTION hostile(what int) RETURNS int STRICT LANGUAGE plzig A
         67 => _ = h.tz_convert(2, 0, sql.ptr, 0xffff_ffff),
         68 => _ = h.tz_convert(1, 0x7fff_ffff_ffff_fffe, sql.ptr, 0),
         69 => { const z = "Europe/\xff"; _ = h.tz_convert(1, 0, z, z.len); },
+        // jsonb parameters: JSON text, never a binary jsonb; forged pointer, bad text
+        70, 71, 72, 73 => {
+            const pj = try plzig.spi.prepare("SELECT $1::text", &.{.jsonb});
+            const t = switch (what) { 71 => "[1", 72 => "\"\xff\"", else => "\x01\x00\x00\x20\x00\x00\x00\x00" };
+            vals[0] = .{ .val = if (what == 70) bad else plzig.addrOf(t.ptr), .len = if (what == 70) 5 else @intCast(t.len), .kind = 19, .is_null = 0 };
+            _ = h.spi_execute_plan(pj.handle, &vals, 1);
+        },
         else => return 0,
     }
     return 1;
@@ -424,9 +431,13 @@ done <<'CASES'
 67|time zone name is too long
 68|timestamp out of range
 69|invalid byte sequence for encoding
+70|guest passed an invalid memory range
+71|invalid input syntax for type json
+72|invalid byte sequence for encoding
+73|invalid byte sequence for encoding "UTF8": 0x00
 0|0
 CASES
-if [ "$n" -eq 70 ]; then pass "hostile guest: all 69 forged calls end in a clean ERROR"; fi
+if [ "$n" -eq 74 ]; then pass "hostile guest: all 73 forged calls end in a clean ERROR"; fi
 expect "hostile guest: backend still healthy" "4242" "SELECT 4242;"
 if grep -qE "terminated by signal|server process .* was terminated" /tmp/server.log; then fail "hostile guest: no backend crash in the server log"; else pass "hostile guest: no backend crash in the server log"; fi
 psqlq -c "DROP FUNCTION hostile(int); SELECT plzig_cache_clear();" >/dev/null

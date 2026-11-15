@@ -676,6 +676,8 @@ kind_name(uint32 kind)
 			return "oid";
 		case PLZIG_KIND_NUMERIC:
 			return "numeric";
+		case PLZIG_KIND_JSONB:
+			return "jsonb";
 	}
 	return "invalid";
 }
@@ -835,6 +837,18 @@ decode_typed_params(wasm_exec_env_t env, SPIPlanPtr plan, uint32 params_ptr,
 				(*values)[i] = guest_numeric(env, (uint32) (v->val & PG_UINT32_MAX), v->len,
 											 psprintf("parameter $%u", i + 1));
 				break;
+			case PLZIG_KIND_JSONB:
+				{
+					/* JSON text, parsed by jsonb_in: never a binary jsonb */
+					char	   *json;
+
+					if (v->val > PG_UINT32_MAX && v->len > 0)
+						goto bad_pointer;
+					json = guest_string(env, (uint32) (v->val & PG_UINT32_MAX), v->len,
+										MaxAllocSize - 1, "SPI parameter", false);
+					(*values)[i] = DirectFunctionCall1(jsonb_in, CStringGetDatum(json));
+					break;
+				}
 		}
 		continue;
 
@@ -1002,6 +1016,7 @@ rowbuf_load(PlzigRowBuf *rb, HeapTuple tup, TupleDesc td)
 				}
 			case PLZIG_KIND_TEXT:
 			case PLZIG_KIND_BYTEA:
+			case PLZIG_KIND_JSONB:	/* the on-disk layout (JsonbContainer) */
 				{
 					struct varlena *v = PG_DETOAST_DATUM_PACKED(values[i]);
 

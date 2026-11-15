@@ -90,7 +90,7 @@ SELECT e_bytes(1);
 SELECT e_bytes(2);
 -- through input functions (json), log messages, raise, SPI parameters
 CREATE FUNCTION e_json(which int) RETURNS jsonb STRICT LANGUAGE plzig AS $$
-    return if (which == 0) "\"\xa4\xa2\"" else "\"\xff\"";
+    return plzig.jsonText(if (which == 0) "\"\xa4\xa2\"" else "\"\xff\"");
 $$;
 SELECT e_json(0);
 SELECT e_json(1);

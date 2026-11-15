@@ -13,6 +13,9 @@
 #                       + ASan + UBSan
 #   fuzz_loader_cov     the same with source-based coverage instead of the
 #                       sanitizers, to measure what a corpus reaches
+#   fuzz_jsonb          the guest SDK's jsonb reader and numeric decoders
+#                       (zig/sdk/plzig.zig, compiled natively); Zig with
+#                       -ffuzz, linked with libFuzzer
 # and runs a self-test of each (the seed corpus must pass; the validator's
 # differential checks must fire on a denied input in self-test mode).
 set -euo pipefail
@@ -50,6 +53,18 @@ for b in bad1 bad2 bad3; do
         { cat "$work/$b.log"; echo "fuzz_validator: self-test: unexpected failure on $b"; exit 1; }
 done
 echo "fuzz_validator: ok (seed corpus passes, differential checks fire in self-test mode)"
+
+echo "--- fuzz_jsonb"
+"$zig" build-obj -ffuzz -fno-stack-check -O ReleaseSafe -fPIC \
+    --global-cache-dir "$work/zgc" --cache-dir "$work/zlc" \
+    --dep plzig -Mroot="$here/jsonb/harness.zig" -Mplzig="$src/zig/sdk/plzig.zig" \
+    --name jsonb -femit-bin="$work/jsonb.o"
+"$cc" -fsanitize=fuzzer "$work/jsonb.o" "$work/sancov_init.o" -o "$out/fuzz_jsonb"
+"$out/fuzz_jsonb" -runs=0 "$here/jsonb/corpus" >"$work/j.log" 2>&1 ||
+    { cat "$work/j.log"; echo "fuzz_jsonb: seed corpus fails"; exit 1; }
+grep -q "inline 8-bit counters" "$work/j.log" ||
+    { cat "$work/j.log"; echo "fuzz_jsonb: no coverage counters registered"; exit 1; }
+echo "fuzz_jsonb: ok (seed corpus passes)"
 
 echo "--- WAMR (production configuration, clang, sanitizers + coverage)"
 wamr_src=$src/build/wamr-src
@@ -103,5 +118,6 @@ UBSAN_OPTIONS=suppressions=$here/loader/ubsan.supp:halt_on_error=1:print_stacktr
 echo "fuzz_loader: ok (seed corpus and the reproducers in findings/ pass)"
 cp "$here/validator/zig.dict" "$out/validator.dict"
 cp "$here/loader/wasm.dict" "$out/loader.dict"
+cp "$here/jsonb/jsonb.dict" "$out/jsonb.dict"
 cp "$here/loader/ubsan.supp" "$out/loader.ubsan.supp"
 echo "built into $out"

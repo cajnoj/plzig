@@ -1318,3 +1318,200 @@ test "TimestampTz: local time by the host (zone name passed through, null = sess
     try testing.expectEqual(tz, try plzig.TimestampTz.fromFields(f, "UTC+1"));
     try testing.expectError(error.NotFinite, plzig.TimestampTz.infinity.fields(null));
 }
+
+// ---------------------------------------------------------------------------
+// jsonb: the on-disk layout, from byte fixtures that PostgreSQL produced
+// (the JsonbContainer of each value, as the host passes it)
+
+const JsonbFixture = struct { text: []const u8, hex: []const u8 };
+const jsonb_fixtures = [_]JsonbFixture{
+    .{ .text = "{\"a\": 1}", .hex = "01000020010000800b000010610000002000000000800100" },
+    .{ .text = "[1, \"two\", null, true, false, {\"k\": []}, [3.5]]", .hex = "0700004008000090030000000000004000000030000000201500005012000050200000000080010074776f000100002001000080070000506b00000000000040010000400a00009028000000808003008813" },
+    .{ .text = "\"h\xc3\xa9llo\"", .hex = "010000500600008068c3a96c6c6f" },
+    .{ .text = "-12.5", .hex = "010000500a0000902800000080a00c008813" },
+    .{ .text = "true", .hex = "01000050000000b0" },
+    .{ .text = "{\"a\": 1, \"b\": 2, \"ab\": 5, \"cc\": 3, \"aaa\": 4}", .hex = "0500002001000080010000000200000002000000030000000b0000100800001008000010080000100800001061626162636361616100000020000000008001002000000000800200200000000080050020000000008003002000000000800400" },
+    .{ .text = "[0, 1, -1, 1" ++ zeros(100) ++ ", -0." ++ zeros(99) ++ "1, 1" ++ zeros(300) ++ ", 0.1, 1." ++ zeros(73) ++ ", 123456789.123456789]", .hex = "09000040060000900a00001008000010080000100a0000100c0000100a0000100a00001014000010180000000080000020000000008001002000000000a001002000000019800100280000006440e7ff010000002800000000004b000100000020000000ff80e80328000000490000000100000048000000828401002909851ad2042e162823" },
+    .{ .text = "[\"\", \"a\\\"b\\\\c\\u0001\\n\", {\"x\": {\"y\": {\"z\": [null]}}}]", .hex = "030000400000008007000000390000506122625c63010a0001000020010000802b0000507800000001000020010000801b0000507900000001000020010000800b0000507a00000001000040000000c0" },
+    .{ .text = "[\"s0\", \"s1\", \"s2\", \"s3\", \"s4\", \"s5\", \"s6\", \"s7\", \"s8\", \"s9\", \"s10\", \"s11\", \"s12\", \"s13\", \"s14\", \"s15\", \"s16\", \"s17\", \"s18\", \"s19\", \"s20\", \"s21\", \"s22\", \"s23\", \"s24\", \"s25\", \"s26\", \"s27\", \"s28\", \"s29\", \"s30\", \"s31\", \"s32\", \"s33\", \"s34\", \"s35\", \"s36\", \"s37\", \"s38\", \"s39\"]", .hex = "28000040020000800200000002000000020000000200000002000000020000000200000002000000020000000300000003000000030000000300000003000000030000000300000003000000030000000300000003000000030000000300000003000000030000000300000003000000030000000300000003000000030000000300000059000080030000000300000003000000030000000300000003000000030000007330733173327333733473357336733773387339733130733131733132733133733134733135733136733137733138733139733230733231733232733233733234733235733236733237733238733239733330733331733332733333733334733335733336733337733338733339" },
+};
+
+fn hexBytes(buf: []u8, hex: []const u8) []u8 {
+    for (0..hex.len / 2) |i| buf[i] = std.fmt.parseInt(u8, hex[2 * i ..][0..2], 16) catch unreachable;
+    return buf[0 .. hex.len / 2];
+}
+
+test "Jsonb: every fixture serialises exactly as jsonb_out" {
+    var buf: [1024]u8 align(8) = undefined;
+    for (jsonb_fixtures) |f| {
+        const j: plzig.Jsonb = .{ .bytes = hexBytes(&buf, f.hex) };
+        const t = try j.toJsonAlloc(testing.allocator);
+        defer testing.allocator.free(t);
+        try testing.expectEqualStrings(f.text, t);
+    }
+}
+
+test "Jsonb: object lookup by binary search (keys sorted by length, then bytes)" {
+    var buf: [1024]u8 align(8) = undefined;
+    const j: plzig.Jsonb = .{ .bytes = hexBytes(&buf, jsonb_fixtures[5].hex) };
+    const o = (try j.root()).object;
+    try testing.expectEqual(@as(usize, 5), o.len());
+    const want = [_]struct { []const u8, i64 }{ .{ "a", 1 }, .{ "b", 2 }, .{ "ab", 5 }, .{ "cc", 3 }, .{ "aaa", 4 } };
+    for (want, 0..) |w, i| {
+        const v = (try o.get(w[0])).?;
+        try testing.expectEqual(w[1], try v.number.toI64());
+        const e = (try o.entry(i)).?; // storage order is the sort order
+        try testing.expectEqualStrings(w[0], e.key);
+    }
+    for ([_][]const u8{ "", "c", "aa", "ba", "abc", "aaaa", "A" }) |k| try testing.expectEqual(@as(?plzig.JsonValue, null), try o.get(k));
+    var it = o.iterator();
+    var n: usize = 0;
+    while (try it.next()) |_| n += 1;
+    try testing.expectEqual(@as(usize, 5), n);
+    try testing.expectEqual(@as(?plzig.JsonObject.Entry, null), try o.entry(5));
+}
+
+test "Jsonb: arrays, nesting, scalars, strings with escapes and multibyte characters" {
+    var buf: [1024]u8 align(8) = undefined;
+    const arr = (try (plzig.Jsonb{ .bytes = hexBytes(&buf, jsonb_fixtures[1].hex) }).root()).array;
+    try testing.expectEqual(@as(usize, 7), arr.len());
+    try testing.expectEqual(@as(i64, 1), try (try arr.get(0)).?.number.toI64());
+    try testing.expectEqualStrings("two", (try arr.get(1)).?.string);
+    try testing.expect((try arr.get(2)).? == .null);
+    try testing.expect((try arr.get(3)).?.bool and !(try arr.get(4)).?.bool);
+    const inner = (try (try arr.get(5)).?.object.get("k")).?.array;
+    try testing.expectEqual(@as(usize, 0), inner.len());
+    try testing.expectEqual(@as(f64, 3.5), try (try (try arr.get(6)).?.array.get(0)).?.number.toF64());
+    try testing.expectEqual(@as(?plzig.JsonValue, null), try arr.get(7));
+    var it = arr.iterator();
+    var n: usize = 0;
+    while (try it.next()) |_| n += 1;
+    try testing.expectEqual(@as(usize, 7), n);
+    // a scalar at the root
+    try testing.expectEqualStrings("h\xc3\xa9llo", (try (plzig.Jsonb{ .bytes = hexBytes(&buf, jsonb_fixtures[2].hex) }).root()).string);
+    try testing.expectEqual(@as(f64, -12.5), try (try (plzig.Jsonb{ .bytes = hexBytes(&buf, jsonb_fixtures[3].hex) }).root()).number.toF64());
+    try testing.expect((try (plzig.Jsonb{ .bytes = hexBytes(&buf, jsonb_fixtures[4].hex) }).root()).bool);
+    // escapes are not stored: the string's own bytes
+    const e = (try (plzig.Jsonb{ .bytes = hexBytes(&buf, jsonb_fixtures[7].hex) }).root()).array;
+    try testing.expectEqualStrings("a\"b\\c\x01\n", (try e.get(1)).?.string);
+    // more than 32 elements: every 32nd JEntry stores an offset
+    const big = (try (plzig.Jsonb{ .bytes = hexBytes(&buf, jsonb_fixtures[8].hex) }).root()).array;
+    for (0..40) |i| {
+        var nb: [8]u8 = undefined;
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&nb, "s{d}", .{i}), (try big.get(i)).?.string);
+    }
+}
+
+test "Jsonb: numbers in every on-disk numeric form" {
+    var buf: [1024]u8 align(8) = undefined;
+    const arr = (try (plzig.Jsonb{ .bytes = hexBytes(&buf, jsonb_fixtures[6].hex) }).root()).array;
+    const texts = [_][]const u8{ "0", "1", "-1", "1" ++ zeros(100), "-0." ++ zeros(99) ++ "1", "1" ++ zeros(300), "0.1", "1." ++ zeros(73), "123456789.123456789" };
+    for (texts, 0..) |t, i| {
+        const n = try (try arr.get(i)).?.number.numericAlloc(testing.allocator);
+        defer testing.allocator.free(n.wire);
+        _ = try Numeric.fromWire(n.wire);
+        const got = try numText(n);
+        defer testing.allocator.free(got);
+        try testing.expectEqualStrings(t, got);
+    }
+    try testing.expectEqual(@as(i64, -1), try (try arr.get(2)).?.number.toI64());
+    try testing.expectError(error.NotIntegral, (try arr.get(6)).?.number.toI64());
+    // NaN and the infinities (from to_jsonb of a numeric: not JSON numbers,
+    // but valid on-disk numerics) and a 1-byte varlena header
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "\x18\x00\x00\x00\x00\xc0", "NaN" }, .{ "\x18\x00\x00\x00\x00\xd0", "Infinity" }, .{ "\x18\x00\x00\x00\x00\xf0", "-Infinity" },
+        .{ "\x0b\x00\x80\x07\x00", "7" }, // 1-byte header (size 5): short numeric 7
+    }) |c| {
+        const n = try (plzig.JsonNumber{ .raw = c[0][0..] }).numericAlloc(testing.allocator);
+        defer testing.allocator.free(n.wire);
+        const got = try numText(n);
+        defer testing.allocator.free(got);
+        try testing.expectEqualStrings(c[1], got);
+    }
+}
+
+test "Jsonb: malformed bytes are error.InvalidJsonb, never a read outside the value" {
+    var buf: [1024]u8 align(8) = undefined;
+    var copy: [1024]u8 align(8) = undefined;
+    for (jsonb_fixtures) |f| {
+        const full = hexBytes(&buf, f.hex);
+        // every prefix: a valid prefix of the root is fine, anything else an error
+        for (0..full.len) |n| {
+            @memcpy(copy[0..n], full[0..n]);
+            walkAll(copy[0..n]);
+        }
+        // every byte, flipped in a few ways
+        for (0..full.len) |i| {
+            for ([_]u8{ 0x00, 0xff, 0x80, 0x01, 0x10, 0x50 }) |x| {
+                @memcpy(copy[0..full.len], full);
+                copy[i] ^= x;
+                walkAll(copy[0..full.len]);
+            }
+        }
+    }
+    // specific shapes
+    try testing.expectError(error.InvalidJsonb, (plzig.Jsonb{ .bytes = "" }).root());
+    try testing.expectError(error.InvalidJsonb, (plzig.Jsonb{ .bytes = "\x01\x00\x00\x00" }).root()); // no flags
+    try testing.expectError(error.InvalidJsonb, (plzig.Jsonb{ .bytes = "\x02\x00\x00\x50" }).root()); // scalar of 2
+    try testing.expectError(error.InvalidJsonb, (plzig.Jsonb{ .bytes = "\xff\xff\xff\x4f" }).root()); // JEntries beyond the value
+    try testing.expectError(error.InvalidJsonb, (plzig.Jsonb{ .bytes = "\x00\x00\x00\x60" }).root()); // array and object
+    // a scalar container below the root
+    const nested_scalar = "\x01\x00\x00\x40\x0c\x00\x00\x50\x01\x00\x00\x50\x00\x00\x00\x40";
+    try testing.expectError(error.InvalidJsonb, (try (plzig.Jsonb{ .bytes = nested_scalar }).root()).array.get(0));
+}
+
+/// Read everything reachable in `bytes` (each value, each key looked up),
+/// accepting any error: the property is only that nothing panics.
+fn walkAll(bytes: []const u8) void {
+    const j: plzig.Jsonb = .{ .bytes = bytes };
+    const t = j.toJsonAlloc(testing.allocator) catch null;
+    if (t) |x| testing.allocator.free(x);
+    const r = j.root() catch return;
+    walkValue(r, 0);
+}
+
+fn walkValue(v: plzig.JsonValue, depth: usize) void {
+    if (depth > 64) return;
+    switch (v) {
+        .number => |n| {
+            const w = n.numericAlloc(testing.allocator) catch return;
+            defer testing.allocator.free(w.wire);
+            _ = Numeric.fromWire(w.wire) catch unreachable; // what the decoder builds is valid
+        },
+        .array => |ar| {
+            var it = ar.iterator();
+            while (it.next() catch return) |x| walkValue(x, depth + 1);
+            _ = ar.get(ar.len()) catch {};
+        },
+        .object => |o| {
+            var it = o.iterator();
+            while (it.next() catch return) |e| {
+                walkValue(e.value, depth + 1);
+                _ = o.get(e.key) catch {};
+            }
+        },
+        else => {},
+    }
+}
+
+test "Jsonb as an argument, a typed column, and JsonText as result and parameter" {
+    try setup(64);
+    var buf: [64]u8 align(8) = undefined;
+    const bytes = hexBytes(&buf, jsonb_fixtures[0].hex);
+    const r = try row(&.{ .{ .raw = .{ .kind = .jsonb, .bytes = bytes } }, .{ .null_of = .jsonb }, .{ .text = "{}" } });
+    const j = try r.get(plzig.Jsonb, 0);
+    try testing.expectEqual(@as(i64, 1), try (try (try j.root()).object.get("a")).?.number.toI64());
+    try testing.expectEqual(@as(?plzig.Jsonb, null), try r.get(?plzig.Jsonb, 1));
+    try testing.expectError(error.TypeMismatch, r.get(plzig.Jsonb, 2));
+    try testing.expectError(error.TypeMismatch, r.get([]const u8, 0));
+    var plan = try plzig.spi.prepare("SELECT $1", &.{.jsonb});
+    try testing.expectEqual(@as(u32, 19), env.last_kinds[0]);
+    const jt = plzig.jsonText("[1]");
+    _ = try plan.execute(.{jt});
+    try testing.expectEqual(Value{ .val = @intFromPtr(jt.text.ptr), .len = 3, .kind = 19, .is_null = 0 }, env.last_values[0]);
+    const d = sdk_root.decode(plzig.Jsonb, &.{ .val = @intFromPtr(bytes.ptr), .len = @intCast(bytes.len), .is_null = 0 });
+    try testing.expectEqual(bytes.len, d.bytes.len);
+    var out: Slot = undefined;
+    sdk_root.encode(plzig.JsonText, jt, &out);
+    try testing.expectEqual(Slot{ .val = @intFromPtr(jt.text.ptr), .len = 3, .is_null = 0 }, out);
+}

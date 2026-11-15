@@ -210,9 +210,10 @@ SELECT tm_num('Infinity') AS inf, tm_num('-Infinity') AS minf;
  Infinity | -Infinity
 (1 row)
 
--- json and jsonb: json keeps the text, jsonb is normalised
+-- json and jsonb: json keeps the text, jsonb is normalised (a jsonb
+-- argument is read in place, a jsonb result is JSON text; more in types_jsonb)
 CREATE FUNCTION tm_json(j json, b jsonb) RETURNS jsonb STRICT LANGUAGE plzig AS $$
-    return try std.fmt.allocPrint(plzig.allocator, "[{s}, {s}]", .{ j, b });
+    return plzig.jsonText(try std.fmt.allocPrint(plzig.allocator, "[{s}, {s}]", .{ j, (try b.toJsonText()).text }));
 $$;
 SELECT tm_json('{"a": 1,  "a": 2}', '{"b": [1, 2.50],  "a": null}');
                  tm_json                 
@@ -230,7 +231,7 @@ SELECT tm_json_text('{"a": 1,  "a": 2}');
 (1 row)
 
 CREATE FUNCTION tm_badjson() RETURNS jsonb LANGUAGE plzig AS $$
-    return "{bad";
+    return plzig.jsonText("{bad");
 $$;
 SELECT tm_badjson();
 ERROR:  invalid input syntax for type json

@@ -90,6 +90,8 @@ typedef enum PlzigTypeKind
 	PLZIG_T_UUID,				/* 16 bytes, out of line */
 	PLZIG_T_OID,				/* Oid in val */
 	PLZIG_T_NUMERIC,			/* numeric_send wire format, out of line */
+	PLZIG_T_JSONB,				/* in: on-disk JsonbContainer; out: JSON text
+								 * through jsonb_in (little-endian hosts) */
 	PLZIG_T_IO					/* anything else: text I/O representation */
 } PlzigTypeKind;
 
@@ -135,7 +137,8 @@ typedef struct PlzigSlot
 #define PLZIG_KIND_UUID		16		/* 16 bytes, out of line */
 #define PLZIG_KIND_OID		17
 #define PLZIG_KIND_NUMERIC	18		/* wire format (numeric_send), out of line */
-#define PLZIG_KIND_MAX		18
+#define PLZIG_KIND_JSONB	19		/* column: on-disk layout; parameter: JSON text */
+#define PLZIG_KIND_MAX		19
 
 /* size of the out-of-line fixed-width values (interval, uuid) */
 #define PLZIG_FIXED16		16

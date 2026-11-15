@@ -239,7 +239,6 @@ plzig_fixed16_from_guest(PlzigTypeKind k, const char *bytes, uint32 len, const c
 	return (Datum) 0;
 }
 
-
 void
 plzig_numeric_check_len(uint32 len, const char *where)
 {

@@ -41,6 +41,8 @@ SELECT generate_source('{bool,int2,int4,int8,float4,float8,text,varchar,bpchar,b
                        '{a,b,c,d,e,f,g,h,i,j,k,l,m}', 'text', false, 'return null;');
 SELECT generate_source('{date,time,timetz,timestamp,timestamptz,interval,uuid,oid}',
                        '{a,b,c,d,e,f,g,h}', 'timestamptz', false, 'return null;');
+-- jsonb: read in place as an argument, JSON text as the result
+SELECT generate_source('{jsonb,numeric}', '{j,n}', 'jsonb', true, 'return null;');
 SELECT generate_source('{int4,int4,int4}', ARRAY[NULL, 'return', NULL], 'bytea', true, '');
 SELECT generate_source('{text}', '{x}', 'numeric', false, E'line 1\n}\nfn helper() void {\n// line 3');
 -- a body with a NUL-free but hostile text is still only the function body

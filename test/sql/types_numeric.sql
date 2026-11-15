@@ -62,12 +62,13 @@ SELECT count(*) FILTER (WHERE nm_i64(n) <> n::int8) AS i64_mismatches,
        count(*) FILTER (WHERE nm_f64(n) IS DISTINCT FROM n::float8) AS f64_mismatches
 FROM nm_vals WHERE n IS NOT NULL AND n = trunc(n) AND abs(n) < 9e18 AND abs(n) <> 'Infinity';
 -- random values: toF64 is correctly rounded, as numeric::float8 is
-SELECT count(*) AS n, count(*) FILTER (WHERE nm_f64(v) IS DISTINCT FROM v::float8) AS f64_mismatches
+SELECT count(*) > 1990 AS enough, count(*) FILTER (WHERE nm_f64(v) IS DISTINCT FROM v::float8) AS f64_mismatches
 FROM (SELECT (random() * 10 ^ (floor(random() * 600) - 300))::numeric(1000, 400) * (CASE WHEN random() < 0.5 THEN -1 ELSE 1 END) AS v
         FROM generate_series(1, 2000)) s
 WHERE v <> 0 AND abs(v) BETWEEN 1e-307 AND 1e308;
 SELECT count(*) FILTER (WHERE nm_f64(v) IS DISTINCT FROM v::float8) AS f64_mismatches_17_digits
-FROM (SELECT (random()::text || 'e' || (floor(random() * 600) - 300))::numeric AS v FROM generate_series(1, 2000)) s
+FROM (SELECT ('0.' || lpad(floor(random() * 1e17)::int8::text, 17, '0') || 'e' || (floor(random() * 600) - 300))::numeric AS v
+        FROM generate_series(1, 2000)) s
 WHERE v <> 0;
 
 -- conversions from i64 and f64, and parsing, built by the function
@@ -83,7 +84,7 @@ FROM unnest(ARRAY['0', '-0', '0.1', '1e20', '123456789012345678', '-1.5', '1e-5'
                   '7.152557373046875e-07', '1.7976931348623157e308', '5e-324', 'NaN', 'Infinity', '-Infinity']::float8[]) x;
 -- random doubles from random bit patterns, all magnitudes
 CREATE FUNCTION nm_bits_to_f64(b int8) RETURNS float8 STRICT LANGUAGE plzig AS $$ return @bitCast(b); $$;
-SELECT count(*) AS n, count(*) FILTER (WHERE nm_from_f64(x)::text <> x::numeric::text) AS f64_mismatches
+SELECT count(*) > 2900 AS enough, count(*) FILTER (WHERE nm_from_f64(x)::text <> x::numeric::text) AS f64_mismatches
 FROM (SELECT nm_bits_to_f64((floor(random() * 2147483648)::int8 << 32) | floor(random() * 4294967296)::int8) AS x
         FROM generate_series(1, 3000)) s
 WHERE x = x AND abs(x) <> 'Infinity';

@@ -21,10 +21,18 @@ BEGIN
     FOR r IN SELECT t, format_type(t, NULL) AS name,
                     'fz_id_' || regexp_replace(format_type(t, NULL), '[^a-z0-9]+', '_', 'g') AS fn
                FROM fz_types LOOP
-        EXECUTE format('CREATE FUNCTION %I(x %s) RETURNS %s LANGUAGE plzig AS $b$ return x; $b$',
-                       r.fn, r.name, r.name);
+        -- jsonb arrives in its on-disk layout and leaves as JSON text: the
+        -- guest's serialisation (plzig.Jsonb.toJsonText) is the identity
+        EXECUTE format('CREATE FUNCTION %I(x %s) RETURNS %s LANGUAGE plzig AS $b$ %s $b$',
+                       r.fn, r.name, r.name,
+                       CASE WHEN r.t = 'jsonb'::regtype THEN 'return try (x orelse return null).toJsonText();' ELSE 'return x;' END);
     END LOOP;
 END $$;
+
+-- the guest's jsonb serialisation as text: must equal jsonb_out's exactly
+CREATE FUNCTION fz_jsonb_text(x jsonb) RETURNS text STRICT LANGUAGE plzig AS $$
+    return (try x.toJsonText()).text;
+$$;
 
 -- the NULL pattern of eight arguments of different classes, as a bit mask
 CREATE FUNCTION fz_nullmask(a int, b text, c float8, d bytea, e numeric, f bool, g int8, h date)
@@ -40,6 +48,40 @@ RETURNS int LANGUAGE plzig AS $$
     if (h == null) m |= 128;
     return m;
 $$;
+
+-- a random jsonb document: nested objects and arrays (sometimes more than
+-- 32 children, so that offsets are stored), numbers of every on-disk form,
+-- strings with escapes and characters of every length, long and
+-- same-length keys, scalars at the root
+CREATE FUNCTION fz_rand_jsonb(depth int) RETURNS jsonb LANGUAGE plpgsql VOLATILE AS $$
+DECLARE
+    p float8 := random();
+    n int;
+BEGIN
+    IF depth <= 0 OR p < 0.35 THEN
+        RETURN CASE floor(random() * 9)::int
+            WHEN 0 THEN 'null'::jsonb
+            WHEN 1 THEN to_jsonb(random() < 0.5)
+            WHEN 2 THEN to_jsonb(fz_rand_text(CASE WHEN random() < 0.05 THEN 3000 ELSE 12 END))
+            WHEN 3 THEN to_jsonb(chr(1 + floor(random() * 31)::int) || '"\/' || chr(127))
+            WHEN 4 THEN to_jsonb((random() * 10 ^ floor(random() * 40 - 20))::numeric(60, 30))
+            WHEN 5 THEN to_jsonb(floor((random() - 0.5) * 1e15)::int8)
+            WHEN 6 THEN (CASE WHEN random() < 0.5 THEN '-' ELSE '' END || floor(random() * 1000) || 'e' || floor((random() - 0.5) * 2000))::jsonb
+            WHEN 7 THEN to_jsonb(('0.' || repeat('0', floor(random() * 80)::int) || floor(random() * 1e6))::numeric)
+            ELSE to_jsonb(random()) END;
+    END IF;
+    n := CASE WHEN random() < 0.1 THEN 30 + floor(random() * 40)::int ELSE floor(random() * 5)::int END;
+    IF p < 0.67 THEN
+        RETURN coalesce((SELECT jsonb_agg(fz_rand_jsonb(depth - 1)) FROM generate_series(1, n)), '[]'::jsonb);
+    END IF;
+    RETURN coalesce((SELECT jsonb_object_agg(CASE floor(random() * 4)::int
+                                                 WHEN 0 THEN fz_rand_text(6)
+                                                 WHEN 1 THEN lpad(g::text, 3, 'k')
+                                                 WHEN 2 THEN repeat(chr(97 + floor(random() * 3)::int), floor(random() * 300)::int)
+                                                 ELSE chr(97 + floor(random() * 26)::int) END,
+                                             fz_rand_jsonb(depth - 1))
+                       FROM generate_series(1, n) g), '{}'::jsonb);
+END $$;
 
 -- a random value of type t, as text (NULL sometimes), from random()
 CREATE FUNCTION fz_rand_text(maxlen int) RETURNS text LANGUAGE sql VOLATILE AS $$
@@ -88,11 +130,11 @@ BEGIN
     WHEN 'date'::regtype THEN
         RETURN (ARRAY['infinity', '-infinity', '4713-01-01 BC', '4714-11-24 BC', '5874897-12-31',
                       ('2000-01-01'::date + floor((random() - 0.5) * 2000000)::int)::text,
-                      ('2000-01-01'::date + floor((random() - 0.5) * 4290000000)::bigint::int)::text])[1 + floor(random() * 7)::int];
+                      ('4714-11-24 BC'::date + floor(random() * 2147483494)::int)::text])[1 + floor(random() * 7)::int];
     WHEN 'timestamp'::regtype, 'timestamptz'::regtype THEN
         RETURN (ARRAY['infinity', '-infinity', '4714-11-24 00:00:00 BC', '294276-12-31 23:59:59.999999',
                       '2016-12-31 23:59:60', ('2000-01-01'::timestamp + (random() - 0.5) * interval '500 years')::text,
-                      ('2000-01-01'::timestamp + (random() - 0.5) * interval '580000 years')::text])[1 + floor(random() * 7)::int];
+                      ('4714-11-24 00:00:00 BC'::timestamp + random() * interval '298000 years')::text])[1 + floor(random() * 7)::int];
     WHEN 'time'::regtype THEN
         RETURN (ARRAY['24:00:00', '00:00', ('00:00'::time + random() * interval '24 hours')::text])[1 + floor(random() * 3)::int];
     WHEN 'time with time zone'::regtype THEN
@@ -111,9 +153,11 @@ BEGIN
         RETURN CASE WHEN random() < 0.5
                THEN format('%s.%s.%s.%s/%s', floor(random() * 256), floor(random() * 256), floor(random() * 256), floor(random() * 256), 8 + floor(random() * 25))
                ELSE format('%s::%s/%s', to_hex(floor(random() * 65536)::int), to_hex(floor(random() * 65536)::int), 16 + floor(random() * 113)) END::inet::text;
-    WHEN 'json'::regtype, 'jsonb'::regtype THEN
+    WHEN 'json'::regtype THEN
         RETURN json_build_object('k', fz_rand_text(10), 'n', random(), 'a', json_build_array(1, NULL, true, fz_rand_text(5)),
                                  fz_rand_text(3), json_build_object('deep', fz_rand_text(20)))::text;
+    WHEN 'jsonb'::regtype THEN
+        RETURN fz_rand_jsonb(4)::text;
     WHEN 'integer[]'::regtype THEN
         SELECT array_agg(CASE WHEN random() < 0.1 THEN NULL ELSE floor(random() * 1000)::int END)::text INTO STRICT n_text
           FROM generate_series(0, floor(random() * 20)::int);

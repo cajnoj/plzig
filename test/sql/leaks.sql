@@ -31,6 +31,14 @@ CREATE FUNCTION lk_tz(x int) RETURNS bigint STRICT LANGUAGE plzig AS $$
     const t: plzig.TimestampTz = .{ .usecs = @as(i64, x) * 86_400_000_000 };
     return t.toLocal("Europe/Berlin").usecs - t.toLocal(null).usecs;
 $$;
+-- jsonb: the on-disk layout copied in, read in place, JSON text out (jsonb_in)
+CREATE FUNCTION lk_jsonb(x int) RETURNS jsonb STRICT LANGUAGE plzig AS $$
+    const doc: plzig.Jsonb = .{ .bytes = &.{ 1, 0, 0, 0x20, 1, 0, 0, 0x80, 0x0b, 0, 0, 0x10, 'a', 0, 0, 0, 0x20, 0, 0, 0, 0, 0x80, 1, 0 } }; // {"a": 1}
+    return if (x >= 0) try doc.toJsonText() else null;
+$$;
+CREATE FUNCTION lk_jsonb_arg(j jsonb) RETURNS int STRICT LANGUAGE plzig AS $$
+    return @intCast((try (try j.root()).object.get("k")).?.string.len);
+$$;
 CREATE FUNCTION lk_spi(x int) RETURNS bigint STRICT LANGUAGE plzig AS $$
     var buf: [16]u8 = undefined;
     const r = try plzig.spi.execute("SELECT count(*), max(t) FROM lk_t WHERE x <= $1::int",
@@ -75,7 +83,7 @@ BEGIN
 END $d$;
 
 -- warm up every shape (modules loaded, instances cached, plans prepared)
-SELECT lk_run(f, 200) FROM unnest(ARRAY['lk_scalar', 'lk_text', 'lk_numeric', 'lk_tz', 'lk_spi', 'lk_cursor', 'lk_prepared', 'lk_fail']) f;
+SELECT lk_run(f, 200) FROM unnest(ARRAY['lk_scalar', 'lk_text', 'lk_numeric', 'lk_tz', 'lk_jsonb', 'lk_spi', 'lk_cursor', 'lk_prepared', 'lk_fail']) f;
 SELECT lk_text(NULL), lk_text(41), lk_numeric(NULL), lk_numeric(41);
 
 SELECT lk_mem() AS m0 \gset
@@ -90,6 +98,15 @@ SELECT lk_mem() - :m0 AS growth_numeric;
 SELECT lk_mem() AS m0 \gset
 SELECT lk_run('lk_tz', 10000);
 SELECT lk_mem() - :m0 AS growth_tz;
+SELECT lk_mem() AS m0 \gset
+SELECT lk_run('lk_jsonb', 10000);
+SELECT lk_mem() - :m0 AS growth_jsonb;
+-- a jsonb argument that is compressed and stored out of line, read 2000 times
+CREATE TABLE lk_jdoc AS SELECT jsonb_build_object('k', repeat('x', 100000), 'pad', (SELECT jsonb_agg(g) FROM generate_series(1, 5000) g)) AS j;
+SELECT sum(lk_jsonb_arg(j)) FROM lk_jdoc;
+SELECT lk_mem() AS m0 \gset
+SELECT sum(lk_jsonb_arg(j)) FROM lk_jdoc, generate_series(1, 2000);
+SELECT lk_mem() - :m0 AS growth_jsonb_arg;
 SELECT lk_mem() AS m0 \gset
 SELECT lk_run('lk_spi', 10000);
 SELECT lk_mem() - :m0 AS growth_spi;
@@ -140,10 +157,11 @@ RESET plzig.instance_cache_max_memory;
 -- the whole backend does not grow either (PL/Zig memory hangs below
 -- TopMemoryContext and the per-query contexts)
 SELECT sum(total_bytes) AS t0 FROM pg_backend_memory_contexts \gset
-SELECT lk_run(f, 3000) FROM unnest(ARRAY['lk_scalar', 'lk_text', 'lk_numeric', 'lk_tz', 'lk_spi', 'lk_cursor', 'lk_prepared', 'lk_fail']) f;
+SELECT lk_run(f, 3000) FROM unnest(ARRAY['lk_scalar', 'lk_text', 'lk_numeric', 'lk_tz', 'lk_jsonb', 'lk_spi', 'lk_cursor', 'lk_prepared', 'lk_fail']) f;
 SELECT sum(total_bytes) - :t0 < 256 * 1024 AS backend_flat FROM pg_backend_memory_contexts;
 
 DROP TABLE lk_t CASCADE;
+DROP TABLE lk_jdoc;
 DROP FUNCTION lk_text(lk_num);
 DROP DOMAIN lk_num;
 DROP TABLE lk_big_t;

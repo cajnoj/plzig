@@ -3,7 +3,7 @@
 # docker/Dockerfile.fuzz (targets prebuilt in /opt/plzig-fuzz by
 # fuzz/build.sh).  Called by docker/run-fuzz.sh.
 #
-#   fuzz/run-native.sh <validator|loader> <seconds> <outdir> [<previous corpus dir>]
+#   fuzz/run-native.sh <validator|loader|jsonb> <seconds> <outdir> [<previous corpus dir>]
 #
 # Writes to <outdir>: corpus/ (the seed corpus, plus a previous corpus if
 # given, plus everything new), artifacts/ (crash-*, leak-*, timeout-*,
@@ -25,6 +25,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 case $target in
     validator) maxlen=16384; seeds=$here/validator/corpus ;;
     loader) maxlen=262144; seeds=$here/loader/corpus ;;   # findings/ are replayed by fuzz/build.sh
+    jsonb) maxlen=65536; seeds=$here/jsonb/corpus ;;
     *) echo "unknown native target $target" >&2; exit 2 ;;
 esac
 mkdir -p "$out/corpus" "$out/artifacts"
@@ -53,7 +54,7 @@ elapsed=$(( $(date +%s) - start ))
 execs=$(grep -aoE '^stat::number_of_executed_units: [0-9]+' "$out/fuzz.log" | awk '{ s += $2 } END { print s + 0 }')
 [ "$execs" = 0 ] && execs=$(grep -aoE '^#[0-9]+' "$out/fuzz.log" | tail -1 | tr -d '#')
 cov=$(grep -aoE 'cov: [0-9]+' "$out/fuzz.log" | tail -1 | awk '{ print $2 }')
-[ "$target" = validator ] && cov=""   # no PC table for the Zig target (fuzz/README.md)
+[ "$target" != loader ] && cov=""   # no PC table for the Zig targets (fuzz/README.md)
 ft=$(grep -aoE 'ft: [0-9]+' "$out/fuzz.log" | tail -1 | awk '{ print $2 }')
 counters=$(sed -n 's/.*(\([0-9]*\) inline 8-bit counters).*/\1/p' "$out/fuzz.log" | head -1)
 ncorp=$(find "$out/corpus" -type f | wc -l)

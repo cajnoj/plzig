@@ -66,6 +66,13 @@ plzig_type_kind(Oid typid)
 			return PLZIG_T_OID;
 		case NUMERICOID:
 			return PLZIG_T_NUMERIC;
+		case JSONBOID:
+#ifndef WORDS_BIGENDIAN
+			return PLZIG_T_JSONB;
+#else
+			/* the on-disk layout is in host byte order; the guest reads little endian */
+			return PLZIG_T_IO;
+#endif
 		default:
 			return PLZIG_T_IO;
 	}
@@ -113,13 +120,15 @@ plzig_zig_type_name(PlzigTypeKind kind, bool for_result)
 			return "plzig.Oid";
 		case PLZIG_T_NUMERIC:
 			return "plzig.Numeric";
+		case PLZIG_T_JSONB:
+			/* read in place as an argument; JSON text (jsonb_in) as a result */
+			return for_result ? "plzig.JsonText" : "plzig.Jsonb";
 		case PLZIG_T_TEXT:
 		case PLZIG_T_TEXTIO:
 		case PLZIG_T_BYTEA:
 		case PLZIG_T_IO:
 			return "[]const u8";
 	}
-	(void) for_result;
 	return NULL;				/* keep compiler quiet */
 }
 
@@ -135,7 +144,8 @@ plzig_type_info_init(PlzigTypeInfo *ti, Oid typid, bool for_result,
 	ti->typid = typid;
 	ti->kind = plzig_type_kind(typid);
 
-	if (for_result && (ti->kind == PLZIG_T_IO || ti->kind == PLZIG_T_TEXTIO))
+	if (for_result && (ti->kind == PLZIG_T_IO || ti->kind == PLZIG_T_TEXTIO ||
+					   ti->kind == PLZIG_T_JSONB))
 	{
 		Oid			infunc;
 
@@ -197,6 +207,8 @@ plzig_value_kind(Oid typid)
 			return PLZIG_KIND_OID;
 		case PLZIG_T_NUMERIC:
 			return PLZIG_KIND_NUMERIC;
+		case PLZIG_T_JSONB:
+			return PLZIG_KIND_JSONB;
 		case PLZIG_T_VOID:
 		case PLZIG_T_IO:
 			break;
@@ -219,6 +231,7 @@ plzig_kind_is_bytes(uint16 kind)
 		case PLZIG_KIND_INTERVAL:
 		case PLZIG_KIND_UUID:
 		case PLZIG_KIND_NUMERIC:
+		case PLZIG_KIND_JSONB:
 			return true;
 		default:
 			return false;
@@ -470,6 +483,8 @@ plzig_param_kind_oid(uint32 kind)
 			return OIDOID;
 		case PLZIG_KIND_NUMERIC:
 			return NUMERICOID;
+		case PLZIG_KIND_JSONB:
+			return JSONBOID;
 		default:
 			return InvalidOid;
 	}
@@ -515,6 +530,8 @@ plzig_param_oid_kind(Oid typid)
 			return PLZIG_KIND_OID;
 		case NUMERICOID:
 			return PLZIG_KIND_NUMERIC;
+		case JSONBOID:
+			return PLZIG_KIND_JSONB;
 		default:
 			return PLZIG_KIND_NULL;
 	}

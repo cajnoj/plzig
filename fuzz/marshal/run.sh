@@ -69,6 +69,16 @@ BEGIN
     END LOOP;
     RAISE NOTICE 'VALUES %', total;
 END $$;
+-- 1a. the guest's jsonb serialisation is jsonb_out's text, character for character
+DO $$
+DECLARE v jsonb; bad text;
+BEGIN
+    SELECT j::text INTO bad FROM (SELECT fz_rand_jsonb(5) AS j FROM generate_series(1, 60)) s
+     WHERE fz_jsonb_text(j) IS DISTINCT FROM j::text LIMIT 1;
+    IF bad IS NOT NULL THEN
+        RAISE NOTICE 'MISMATCH jsonb text %', left(bad, 300);
+    END IF;
+END $$;
 -- 1b. stored values: compressed and out of line
 DROP TABLE IF EXISTS fz_store;
 CREATE TABLE fz_store (id int, t text, tc text, b bytea, j jsonb, a text[]);
@@ -81,6 +91,7 @@ SELECT i, fz_rand_text(3000 + i * 50), repeat(fz_rand_text(20), 500),
 SELECT 'STORED ' || count(*) || ' BAD ' ||
        count(*) FILTER (WHERE fz_id_text(t) IS DISTINCT FROM t OR fz_id_text(tc) IS DISTINCT FROM tc
                            OR fz_id_bytea(b) IS DISTINCT FROM b OR fz_id_jsonb(j) IS DISTINCT FROM j
+                           OR fz_jsonb_text(j) IS DISTINCT FROM j::text
                            OR fz_id_text_(a) IS DISTINCT FROM a)
   FROM fz_store;
 -- 2. NULL patterns

@@ -1243,6 +1243,480 @@ const Big = struct {
     }
 };
 
+// ---------------------------------------------------------------------------
+// jsonb (doc/abi.md, "jsonb").
+//
+// A jsonb argument or column arrives in PostgreSQL's on-disk layout (the
+// JsonbContainer of the detoasted value, as jsonb_util.c reads it), copied
+// once into guest memory, and is read in place: nothing is parsed or
+// converted up front.  Every read is bounds-checked against the value, so
+// malformed bytes give error.InvalidJsonb, never a read outside the value.
+// Results and SPI parameters of type jsonb are JSON text (`JsonText`), which
+// the host parses with jsonb_in: a function cannot store a binary jsonb.
+
+/// JSON text for a `jsonb` result or a `.jsonb` prepared-statement
+/// parameter; the host parses it with jsonb_in (so invalid JSON is an SQL
+/// error, and the stored value is whatever jsonb_in makes of it).
+pub const JsonText = struct {
+    text: []const u8,
+};
+
+/// `JsonText` from a byte slice: `return plzig.jsonText("{\"a\": 1}");`
+pub fn jsonText(text: []const u8) JsonText {
+    return .{ .text = text };
+}
+
+pub const JsonbError = error{InvalidJsonb};
+
+/// A jsonb argument or column value: the root container, read in place.
+/// Valid as long as the bytes are (an argument: the call; a row value:
+/// until the next row is fetched).
+pub const Jsonb = struct {
+    bytes: []const u8,
+
+    /// The root value: an object, an array, or a scalar (a jsonb holding a
+    /// bare string, number, boolean or null).
+    pub fn root(self: Jsonb) JsonbError!JsonValue {
+        const c = try Container.open(self.bytes, true);
+        if (c.scalar) return c.child(0);
+        return c.value();
+    }
+
+    /// The JSON text of the whole value, formatted exactly as jsonb_out
+    /// does (", " and ": " separators), in the per-call arena; returning it
+    /// from a function with a jsonb result stores the same value.
+    pub fn toJsonText(self: Jsonb) (JsonbError || error{OutOfMemory})!JsonText {
+        return (try self.root()).toJsonText();
+    }
+
+    /// The JSON text, allocated with `gpa`.
+    pub fn toJsonAlloc(self: Jsonb, gpa: s.mem.Allocator) (JsonbError || error{OutOfMemory})![]u8 {
+        return (try self.root()).toJsonAlloc(gpa);
+    }
+};
+
+/// One JSON value inside a jsonb.
+pub const JsonValue = union(enum) {
+    null,
+    bool: bool,
+    /// the string's bytes (database encoding, no escapes)
+    string: []const u8,
+    number: JsonNumber,
+    array: JsonArray,
+    object: JsonObject,
+
+    /// This value as JSON text (jsonb_out's format), in the per-call arena.
+    pub fn toJsonText(self: JsonValue) (JsonbError || error{OutOfMemory})!JsonText {
+        return .{ .text = try self.toJsonAlloc(allocator) };
+    }
+
+    /// This value as JSON text, allocated with `gpa`.
+    pub fn toJsonAlloc(self: JsonValue, gpa: s.mem.Allocator) (JsonbError || error{OutOfMemory})![]u8 {
+        var out: s.ArrayList(u8) = .empty;
+        errdefer out.deinit(gpa);
+        try writeJsonValue(gpa, &out, self);
+        return out.toOwnedSlice(gpa);
+    }
+};
+
+/// A number inside a jsonb: PostgreSQL's on-disk numeric (a varlena with a
+/// short or long numeric header, or NaN/±Infinity), decoded on use.
+pub const JsonNumber = struct {
+    raw: []const u8,
+
+    /// The number as a `Numeric` (wire format), in the per-call arena.
+    pub fn numeric(self: JsonNumber) (JsonbError || error{OutOfMemory})!Numeric {
+        return self.numericAlloc(allocator);
+    }
+
+    /// The number as a `Numeric`, allocated with `gpa`.
+    pub fn numericAlloc(self: JsonNumber, gpa: s.mem.Allocator) (JsonbError || error{OutOfMemory})!Numeric {
+        const d = try self.decode();
+        const out = try gpa.alloc(u8, 8 + 2 * d.ndigits);
+        d.toWire(out);
+        return .{ .wire = out };
+    }
+
+    /// The number as an i64 (see `Numeric.toI64`).
+    pub fn toI64(self: JsonNumber) (JsonbError || Numeric.ToIntError || error{OutOfMemory})!i64 {
+        var buf: [256]u8 = undefined;
+        var fba = s.heap.FixedBufferAllocator.init(&buf);
+        const n = self.numericAlloc(fba.allocator()) catch |err| switch (err) {
+            error.OutOfMemory => try self.numeric(),
+            else => |e| return e,
+        };
+        return n.toI64();
+    }
+
+    /// The number as an f64 (see `Numeric.toF64`).
+    pub fn toF64(self: JsonNumber) (JsonbError || Numeric.ToFloatError || error{OutOfMemory})!f64 {
+        var buf: [256]u8 = undefined;
+        var fba = s.heap.FixedBufferAllocator.init(&buf);
+        const n = self.numericAlloc(fba.allocator()) catch |err| switch (err) {
+            error.OutOfMemory => try self.numeric(),
+            else => |e| return e,
+        };
+        return n.toF64();
+    }
+
+    const Decoded = struct {
+        sign: u16,
+        weight: i16,
+        dscale: u16,
+        ndigits: usize,
+        digits: []const u8, // little-endian i16, as stored
+
+        fn toWire(d: Decoded, out: []u8) void {
+            Numeric.put16(out, 0, @intCast(d.ndigits));
+            Numeric.put16(out, 2, @bitCast(d.weight));
+            Numeric.put16(out, 4, d.sign);
+            Numeric.put16(out, 6, d.dscale);
+            for (0..d.ndigits) |i| {
+                Numeric.put16(out, 8 + 2 * i, s.mem.readInt(u16, d.digits[2 * i ..][0..2], .little));
+            }
+        }
+    };
+
+    /// numeric.c's on-disk format: varlena header (1 or 4 bytes), then
+    /// n_header (u16): NaN/±Infinity, a short header (sign, dscale,
+    /// weight in 16 bits), or a long one (sign + dscale, then i16 weight),
+    /// then the base-10000 digits (i16, host byte order = little endian)
+    fn decode(self: JsonNumber) JsonbError!Decoded {
+        const v = try varlenaData(self.raw);
+        if (v.len < 2) return error.InvalidJsonb;
+        const h = s.mem.readInt(u16, v[0..2], .little);
+        var d: Decoded = undefined;
+        var digits: []const u8 = undefined;
+        if (h & 0x8000 != 0) {
+            if (h & 0xC000 == 0xC000) {
+                // special: the whole header word is the value
+                if (h != Numeric.sign_nan and h != Numeric.sign_pinf and h != Numeric.sign_ninf) return error.InvalidJsonb;
+                return .{ .sign = h, .weight = 0, .dscale = 0, .ndigits = 0, .digits = &.{} };
+            }
+            // short: 0x8000 | sign 0x2000 | dscale (6 bits) << 7 | weight sign 0x40 | weight (6 bits)
+            d.sign = if (h & 0x2000 != 0) Numeric.sign_neg else Numeric.sign_pos;
+            d.dscale = (h & 0x1F80) >> 7;
+            const w: u16 = if (h & 0x0040 != 0) (h & 0x003F) | 0xFFC0 else h & 0x003F;
+            d.weight = @bitCast(w);
+            digits = v[2..];
+        } else {
+            if (v.len < 4) return error.InvalidJsonb;
+            d.sign = h & 0xC000; // 0x0000 or 0x4000 (0x8000/0xC000 are short/special)
+            d.dscale = h & 0x3FFF;
+            d.weight = s.mem.readInt(i16, v[2..4], .little);
+            digits = v[4..];
+        }
+        if (digits.len % 2 != 0) return error.InvalidJsonb;
+        d.ndigits = digits.len / 2;
+        if (d.ndigits > Numeric.max_ndigits) return error.InvalidJsonb;
+        for (0..d.ndigits) |i| {
+            if (s.mem.readInt(u16, digits[2 * i ..][0..2], .little) >= 10000) return error.InvalidJsonb;
+        }
+        d.digits = digits;
+        return d;
+    }
+};
+
+/// The whole of a varlena that is stored inline (1-byte or 4-byte header,
+/// uncompressed; anything else does not occur inside a jsonb): `raw` cut to
+/// the varlena's own size, and the header size
+fn varlenaSpan(raw: []const u8) JsonbError!struct { []const u8, usize } {
+    if (raw.len < 1) return error.InvalidJsonb;
+    const b0 = raw[0];
+    if (b0 & 0x01 != 0) {
+        // VARATT_IS_1B (little endian); 0x01 alone is an external pointer
+        if (b0 == 0x01) return error.InvalidJsonb;
+        const size: usize = b0 >> 1;
+        if (size < 1 or size > raw.len) return error.InvalidJsonb;
+        return .{ raw[0..size], 1 };
+    }
+    if (raw.len < 4) return error.InvalidJsonb;
+    const h = s.mem.readInt(u32, raw[0..4], .little);
+    if (h & 0x03 != 0) return error.InvalidJsonb; // compressed (4B_C)
+    const size: usize = h >> 2;
+    if (size < 4 or size > raw.len) return error.InvalidJsonb;
+    return .{ raw[0..size], 4 };
+}
+
+/// The payload of an inline varlena (see varlenaSpan)
+fn varlenaData(raw: []const u8) JsonbError![]const u8 {
+    const v = try varlenaSpan(raw);
+    return v[0][v[1]..];
+}
+
+/// A JSON array inside a jsonb.
+pub const JsonArray = struct {
+    c: Container,
+
+    /// Number of elements.
+    pub fn len(self: JsonArray) usize {
+        return self.c.count;
+    }
+
+    /// Element `i`, or null past the end.
+    pub fn get(self: JsonArray, i: usize) JsonbError!?JsonValue {
+        if (i >= self.c.count) return null;
+        return try self.c.child(i);
+    }
+
+    pub fn iterator(self: JsonArray) Iterator {
+        return .{ .c = self.c };
+    }
+
+    pub const Iterator = struct {
+        c: Container,
+        i: usize = 0,
+
+        /// The next element, or null at the end.
+        pub fn next(self: *Iterator) JsonbError!?JsonValue {
+            if (self.i >= self.c.count) return null;
+            defer self.i += 1;
+            return try self.c.child(self.i);
+        }
+    };
+};
+
+/// A JSON object inside a jsonb.  Keys are unique and sorted as jsonb sorts
+/// them (by length, then bytes), which is also the iteration order.
+pub const JsonObject = struct {
+    c: Container,
+
+    pub const Entry = struct { key: []const u8, value: JsonValue };
+
+    /// Number of key/value pairs.
+    pub fn len(self: JsonObject) usize {
+        return self.c.count;
+    }
+
+    /// The value of `key`, or null if there is none: a binary search over
+    /// the keys, exactly as jsonb_util.c's getKeyJsonValueFromContainer.
+    pub fn get(self: JsonObject, key: []const u8) JsonbError!?JsonValue {
+        var lo: usize = 0;
+        var hi: usize = self.c.count;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const k = try self.c.keyAt(mid);
+            switch (lengthCompare(k, key)) {
+                .eq => return try self.c.child(mid + self.c.count),
+                .lt => lo = mid + 1,
+                .gt => hi = mid,
+            }
+        }
+        return null;
+    }
+
+    /// Pair `i` in storage order (0 <= i < len()).
+    pub fn entry(self: JsonObject, i: usize) JsonbError!?Entry {
+        if (i >= self.c.count) return null;
+        return .{ .key = try self.c.keyAt(i), .value = try self.c.child(i + self.c.count) };
+    }
+
+    pub fn iterator(self: JsonObject) Iterator {
+        return .{ .o = self };
+    }
+
+    pub const Iterator = struct {
+        o: JsonObject,
+        i: usize = 0,
+
+        /// The next key/value pair, or null at the end.
+        pub fn next(self: *Iterator) JsonbError!?Entry {
+            const e = try self.o.entry(self.i);
+            if (e != null) self.i += 1;
+            return e;
+        }
+    };
+};
+
+/// lengthCompareJsonbStringValue: shorter first, then memcmp
+fn lengthCompare(a: []const u8, b: []const u8) s.math.Order {
+    if (a.len != b.len) return if (a.len > b.len) .gt else .lt;
+    return s.mem.order(u8, a, b);
+}
+
+/// A JsonbContainer: u32 header (count | flags), then the JEntries (one per
+/// element, or keys then values for an object), then the children's data.
+const Container = struct {
+    data: []const u8,
+    count: usize,
+    object: bool,
+    scalar: bool,
+    base: usize, // offset of the data area in `data`
+
+    const JB_CMASK: u32 = 0x0FFFFFFF;
+    const JB_FSCALAR: u32 = 0x10000000;
+    const JB_FOBJECT: u32 = 0x20000000;
+    const JB_FARRAY: u32 = 0x40000000;
+    const JENTRY_OFFLENMASK: u32 = 0x0FFFFFFF;
+    const JENTRY_TYPEMASK: u32 = 0x70000000;
+    const JENTRY_HAS_OFF: u32 = 0x80000000;
+    const T_STRING: u32 = 0x00000000;
+    const T_NUMERIC: u32 = 0x10000000;
+    const T_FALSE: u32 = 0x20000000;
+    const T_TRUE: u32 = 0x30000000;
+    const T_NULL: u32 = 0x40000000;
+    const T_CONTAINER: u32 = 0x50000000;
+
+    fn open(data: []const u8, is_root: bool) JsonbError!Container {
+        if (data.len < 4) return error.InvalidJsonb;
+        const header = s.mem.readInt(u32, data[0..4], .little);
+        const count: usize = header & JB_CMASK;
+        const flags = header & ~JB_CMASK;
+        const object = flags == JB_FOBJECT;
+        const scalar = flags == JB_FARRAY | JB_FSCALAR;
+        if (!object and !scalar and flags != JB_FARRAY) return error.InvalidJsonb;
+        // a scalar is a one-element array, and only ever the root
+        if (scalar and (count != 1 or !is_root)) return error.InvalidJsonb;
+        const nentries: u64 = if (object) 2 * @as(u64, count) else count;
+        const base: u64 = 4 + 4 * nentries;
+        if (base > data.len) return error.InvalidJsonb;
+        return .{ .data = data, .count = count, .object = object, .scalar = scalar, .base = @intCast(base) };
+    }
+
+    fn value(self: Container) JsonValue {
+        return if (self.object) .{ .object = .{ .c = self } } else .{ .array = .{ .c = self } };
+    }
+
+    fn jentry(self: Container, i: usize) u32 {
+        return s.mem.readInt(u32, self.data[4 + 4 * i ..][0..4], .little);
+    }
+
+    /// getJsonbOffset: lengths of the preceding children back to the
+    /// nearest one that stores its end offset (every JB_OFFSET_STRIDE-th)
+    fn offsetOf(self: Container, i: usize) u64 {
+        var off: u64 = 0;
+        var k = i;
+        while (k > 0) {
+            k -= 1;
+            const je = self.jentry(k);
+            off += je & JENTRY_OFFLENMASK;
+            if (je & JENTRY_HAS_OFF != 0) break;
+        }
+        return off;
+    }
+
+    /// [start, end) of child i in the data area, checked against the value
+    fn span(self: Container, i: usize) JsonbError!struct { u64, u64 } {
+        const je = self.jentry(i);
+        const off = self.offsetOf(i);
+        const end: u64 = if (je & JENTRY_HAS_OFF != 0) je & JENTRY_OFFLENMASK else off + (je & JENTRY_OFFLENMASK);
+        if (end < off or self.base + end > self.data.len) return error.InvalidJsonb;
+        return .{ off, end };
+    }
+
+    fn keyAt(self: Container, i: usize) JsonbError![]const u8 {
+        if (self.jentry(i) & JENTRY_TYPEMASK != T_STRING) return error.InvalidJsonb;
+        const sp = try self.span(i);
+        return self.data[self.base + @as(usize, @intCast(sp[0])) .. self.base + @as(usize, @intCast(sp[1]))];
+    }
+
+    /// fillJsonbValue: child i (an element, a key or a value)
+    fn child(self: Container, i: usize) JsonbError!JsonValue {
+        const nentries: usize = if (self.object) 2 * self.count else self.count;
+        if (i >= nentries) return error.InvalidJsonb;
+        const je = self.jentry(i);
+        const sp = try self.span(i);
+        const off: usize = @intCast(sp[0]);
+        const end: usize = @intCast(sp[1]);
+        switch (je & JENTRY_TYPEMASK) {
+            T_STRING => return .{ .string = self.data[self.base + off .. self.base + end] },
+            T_NUMERIC, T_CONTAINER => {
+                // numerics and containers start at a 4-byte boundary (INTALIGN)
+                const start = (off + 3) & ~@as(usize, 3);
+                if (start > end) return error.InvalidJsonb;
+                const bytes = self.data[self.base + start .. self.base + end];
+                if (je & JENTRY_TYPEMASK == T_NUMERIC) {
+                    // the varlena's own size bounds the number
+                    return .{ .number = .{ .raw = (try varlenaSpan(bytes))[0] } };
+                }
+                return (try Container.open(bytes, false)).value();
+            },
+            T_FALSE => return .{ .bool = false },
+            T_TRUE => return .{ .bool = true },
+            T_NULL => return .null,
+            else => return error.InvalidJsonb,
+        }
+    }
+};
+
+/// jsonb_out (JsonbToCStringWorker without indentation), iteratively: an
+/// explicit stack in `gpa`, so nesting depth never meets the guest stack
+fn writeJsonValue(gpa: s.mem.Allocator, out: *s.ArrayList(u8), root: JsonValue) (JsonbError || error{OutOfMemory})!void {
+    const Frame = struct { c: Container, i: usize };
+    var stack: s.ArrayList(Frame) = .empty;
+    defer stack.deinit(gpa);
+    var v = root;
+    while (true) {
+        // write v; containers are opened and their children visited below
+        switch (v) {
+            .null => try out.appendSlice(gpa, "null"),
+            .bool => |b| try out.appendSlice(gpa, if (b) "true" else "false"),
+            .string => |str| try writeJsonString(gpa, out, str),
+            .number => |n| try writeJsonNumber(gpa, out, n),
+            .array => |a| {
+                try out.append(gpa, '[');
+                try stack.append(gpa, .{ .c = a.c, .i = 0 });
+            },
+            .object => |o| {
+                try out.append(gpa, '{');
+                try stack.append(gpa, .{ .c = o.c, .i = 0 });
+            },
+        }
+        // find the next value to write, closing finished containers
+        while (true) {
+            if (stack.items.len == 0) return;
+            const top = &stack.items[stack.items.len - 1];
+            if (top.i < top.c.count) {
+                if (top.i > 0) try out.appendSlice(gpa, ", ");
+                if (top.c.object) {
+                    try writeJsonString(gpa, out, try top.c.keyAt(top.i));
+                    try out.appendSlice(gpa, ": ");
+                    v = try top.c.child(top.i + top.c.count);
+                } else v = try top.c.child(top.i);
+                top.i += 1;
+                break;
+            }
+            try out.append(gpa, if (top.c.object) '}' else ']');
+            _ = stack.pop();
+        }
+    }
+}
+
+/// escape_json
+fn writeJsonString(gpa: s.mem.Allocator, out: *s.ArrayList(u8), str: []const u8) error{OutOfMemory}!void {
+    try out.append(gpa, '"');
+    for (str) |c| {
+        switch (c) {
+            0x08 => try out.appendSlice(gpa, "\\b"),
+            0x0c => try out.appendSlice(gpa, "\\f"),
+            '\n' => try out.appendSlice(gpa, "\\n"),
+            '\r' => try out.appendSlice(gpa, "\\r"),
+            '\t' => try out.appendSlice(gpa, "\\t"),
+            '"' => try out.appendSlice(gpa, "\\\""),
+            '\\' => try out.appendSlice(gpa, "\\\\"),
+            else => if (c < 0x20) {
+                const hex = "0123456789abcdef";
+                try out.appendSlice(gpa, &[6]u8{ '\\', 'u', '0', '0', hex[c >> 4], hex[c & 15] });
+            } else try out.append(gpa, c),
+        }
+    }
+    try out.append(gpa, '"');
+}
+
+/// numeric_out of a jsonb number
+fn writeJsonNumber(gpa: s.mem.Allocator, out: *s.ArrayList(u8), n: JsonNumber) (JsonbError || error{OutOfMemory})!void {
+    const d = try n.decode();
+    var buf: [512]u8 = undefined;
+    const wire_len = 8 + 2 * d.ndigits;
+    const wire = if (wire_len <= buf.len) buf[0..wire_len] else try gpa.alloc(u8, wire_len);
+    defer if (wire_len > buf.len) gpa.free(wire);
+    d.toWire(wire);
+    const num: Numeric = .{ .wire = wire };
+    const dst = try out.addManyAsSlice(gpa, num.textLen());
+    var b: Numeric.BufSink = .{ .buf = dst };
+    num.emit(&b) catch unreachable;
+}
+
 fn isFixed16(comptime T: type) bool {
     return T == Interval or T == Uuid;
 }
@@ -1474,6 +1948,8 @@ pub const Kind = enum(u16) {
     uuid = 16,
     oid = 17,
     numeric = 18,
+    /// the value's on-disk layout (plzig.Jsonb); as a parameter: JSON text
+    jsonb = 19,
     _,
 };
 
@@ -1496,6 +1972,8 @@ pub const Type = enum(u32) {
     uuid = 16,
     oid = 17,
     numeric = 18,
+    /// the value is JSON text (plzig.JsonText), parsed by jsonb_in
+    jsonb = 19,
     /// other values are rejected by the host
     _,
 };
@@ -1534,7 +2012,7 @@ pub const Row = struct {
     /// Value of column `col` (0-based) as `T`: `bool`, `i16`, `i32`, `i64`,
     /// `f32`, `f64` (the column must be exactly boolean, smallint, integer,
     /// bigint, real, double precision), `plzig.Date`, `Time`, `TimeTz`,
-    /// `Timestamp`, `TimestampTz`, `Interval`, `Uuid`, `Oid`, `Numeric` (exactly that
+    /// `Timestamp`, `TimestampTz`, `Interval`, `Uuid`, `Oid`, `Numeric`, `Jsonb` (exactly that
     /// SQL type), or `[]const u8` (text-like, bytea, or the text
     /// representation of any type without a native mapping); `?T` accepts
     /// SQL NULL.
@@ -1577,6 +2055,7 @@ fn checkKind(comptime T: type, k: u16) error{TypeMismatch}!void {
         Uuid => k == @intFromEnum(Kind.uuid),
         Oid => k == @intFromEnum(Kind.oid),
         Numeric => k == @intFromEnum(Kind.numeric),
+        Jsonb => k == @intFromEnum(Kind.jsonb),
         else => @compileError("plzig: unsupported column type " ++ @typeName(T) ++
             " (use bool, i16, i32, i64, f32, f64, []const u8 or a plzig type such as plzig.Date, or an optional of one)"),
     };
@@ -1606,6 +2085,11 @@ fn decodeValue(comptime T: type, v: Value) T {
         if (v.len == 0) return Numeric.zero;
         const p: [*]const u8 = @ptrFromInt(@as(usize, @intCast(v.val)));
         return .{ .wire = p[0..v.len] };
+    }
+    if (T == Jsonb) {
+        if (v.len == 0) return .{ .bytes = &.{} };
+        const p: [*]const u8 = @ptrFromInt(@as(usize, @intCast(v.val)));
+        return .{ .bytes = p[0..v.len] };
     }
     if (comptime isFixed16(T)) {
         if (v.len != 16) raiseMsg("plzig: invalid fixed-width column value");
@@ -1746,8 +2230,8 @@ pub const Plan = struct {
     /// match the declared parameter types: bool, i16, i32, i64, f32, f64,
     /// a byte slice or string literal (text), `plzig.bytea(...)` (bytea),
     /// `plzig.Date`, `Time`, `TimeTz`, `Timestamp`, `TimestampTz`,
-    /// `Interval`, `Uuid`, `Oid`, `Numeric`, an optional of one of these,
-    /// or `null`.
+    /// `Interval`, `Uuid`, `Oid`, `Numeric`, `JsonText` (jsonb), an
+    /// optional of one of these, or `null`.
     pub fn execute(self: Plan, args: anytype) error{OutOfMemory}!Result {
         var vals: [paramCount(@TypeOf(args))]Value = undefined;
         var fixed: [paramCount(@TypeOf(args))][16]u8 align(8) = undefined;
@@ -1817,6 +2301,7 @@ fn paramKind(comptime T: type) u16 {
     if (T == Uuid) return @intFromEnum(Type.uuid);
     if (T == Oid) return @intFromEnum(Type.oid);
     if (T == Numeric) return @intFromEnum(Type.numeric);
+    if (T == JsonText) return @intFromEnum(Type.jsonb);
     if (comptime isBytes(T)) return @intFromEnum(Type.text);
     if (T == comptime_int or T == comptime_float)
         @compileError("plzig: give numeric parameter literals a type, e.g. @as(i32, 5)");
@@ -1840,6 +2325,7 @@ fn encodeParam(v: anytype, fixed: *[16]u8) Value {
     if (T == TimeTz) return .{ .val = @bitCast(v.usecs), .len = @bitCast(v.zone), .kind = k, .is_null = 0 };
     if (T == Oid) return .{ .val = v.value, .len = 0, .kind = k, .is_null = 0 };
     if (T == Numeric) return .{ .val = @intFromPtr(v.wire.ptr), .len = hostLen(v.wire), .kind = k, .is_null = 0 };
+    if (T == JsonText) return .{ .val = @intFromPtr(v.text.ptr), .len = hostLen(v.text), .kind = k, .is_null = 0 };
     if (comptime isFixed16(T)) {
         @memcpy(fixed, s.mem.asBytes(&v));
         return .{ .val = @intFromPtr(fixed), .len = 16, .kind = k, .is_null = 0 };
