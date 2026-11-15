@@ -79,7 +79,8 @@ and how it is tested.
 * `CREATE TRUSTED LANGUAGE plzig ...; REVOKE USAGE ON LANGUAGE plzig FROM
   PUBLIC;` (`sql/plzig--1.0.sql`). Without `USAGE` a role can create no
   function and run no `DO` block. The extension itself requires a superuser
-  to install (`superuser = true`, `trusted = false` in `plzig.control`).
+  to install (`superuser = true`, `trusted = false` in `plzig.control`,
+  generated from `plzig.control.in`).
 * `plzig_sandbox_status()`, `plzig_cache_clear()` and `plzig_check_all()`
   have `EXECUTE` revoked from `PUBLIC`. `plzig_check_all()` compiles every
   PL/Zig function of the database through the same path as the validator

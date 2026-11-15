@@ -9,6 +9,8 @@ pass() { echo "  ok   - $1"; }
 fail() { echo "  FAIL - $1"; fails=$((fails + 1)); }
 
 psqlq() { psql -X -q -At -v VERBOSITY=default "$@" 2>&1; }
+# the pinned Zig version (the Makefile's ZIG_VERSION)
+pin=$(sh /src/third_party/zig-version.sh /src/Makefile) || exit 1
 
 reload() {
     pg_ctl -D "$PGDATA" reload >/dev/null
@@ -57,7 +59,7 @@ mkdir -p "$fakedir"
 canary=/tmp/plzig-canary
 for m in 1 2 3 4 5 7 8 9 10; do
     mkdir -p "$fakedir/m$m"
-    gcc -O2 -static -DMODE=$m -DPGDATA="\"$PGDATA\"" -DPGSOCK="\"$PGHOST/.s.PGSQL.5432\"" \
+    gcc -O2 -static -DMODE=$m -DFAKE_VERSION="\"$pin\"" -DPGDATA="\"$PGDATA\"" -DPGSOCK="\"$PGHOST/.s.PGSQL.5432\"" \
         -DCANARY_DIR="\"$canary\"" -o "$fakedir/m$m/zig" /src/docker/fake/fakezig.c || exit 1
 done
 # m6: a compiler reporting another version
@@ -172,9 +174,18 @@ if [[ "$status" == "enforced (landlock ABI "*", seccomp"* ]]; then
 else
     fail "sandbox not enforced ($status)"
 fi
+# the pinned Zig version is shown by the extension's comment (from the
+# control file the Makefile generates) and by plzig_sandbox_status()
+comment=$(psqlq -c "SELECT obj_description(oid, 'pg_extension') FROM pg_extension WHERE extname = 'plzig'")
+if [ "$comment" = "PL/Zig procedural language (Zig $pin compiled to sandboxed WebAssembly)" ]; then
+    pass "extension comment shows the pinned Zig $pin"
+else
+    fail "extension comment shows the pinned Zig $pin ($comment)"
+fi
+if [[ "$status" == *"; Zig $pin" ]]; then pass "plzig_sandbox_status() shows the pinned Zig $pin"; else fail "plzig_sandbox_status() shows the pinned Zig $pin ($status)"; fi
 abi=$(sed -n 's/.*landlock ABI \([0-9]*\).*/\1/p' <<<"$status")
 if [ "${abi:-0}" -ge 10 ]; then
-    if [[ "$status" == "enforced (landlock ABI $abi, seccomp)" ]]; then pass "status lists nothing missing at ABI $abi"; else fail "status lists nothing missing at ABI $abi ($status)"; fi
+    if [[ "$status" == "enforced (landlock ABI $abi, seccomp); Zig $pin" ]]; then pass "status lists nothing missing at ABI $abi"; else fail "status lists nothing missing at ABI $abi ($status)"; fi
 elif [ "${abi:-0}" -ge 6 ]; then
     if grep -qF "missing: Landlock ABI $abi lacks restrictions on" <<<"$status"; then pass "status lists what Landlock ABI $abi lacks"; else fail "status lists what Landlock ABI $abi lacks ($status)"; fi
 fi
@@ -784,7 +795,7 @@ expect "missing compiler refused" "could not resolve plzig.zig_path" "$(compile_
 # a decoy "zig" first on the server's PATH is never executed
 decoy=/tmp/plzig-decoy
 mkdir -p "$decoy"; rm -f "$decoy/ran"
-printf '#!/bin/sh\ntouch %s/ran\necho 0.17.1\n' "$decoy" > "$decoy/zig"
+printf '#!/bin/sh\ntouch %s/ran\necho %s\n' "$decoy" "$pin" > "$decoy/zig"
 chmod 755 "$decoy/zig"
 PATH="$decoy:$PATH" pg_ctl -D "$PGDATA" -l /tmp/server.log -w restart >/dev/null
 pm=$(head -1 "$PGDATA/postmaster.pid")
@@ -801,7 +812,7 @@ pg_ctl -D "$PGDATA" -l /tmp/server.log -w restart >/dev/null
 # exact version match
 set_fake "$fakedir/m6/zig"
 out=$(psqlq -c "$(compile_sql)")
-if grep -qF 'reports version "0.16.0", but PL/Zig requires exactly 0.17.1' <<<"$out"; then
+if grep -qF "reports version \"0.16.0\", but PL/Zig requires exactly $pin" <<<"$out"; then
     pass "compiler with another version refused (both versions in the error)"
 else
     fail "compiler with another version refused"; echo "$out" | sed 's/^/         /'
@@ -850,7 +861,7 @@ set_zig_path /tmp/plzig-fhs/bin/zig
 expect "FHS layout: <dir>/../lib/zig auto-detected" "zig-lib-dir=/tmp/plzig-fhs/lib/zig" "$(compile_sql)"
 # a dynamically linked compiler cannot run under Landlock: refused up front
 mkdir -p /tmp/plzig-dyn/lib/std
-gcc -O2 -DMODE=1 -DPGDATA="\"$PGDATA\"" -o /tmp/plzig-dyn/zig /src/docker/fake/fakezig.c
+gcc -O2 -DMODE=1 -DFAKE_VERSION="\"$pin\"" -DPGDATA="\"$PGDATA\"" -o /tmp/plzig-dyn/zig /src/docker/fake/fakezig.c
 echo "// fake" > /tmp/plzig-dyn/lib/std/std.zig
 set_zig_path /tmp/plzig-dyn/zig
 expect "dynamically linked compiler refused under Landlock" "is dynamically linked" "$(compile_sql)"

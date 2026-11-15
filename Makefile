@@ -35,6 +35,9 @@ REGRESS_TESTING = testing
 PG_CONFIG ?= pg_config
 
 # ---- pinned third-party inputs -------------------------------------------
+# The Zig pin.  This line is its single source: plzig.so (PLZIG_ZIG_VERSION),
+# the control file's comment (plzig.control from plzig.control.in), build.zig
+# and the test/CI scripts (third_party/zig-version.sh) all derive it from here.
 ZIG_VERSION := 0.17.1
 ZIG_ARCH := $(shell uname -m)
 ZIG_SHA256_x86_64 := 3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a
@@ -100,7 +103,13 @@ $(VALIDATOR): zig/validate/main.zig third_party/check-zig.sh
 $(OBJS): $(WAMR_LIB) src/plzig.h
 $(shlib): $(WAMR_LIB)
 
-all: $(VALIDATOR)
+# The control file, with the pinned Zig version in its comment (which becomes
+# the extension's comment); PGXS installs it (installcontrol depends on it).
+plzig.control: plzig.control.in Makefile
+	sed 's/@ZIG_VERSION@/$(ZIG_VERSION)/g' plzig.control.in > $@.tmp
+	mv $@.tmp $@
+
+all: $(VALIDATOR) plzig.control
 
 # ---- isolation tests (test/isolation) -------------------------------
 PLZIG_ISOLATION = concurrent_create replace_during_call cache_clear
@@ -157,7 +166,7 @@ uninstall-plzig:
 clean: clean-plzig
 
 clean-plzig:
-	rm -rf results regression.diffs regression.out output_iso tmp_check
+	rm -rf results regression.diffs regression.out output_iso tmp_check plzig.control plzig.control.tmp
 
 distclean-plzig: clean-plzig
 	rm -rf $(BUILD_DIR)

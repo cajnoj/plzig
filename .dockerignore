@@ -2,7 +2,9 @@
 build
 vendor/postgres
 vendor/pg-*
-vendor/zig/zig-x86_64-linux-0.17.1
+# unpacked Zig trees (any version); the tarballs are kept
+vendor/zig/*
+!vendor/zig/*.tar.xz
 **/*.o
 **/*.so
 **/*.bc

@@ -24,12 +24,24 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// Must equal ZIG_VERSION in the Makefile (which checks the compiler again).
-const required_zig = std.SemanticVersion{ .major = 0, .minor = 17, .patch = 1 };
+/// The pinned Zig version, read at compile time from ZIG_VERSION in the
+/// Makefile (the single source of the pin; the Makefile checks the compiler
+/// again).
+const required_zig_string = blk: {
+    @setEvalBranchQuota(100_000);
+    const mk = @embedFile("Makefile");
+    const key = "\nZIG_VERSION := ";
+    const at = std.mem.indexOf(u8, mk, key) orelse @compileError("no ZIG_VERSION line in the Makefile");
+    const rest = mk[at + key.len ..];
+    const end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+    break :blk rest[0..end];
+};
+const required_zig = std.SemanticVersion.parse(required_zig_string) catch
+    @compileError("ZIG_VERSION in the Makefile is not a version: " ++ required_zig_string);
 
 comptime {
     if (builtin.zig_version.order(required_zig) != .eq)
-        @compileError("PL/Zig must be built with Zig 0.17.1 exactly, this is Zig " ++ builtin.zig_version_string);
+        @compileError("PL/Zig must be built with Zig " ++ required_zig_string ++ " exactly, this is Zig " ++ builtin.zig_version_string);
 }
 
 pub fn build(b: *std.Build) void {

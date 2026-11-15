@@ -23,6 +23,22 @@ Supported servers: PostgreSQL 14, 15, 16, 17, 18 and 19 (tested: 14.25,
 15.20, 16.16, 17.12, 18.7, 19rc2) on Linux x86_64 (aarch64 should work:
 pinned checksums are included, but it is untested).
 
+### Compatibility
+
+Each PL/Zig release supports exactly one Zig version (the server refuses
+any other compiler); a new Zig minor release means a new PL/Zig major
+(PLAN.md §14).
+
+| PL/Zig | Zig (exactly) | PostgreSQL |
+|---|---|---|
+| 1.x (not yet released) | 0.17.1 | 14, 15, 16, 17, 18, 19 |
+
+The pin is `ZIG_VERSION` in the `Makefile`, its single source: it is
+compiled into `plzig.so`, written into the extension's comment (`\dx
+plzig`, generated `plzig.control`) and shown by `plzig_sandbox_status()`.
+Before upgrading to a PL/Zig release with another Zig, check your functions
+with [`plzig_check_all()`](#checking-every-function-plzig_check_all).
+
 ## Building and installing
 
 PL/Zig needs **Zig 0.17.1**, exactly, and does **not** ship or install it.
@@ -126,7 +142,7 @@ PLZIG_VERSIONS=18.7 PLZIG_VARIANTS="asan coverage" docker/run-all.sh
 
 **Fast matrix** (`docker/run-tests.sh`). Each version is built in
 `postgres:<version>-bookworm` with `docker/Dockerfile`, which installs Zig
-with `make install-zig` into `/opt/zig-0.17.1` (from `vendor/` when present)
+with `make install-zig` into `/opt/zig` (the pinned version, from `vendor/` when present)
 and builds against it; then `docker/test-in-container.sh` starts a scratch
 cluster with `plzig.zig_path` set and runs its default layers:
 
@@ -684,12 +700,14 @@ SPI: `SELECT now()`).
 SET`, not `ALTER SYSTEM`; the value is hidden from non-superusers.
 
 `plzig_sandbox_status()` (superuser only) tells how the last compilation in
-the session was confined and what was missing, e.g.
-`enforced (landlock ABI 10, seccomp)`,
-`enforced (landlock ABI 6, seccomp; missing: Landlock ABI 6 lacks restrictions on pathname UNIX sockets and UDP)`,
-`partial (no landlock, seccomp; missing: Landlock is not available (landlock_create_ruleset returned -38): no filesystem confinement)`
-or `off (plzig.compiler_sandbox = off)`. `enforced` means what `require`
-insists on.
+the session was confined and what was missing, followed by the pinned Zig
+version, e.g.
+`enforced (landlock ABI 10, seccomp); Zig 0.17.1`,
+`enforced (landlock ABI 6, seccomp; missing: Landlock ABI 6 lacks restrictions on pathname UNIX sockets and UDP); Zig 0.17.1`,
+`partial (no landlock, seccomp; missing: Landlock is not available (landlock_create_ruleset returned -38): no filesystem confinement); Zig 0.17.1`,
+`off (plzig.compiler_sandbox = off); Zig 0.17.1`
+or `no compilation in this session; Zig 0.17.1`. `enforced` means what
+`require` insists on.
 
 `plzig_cache_clear()` (superuser only; `EXECUTE` revoked from `PUBLIC`)
 removes every compiled module from the cache under the compile lock and

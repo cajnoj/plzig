@@ -11,3 +11,5 @@ output_iso/
 tmp_check/
 .zig-cache/
 zig-out/
+/plzig.control
+/plzig.control.tmp

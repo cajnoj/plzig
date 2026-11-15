@@ -27,7 +27,7 @@ import psycopg2
 
 PGDATA = "/tmp/bench-pgdata"
 SOCKDIR = "/tmp"
-ZIG = "/opt/zig-0.17.1/zig"
+ZIG = os.environ.get("PLZIG_TEST_ZIG", "/opt/zig/zig")
 BENCH = os.path.dirname(os.path.abspath(__file__))
 
 # implementation id -> language; extra implementations are "<lang>_<name>"

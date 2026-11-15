@@ -730,12 +730,15 @@ plzig_validator(PG_FUNCTION_ARGS)
 
 /*
  * plzig_sandbox_status(): how the most recent compilation in this session
- * was confined (superuser only; for diagnostics and the test suite).
+ * was confined, and the Zig version this build requires (superuser only;
+ * for diagnostics and the test suite).
  */
 Datum
 plzig_sandbox_status(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_TEXT_P(cstring_to_text(plzig_sandbox_status_string()));
+	PG_RETURN_TEXT_P(cstring_to_text(psprintf("%s; Zig %s",
+											  plzig_sandbox_status_string(),
+											  PLZIG_ZIG_VERSION)));
 }
 
 /*

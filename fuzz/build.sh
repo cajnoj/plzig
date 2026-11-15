@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the native fuzz targets of fuzz/ (inside the image of
 # docker/Dockerfile.fuzz; needs clang-19 with compiler-rt, cmake, the
-# PostgreSQL server headers and Zig 0.17.1 at $PLZIG_TEST_ZIG).
+# PostgreSQL server headers and the pinned Zig at $PLZIG_TEST_ZIG).
 #
 #   fuzz/build.sh <outdir>
 #
@@ -22,7 +22,8 @@ set -euo pipefail
 out=${1:?usage: fuzz/build.sh <outdir>}
 here=$(cd "$(dirname "$0")" && pwd)
 src=$(cd "$here/.." && pwd)
-zig=${PLZIG_TEST_ZIG:-/opt/zig-0.17.1/zig}
+zig=${PLZIG_TEST_ZIG:-/opt/zig/zig}
+zig_version=$(sh "$src/third_party/zig-version.sh" "$src/Makefile")
 cc=${CC_FUZZ:-clang}
 work=$(mktemp -d /tmp/plzig-fuzz-build.XXXXXX)
 trap 'rm -rf "$work"' EXIT
@@ -95,7 +96,7 @@ if ! diff <(extract "$src/src/plzig_host.c") <(extract "$here/loader/hoststubs.c
     cat "$work/table.diff"; echo "fuzz/loader/hoststubs.c does not match plzig_native_symbols in src/plzig_host.c"; exit 1
 fi
 inc="-I$(pg_config --includedir-server) -I$wamr_src/core/iwasm/include -I$src/src -I$here/loader"
-defs="-DPLZIG_ZIG_VERSION=\"0.17.1\" -Wno-ignored-attributes -Wno-unused-command-line-argument"
+defs="-DPLZIG_ZIG_VERSION=\"$zig_version\" -Wno-ignored-attributes -Wno-unused-command-line-argument"
 build_loader() {   # build_loader <name> <wamr dir> <cflags>
     local o=$work/$1
     mkdir -p "$o"

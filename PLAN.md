@@ -942,7 +942,9 @@ release needs two PL/Zig lines.
 - The pinned Zig version is shown everywhere else: extension comment and
   control file, `plzig_sandbox_status()`, release notes, package description
   and dependency (`zig = <pin>`), and a compatibility table in the README
-  (PL/Zig 1.x: Zig 0.17.1; ...).
+  (PL/Zig 1.x: Zig 0.17.1; ...). *Done 2026-11-15 (Deviation 37) for the
+  comment, control file, `plzig_sandbox_status()` and README; release notes
+  and packages do not exist yet and take the pin from the same place.*
 - Not decided: semantic-version build metadata (`1.0.0+zig.0.17.1`). Check
   that PGXN, RPM and Debian all accept it before using it.
 
@@ -1968,3 +1970,36 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       function dropped and one replaced during the run; a function whose
       `DROP` is in progress; cancel while compiling and while waiting for
       the compile lock).
+37. **§14: the Zig pin shown everywhere, from one source (2026-11-15).**
+    `ZIG_VERSION` in the `Makefile` is the only place the pin is written
+    for the build; everything else derives it:
+    - `plzig.control` is generated from `plzig.control.in` (`@ZIG_VERSION@`
+      in the comment) by a Makefile rule; PGXS's `all` and `installcontrol`
+      already depend on it, `make clean` removes it, `.gitignore` lists it.
+      The extension's comment (`\dx`) comes from it.
+    - `plzig_sandbox_status()` appends `; Zig <pin>` (from
+      `PLZIG_ZIG_VERSION`, which the Makefile passes to the compiler), also
+      before the first compilation (`no compilation in this session; Zig
+      0.17.1`). The two shell checks that compared the whole status string
+      exactly now compare it with the suffix (`security-checks.sh`,
+      `no-seccomp-checks.sh`), so they are as strict as before.
+    - `build.zig` reads the pin from the Makefile at compile time
+      (`@embedFile`); its error message names it.
+    - `third_party/zig-version.sh` prints the pin for scripts: the test
+      Dockerfiles (Zig now installed in `/opt/zig` instead of
+      `/opt/zig-0.17.1`, so no image path carries the version; vendored
+      tarball name derived), `fuzz/build.sh` and `docker/static-analysis.sh`
+      (`-DPLZIG_ZIG_VERSION`), `docker/security-checks.sh` and
+      `no-seccomp-checks.sh` (expected messages, fake compilers:
+      `docker/fake/fakezig.c` no longer has a default version and must be
+      built with `-DFAKE_VERSION`), CI. `bench/driver.py` takes the compiler
+      from `$PLZIG_TEST_ZIG`.
+    - Regression expected outputs keep the literal where they show it
+      (`testing.out`'s cache-key test): a pin bump must change them, which
+      is intended. Documentation names the version in prose.
+    - README: compatibility table (PL/Zig 1.x: Zig 0.17.1, PostgreSQL
+      14–19). Release notes, package descriptions and the `zig = <pin>`
+      dependency do not exist yet (§13 E/F).
+    - *Tests*: `lifecycle.sql` (the version in `plzig_sandbox_status()`
+      equals the one in the extension's comment), `security-checks.sh`
+      (both equal the Makefile's pin).

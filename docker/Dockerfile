@@ -2,7 +2,8 @@
 #   docker build -f docker/Dockerfile --build-arg PG_IMAGE=postgres:18.7-bookworm -t plzig-test:18 .
 # Zig is an external dependency of PL/Zig: it is installed here with the
 # opt-in helper (`make install-zig`, pinned SHA-256) from vendor/ when present
-# (download otherwise), into /opt/zig-0.17.1, and the server is pointed at it
+# (download otherwise), into /opt/zig (the pinned version, from the Makefile's
+# ZIG_VERSION via third_party/zig-version.sh), and the server is pointed at it
 # by docker/test-in-container.sh.  WAMR is taken from vendor/ when present.
 #
 # Besides the release build (installed), the image holds test-only material
@@ -26,14 +27,15 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 FROM base
-ENV PLZIG_TEST_ZIG=/opt/zig-0.17.1/zig
+ENV PLZIG_TEST_ZIG=/opt/zig/zig
 COPY . /src
 WORKDIR /src
 RUN set -eux; \
     arch=$(uname -m); \
-    zt=""; [ -f "vendor/zig/zig-$arch-linux-0.17.1.tar.xz" ] && zt="ZIG_TARBALL=$PWD/vendor/zig/zig-$arch-linux-0.17.1.tar.xz"; \
+    zv=$(sh third_party/zig-version.sh); \
+    zt=""; [ -f "vendor/zig/zig-$arch-linux-$zv.tar.xz" ] && zt="ZIG_TARBALL=$PWD/vendor/zig/zig-$arch-linux-$zv.tar.xz"; \
     ws=""; [ -d vendor/wamr/core ] && ws="WAMR_SRC=$PWD/vendor/wamr"; \
-    make install-zig ZIG_PREFIX=/opt/zig-0.17.1 $zt; \
+    make install-zig ZIG_PREFIX=/opt/zig $zt; \
     make -j"$(nproc)" WERROR=1 ZIG="$PLZIG_TEST_ZIG" $ws; \
     make install $ws; \
     # the C unit-test build, from a copy, staged (never installed here)

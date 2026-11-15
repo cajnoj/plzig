@@ -43,7 +43,7 @@ SQL
 status=$(sed -n 's/^status: //p' <<<"$out")
 abi=$(sed -n 's/.*landlock ABI \([0-9]*\).*/\1/p' <<<"$status")
 if grep -qx "4712" <<<"$out"; then pass "try compiles under Landlock alone"; else fail "try compiles under Landlock alone"; echo "$out" | sed 's/^/         /'; fi
-if [[ "$status" == "partial (landlock ABI $abi, no seccomp; missing: "*"no seccomp filter (the kernel refused filter mode: Invalid argument))" ]]; then
+if [[ "$status" == "partial (landlock ABI $abi, no seccomp; missing: "*"no seccomp filter (the kernel refused filter mode: Invalid argument)); Zig $(sh /src/third_party/zig-version.sh /src/Makefile)" ]]; then
     pass "status: Landlock only, seccomp missing ($status)"
 else
     fail "status: Landlock only, seccomp missing ($status)"
@@ -58,7 +58,8 @@ fi
 fakedir=/tmp/plzig-fake
 mkdir -p "$fakedir/m5" "$fakedir/lib/std"
 echo "// fake" > "$fakedir/lib/std/std.zig"
-gcc -O2 -static -DMODE=5 -DPGDATA="\"$PGDATA\"" -DPGSOCK="\"$PGHOST/.s.PGSQL.5432\"" \
+gcc -O2 -static -DMODE=5 -DFAKE_VERSION="\"$(sh /src/third_party/zig-version.sh /src/Makefile)\"" \
+    -DPGDATA="\"$PGDATA\"" -DPGSOCK="\"$PGHOST/.s.PGSQL.5432\"" \
     -o "$fakedir/m5/zig" /src/docker/fake/fakezig.c || exit 1
 set_conf zig_path "$fakedir/m5/zig"
 set_conf zig_lib_dir "$fakedir/lib"

@@ -3,7 +3,7 @@
 #   docker build -f bench/Dockerfile --build-arg BASE=plzig-test:18.7 -t plzig-bench:18.7 bench
 #
 # Starts from the PL/Zig test image (docker/Dockerfile: PostgreSQL from PGDG
-# with PL/Zig installed and Zig 0.17.1 in /opt/zig-0.17.1) and adds the
+# with PL/Zig installed and the pinned Zig in /opt/zig) and adds the
 # comparison languages PL/Python (plpython3u) and PL/Perl (plperl) from the
 # same PGDG repository, pinned to the server's exact version, plus the
 # Python driver used by the benchmark runner, and perf for bench/profile.sh.

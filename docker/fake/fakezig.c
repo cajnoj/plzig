@@ -14,9 +14,9 @@
  * allow; mode 7 leaves
  * symbolic links to CANARY_DIR and a deep directory tree in its build
  * directory and fails, to test the backend's recursive delete.
- * "zig version" prints FAKE_VERSION (default 0.17.1, the version PL/Zig
- * requires); building with -DFAKE_VERSION='"0.16.0"' makes a wrong-version
- * compiler.
+ * "zig version" prints FAKE_VERSION, which the build must define: the
+ * pinned version (third_party/zig-version.sh) for a compiler PL/Zig accepts,
+ * -DFAKE_VERSION='"0.16.0"' for a wrong-version compiler.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -38,7 +38,7 @@
 #include <sys/wait.h>
 
 #ifndef FAKE_VERSION
-#define FAKE_VERSION "0.17.1"
+#error "FAKE_VERSION must be defined (-DFAKE_VERSION='\"<version>\"')"
 #endif
 #ifndef PGSOCK
 #define PGSOCK "/tmp/.s.PGSQL.5432"

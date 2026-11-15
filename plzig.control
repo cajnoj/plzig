@@ -1,8 +1,0 @@
-# plzig extension
-comment = 'PL/Zig procedural language (Zig 0.17.1 compiled to sandboxed WebAssembly)'
-default_version = '1.0'
-module_pathname = '$libdir/plzig'
-relocatable = false
-schema = pg_catalog
-superuser = true
-trusted = false

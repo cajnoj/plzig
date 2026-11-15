@@ -21,12 +21,13 @@ fails=0
 pass() { echo "  ok   - $1"; }
 fail() { echo "  FAIL - $1"; fails=$((fails + 1)); }
 src=/src
+zig_version=$(sh "$src/third_party/zig-version.sh" "$src/Makefile") || exit 1
 
 analyze() {
     local work inc defs objs n
     work=$(mktemp -d /tmp/plzig-sa.XXXXXX)
     inc="-I$(pg_config --includedir-server) -I$src/build/wamr-src/core/iwasm/include"
-    defs='-DPLZIG_ZIG_VERSION="0.17.1"'
+    defs="-DPLZIG_ZIG_VERSION=\"$zig_version\""
 
     echo "--- scan-build (clang static analyzer, $(clang --version | head -1))"
     # Our sources only: each file is analyzed on its own with the flags of
@@ -94,7 +95,7 @@ analyze() {
         --suppress=variableScope \
         --suppress='knownConditionTrueFalse:*/plzig_build.c' --suppress='knownConditionTrueFalse:*/plzig_runtime.c' \
         --suppress='*:*/include/server/*' \
-        -D__linux__ -D__x86_64__ -D__GNUC__ -DPLZIG_ZIG_VERSION='"0.17.1"' \
+        -D__linux__ -D__x86_64__ -D__GNUC__ -DPLZIG_ZIG_VERSION="\"$zig_version\"" \
         $inc \
         "$src"/src/*.c >"$work/cppcheck.log" 2>&1
     rc=$?

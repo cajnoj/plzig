@@ -83,6 +83,12 @@ SELECT lc_ins();
 
 -- the compiler sandbox status is visible to superusers (value depends on the host kernel)
 SELECT plzig_sandbox_status() ~ '^(enforced|partial|none) \((landlock ABI [0-9]+|no landlock), (seccomp|no seccomp)[;)]' AS status_known;
+-- ... and ends with the pinned Zig version, the same as in the extension's
+-- comment (both come from the Makefile's ZIG_VERSION)
+SELECT substring(plzig_sandbox_status() FROM '; Zig ([0-9]+\.[0-9]+\.[0-9]+)$') =
+       substring(obj_description(oid, 'pg_extension') FROM '\(Zig ([0-9]+\.[0-9]+\.[0-9]+) compiled to sandboxed WebAssembly\)$')
+       AS pin_shown
+  FROM pg_extension WHERE extname = 'plzig';
 
 -- cleanup of cluster-wide objects
 DROP OWNED BY regress_plzig_dev;

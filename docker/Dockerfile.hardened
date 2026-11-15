@@ -41,14 +41,15 @@ RUN set -eux; \
     useradd -m -u 999 -s /bin/bash postgres
 
 ENV PATH=/usr/local/pgsql/bin:$PATH
-ENV PLZIG_TEST_ZIG=/opt/zig-0.17.1/zig
+ENV PLZIG_TEST_ZIG=/opt/zig/zig
 COPY . /src
 WORKDIR /src
 RUN set -eux; \
     arch=$(uname -m); \
-    zt=""; [ -f "vendor/zig/zig-$arch-linux-0.17.1.tar.xz" ] && zt="ZIG_TARBALL=$PWD/vendor/zig/zig-$arch-linux-0.17.1.tar.xz"; \
+    zv=$(sh third_party/zig-version.sh); \
+    zt=""; [ -f "vendor/zig/zig-$arch-linux-$zv.tar.xz" ] && zt="ZIG_TARBALL=$PWD/vendor/zig/zig-$arch-linux-$zv.tar.xz"; \
     ws=""; [ -d vendor/wamr/core ] && ws="WAMR_SRC=$PWD/vendor/wamr"; \
-    make install-zig ZIG_PREFIX=/opt/zig-0.17.1 $zt; \
+    make install-zig ZIG_PREFIX=/opt/zig $zt; \
     make -j"$(nproc)" WERROR=1 ZIG="$PLZIG_TEST_ZIG" $ws; \
     make install $ws; \
     cp -a /src /tmp/plzig-testing-src; \
