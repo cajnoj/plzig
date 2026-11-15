@@ -97,6 +97,31 @@ SELECT err_show($$SELECT err_raise_b('23514'::bytea, '\x00'::bytea, NULL, NULL)$
 SELECT err_show($$SELECT err_raise('23514', 'grüße', 'détail', 'ヒント')$$);
 -- control characters become ?, except newline and tab
 SELECT err_show(format('SELECT err_raise(%L, %L, %L, %L)', '23514', E'a\x1b[31mb\rc\x7fd', E'line1\nline2\tx', E'h\x07'));
+-- ... and in everything else a function sends to the client or the log:
+-- plzig.raise, messages of every level, panic messages
+CREATE FUNCTION err_ctl(what int, t text) RETURNS int STRICT LANGUAGE plzig AS $$
+    switch (what) {
+        0 => plzig.raise("raise: {s}", .{t}),
+        1 => plzig.raiseMsg(t),
+        2 => plzig.notice("notice: {s}", .{t}),
+        3 => plzig.warning("warning: {s}", .{t}),
+        4 => plzig.info("info: {s}", .{t}),
+        5 => plzig.print(.log, "log: {s}", .{t}),
+        6 => @panic(t),
+        else => {},
+    }
+    return what;
+$$;
+SELECT err_show(format('SELECT err_ctl(%s, %L)', w, E'a\x1b[31mb\rc\x7fd\x01\x1f|line2\tx'))
+  FROM generate_series(0, 1) w;
+SELECT err_show(format('SELECT err_ctl(6, %L)', E'a\x1b[31mb\rc\x7fd\x01\x1f|line2\tx'));
+SELECT err_ctl(2, E'a\x1b[31mb\rc\x7fd\nline2\tx');
+SELECT err_ctl(3, E'\x1b]0;title\x07\x08\x08x');
+SELECT err_ctl(4, E'\rLOG:  forged');
+-- LOG (server log; also sent to this client with client_min_messages = log)
+SET client_min_messages = log;
+SELECT err_ctl(5, E'\x1b[2Jcleared');
+RESET client_min_messages;
 
 -- over-long strings are cut at 64 kB, on a character boundary
 SELECT err_lens($$SELECT err_raise('23514', repeat('m', 70000), repeat('d', 65536), repeat('h', 65537))$$);
@@ -108,4 +133,4 @@ SELECT err_lens($$SELECT err_raise('23514', repeat('€', 30000), 'x', 'y')$$);
 SELECT err_fmt(3);
 
 DROP FUNCTION err_raise(text, text, text, text), err_raise_b(bytea, bytea, bytea, bytea), err_fmt(int),
-  err_show(text), err_lens(text), err_plain(), err_catch(text);
+  err_show(text), err_lens(text), err_plain(), err_catch(text), err_ctl(int, text);

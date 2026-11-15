@@ -502,7 +502,10 @@ monitoring, poolers and drivers react to) are refused with an error of
 their own (`22023`), as are malformed codes. Message, detail and hint must
 be valid in the database encoding without NUL bytes, are cut at 64 kB, and
 control characters other than newline and tab are shown as `?`. Empty or
-`null` detail and hint are omitted.
+`null` detail and hint are omitted. The same holds for the text of
+`plzig.raise`, of messages of every level (`plzig.notice`, `plzig.print`,
+...) and of panic messages: a function cannot write terminal escape
+sequences or carriage returns into the server log or the client's output.
 
 Integer overflow, out-of-bounds indexing, `unreachable`, null unwrapping and
 other safety checks are on (`ReleaseSafe`) and raise

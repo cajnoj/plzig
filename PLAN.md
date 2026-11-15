@@ -2003,3 +2003,15 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
     - *Tests*: `lifecycle.sql` (the version in `plzig_sandbox_status()`
       equals the one in the extension's comment), `security-checks.sh`
       (both equal the Makefile's pin).
+38. **Control characters in every message text (2026-11-15).** Deviation
+    28 neutralised C0 control characters (except newline and tab) and DEL in
+    `raise_error`'s message, detail and hint, but `plzig.raise` "kept control
+    characters", and so did `log` (`plzig.notice` & co.) and `panic`. Now
+    all four imports apply the same rule after the encoding check
+    (`neutralise_controls` in `src/plzig_host.c`), so no guest text can put
+    a carriage return, a forged `LOG:` line or terminal escape sequences into
+    the server log or psql's output; the compiler-output rule (§6) is the
+    same. Multibyte text is unaffected (server encodings are ASCII-safe).
+    *Tests*: `test/sql/errors.sql` (`plzig.raise`, `raiseMsg`, notice,
+    warning, info, log and `@panic` with escape sequences, CR, BEL, BS, DEL,
+    newline and tab).

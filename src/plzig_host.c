@@ -174,6 +174,28 @@ guest_numeric(wasm_exec_env_t env, uint32 ptr, uint32 len, const char *where)
  * log / raise / panic
  * ---------------------------------------------------------------------
  */
+/*
+ * C0 controls except newline and tab, and DEL, become '?' (as compiler
+ * output).  Applied to every text a function hands to ereport: log
+ * messages, raise, raise_error (message, detail, hint) and panic messages,
+ * so guest text cannot forge log lines (a carriage return, escape
+ * sequences for the terminal of whoever reads the log or psql's output).
+ * The text has been validated in the database encoding, and server
+ * encodings are ASCII-safe, so a byte below 0x20 or 0x7f is always that
+ * character, never part of a multibyte sequence.
+ */
+static void
+neutralise_controls(char *s)
+{
+	for (; *s; s++)
+	{
+		unsigned char c = (unsigned char) *s;
+
+		if ((c < 0x20 && c != '\n' && c != '\t') || c == 0x7f)
+			*s = '?';
+	}
+}
+
 static void
 host_log(wasm_exec_env_t env, uint32 level, uint32 ptr, uint32 len)
 {
@@ -211,6 +233,7 @@ host_log(wasm_exec_env_t env, uint32 level, uint32 ptr, uint32 len)
 				elevel = LOG;	/* keep compiler quiet */
 		}
 		msg = guest_string(env, ptr, len, PLZIG_MAX_LOG_MSG, "log message", true);
+		neutralise_controls(msg);
 		ereport(elevel, (errmsg_internal("%s", msg)));
 		pfree(msg);
 	}
@@ -234,6 +257,7 @@ host_raise(wasm_exec_env_t env, uint32 ptr, uint32 len)
 		char	   *msg;
 
 		msg = guest_string(env, ptr, len, PLZIG_MAX_LOG_MSG, "error message", true);
+		neutralise_controls(msg);
 		ereport(ERROR,
 				(errcode(ERRCODE_RAISE_EXCEPTION),
 				 errmsg_internal("%s", msg)));
@@ -266,19 +290,6 @@ static const struct
 	{"F0", "configuration file error"},
 	{"XX", "internal error"},
 };
-
-/* C0 controls except newline and tab, and DEL, become '?' (as compiler output) */
-static void
-neutralise_controls(char *s)
-{
-	for (; *s; s++)
-	{
-		unsigned char c = (unsigned char) *s;
-
-		if ((c < 0x20 && c != '\n' && c != '\t') || c == 0x7f)
-			*s = '?';
-	}
-}
 
 /*
  * raise_error: ERROR with a SQLSTATE, message, detail and hint chosen by the
@@ -377,6 +388,7 @@ host_panic(wasm_exec_env_t env, uint32 ptr, uint32 len)
 		char	   *msg;
 
 		msg = guest_string(env, ptr, len, 1024, "panic message", true);
+		neutralise_controls(msg);
 		ereport(ERROR,
 				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
 				 errmsg("PL/Zig panic: %s", msg)));
