@@ -332,6 +332,12 @@ CREATE OR REPLACE FUNCTION hostile(what int) RETURNS int STRICT LANGUAGE plzig A
                 else => {},
             }
         },
+        // tz_convert: forged operation, value, zone pointer/length/bytes
+        65 => _ = h.tz_convert(9, 0, sql.ptr, 3),
+        66 => _ = h.tz_convert(1, 0, P([*]const u8, bad), 5),
+        67 => _ = h.tz_convert(2, 0, sql.ptr, 0xffff_ffff),
+        68 => _ = h.tz_convert(1, 0x7fff_ffff_ffff_fffe, sql.ptr, 0),
+        69 => { const z = "Europe/\xff"; _ = h.tz_convert(1, 0, z, z.len); },
         else => return 0,
     }
     return 1;
@@ -413,9 +419,14 @@ done <<'CASES'
 62|numeric_op: too small, nothing written
 63|guest passed an invalid memory range
 64|invalid SPI parameter pointer
+65|invalid time zone operation 9
+66|guest passed an invalid memory range
+67|time zone name is too long
+68|timestamp out of range
+69|invalid byte sequence for encoding
 0|0
 CASES
-if [ "$n" -eq 65 ]; then pass "hostile guest: all 64 forged calls end in a clean ERROR"; fi
+if [ "$n" -eq 70 ]; then pass "hostile guest: all 69 forged calls end in a clean ERROR"; fi
 expect "hostile guest: backend still healthy" "4242" "SELECT 4242;"
 if grep -qE "terminated by signal|server process .* was terminated" /tmp/server.log; then fail "hostile guest: no backend crash in the server log"; else pass "hostile guest: no backend crash in the server log"; fi
 psqlq -c "DROP FUNCTION hostile(int); SELECT plzig_cache_clear();" >/dev/null

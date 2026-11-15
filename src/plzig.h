@@ -158,6 +158,11 @@ typedef struct PlzigSlot
 #define PLZIG_NUMERIC_NEG		10
 #define PLZIG_NUMERIC_OP_MAX	10
 
+/* operations of the tz_convert import (doc/abi.md) */
+#define PLZIG_TZ_TO_LOCAL		1	/* timestamptz -> local timestamp */
+#define PLZIG_TZ_FROM_LOCAL		2	/* local timestamp -> timestamptz */
+#define PLZIG_MAX_TZ_NAME		1024	/* longest zone name copied */
+
 /* Typed value (params of prepared statements, result rows), 16 bytes */
 typedef struct PlzigValue
 {

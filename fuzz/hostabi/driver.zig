@@ -282,6 +282,15 @@ fn run(script: []const u8) i32 {
             },
             5 => if (op < 128) {
                 _ = h.spi_ncols();
+            } else if (op < 192) {
+                // tz_convert: operation (sometimes invalid), a timestamp
+                // (sometimes out of range), a zone from the pool or forged
+                const zones = [_][]const u8{ "", "UTC", "Europe/Berlin", "America/New_York", "+05:30", "Mars/Base", "\xff", "PST8PDT" };
+                const zsel = sc.byte();
+                const z: struct { u32, u32 } = if (zsel < 220) .{ @intCast(plzig.addrOf(zones[zsel % zones.len].ptr)), @intCast(zones[zsel % zones.len].len) } else .{ ptrArg(&sc), lenArg(&sc) };
+                const tops = if (sc.byte() < 230) 1 + sc.byte() % 2 else sc.int(u32);
+                const v: i64 = if (sc.byte() < 200) @as(i64, sc.int(i32)) * 1_000_000_000 else @bitCast(sc.int(u64));
+                _ = h.tz_convert(tops, v, P([*]const u8, z[0]), z[1]);
             } else {
                 // numeric_op: operation (sometimes invalid), operands from the
                 // pool or forged, a result buffer that may be too small or forged

@@ -26,6 +26,11 @@ CREATE FUNCTION lk_numeric(n numeric) RETURNS numeric LANGUAGE plzig AS $$
     const half = plzig.Numeric{ .wire = &.{ 0, 1, 0xff, 0xff, 0, 0, 0, 1, 0x13, 0x88 } }; // 0.5
     return try (n orelse return null).add(half);
 $$;
+-- time zone conversions by the host (tz_convert)
+CREATE FUNCTION lk_tz(x int) RETURNS bigint STRICT LANGUAGE plzig AS $$
+    const t: plzig.TimestampTz = .{ .usecs = @as(i64, x) * 86_400_000_000 };
+    return t.toLocal("Europe/Berlin").usecs - t.toLocal(null).usecs;
+$$;
 CREATE FUNCTION lk_spi(x int) RETURNS bigint STRICT LANGUAGE plzig AS $$
     var buf: [16]u8 = undefined;
     const r = try plzig.spi.execute("SELECT count(*), max(t) FROM lk_t WHERE x <= $1::int",
@@ -70,7 +75,7 @@ BEGIN
 END $d$;
 
 -- warm up every shape (modules loaded, instances cached, plans prepared)
-SELECT lk_run(f, 200) FROM unnest(ARRAY['lk_scalar', 'lk_text', 'lk_numeric', 'lk_spi', 'lk_cursor', 'lk_prepared', 'lk_fail']) f;
+SELECT lk_run(f, 200) FROM unnest(ARRAY['lk_scalar', 'lk_text', 'lk_numeric', 'lk_tz', 'lk_spi', 'lk_cursor', 'lk_prepared', 'lk_fail']) f;
 SELECT lk_text(NULL), lk_text(41), lk_numeric(NULL), lk_numeric(41);
 
 SELECT lk_mem() AS m0 \gset
@@ -82,6 +87,9 @@ SELECT lk_mem() - :m0 AS growth_text;
 SELECT lk_mem() AS m0 \gset
 SELECT lk_run('lk_numeric', 10000);
 SELECT lk_mem() - :m0 AS growth_numeric;
+SELECT lk_mem() AS m0 \gset
+SELECT lk_run('lk_tz', 10000);
+SELECT lk_mem() - :m0 AS growth_tz;
 SELECT lk_mem() AS m0 \gset
 SELECT lk_run('lk_spi', 10000);
 SELECT lk_mem() - :m0 AS growth_spi;
@@ -132,7 +140,7 @@ RESET plzig.instance_cache_max_memory;
 -- the whole backend does not grow either (PL/Zig memory hangs below
 -- TopMemoryContext and the per-query contexts)
 SELECT sum(total_bytes) AS t0 FROM pg_backend_memory_contexts \gset
-SELECT lk_run(f, 3000) FROM unnest(ARRAY['lk_scalar', 'lk_text', 'lk_numeric', 'lk_spi', 'lk_cursor', 'lk_prepared', 'lk_fail']) f;
+SELECT lk_run(f, 3000) FROM unnest(ARRAY['lk_scalar', 'lk_text', 'lk_numeric', 'lk_tz', 'lk_spi', 'lk_cursor', 'lk_prepared', 'lk_fail']) f;
 SELECT sum(total_bytes) - :t0 < 256 * 1024 AS backend_flat FROM pg_backend_memory_contexts;
 
 DROP TABLE lk_t CASCADE;

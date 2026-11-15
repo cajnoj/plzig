@@ -151,6 +151,15 @@ h_numeric_op(wasm_exec_env_t env, uint32 op, uint32 a, uint32 alen, uint32 b, ui
 	return 0;
 }
 
+/* tz_convert: zone range checked, then the trap a failing import causes */
+static int64
+h_tz_convert(wasm_exec_env_t env, uint32 op, uint64 value, uint32 zone, uint32 zone_len)
+{
+	(void) stub_range(env, zone, zone_len > 1024 ? 1024 : zone_len);
+	stub_trap(env, "plzig: host error");
+	return 0;
+}
+
 /* keep in sync with plzig_native_symbols in src/plzig_host.c (checked by fuzz/build.sh) */
 static NativeSymbol stub_symbols[] = {
 	{"log", (void *) h_log, "(iii)", NULL},
@@ -173,6 +182,7 @@ static NativeSymbol stub_symbols[] = {
 	{"spi_cursor_fetch", (void *) h_Iii_I_fetch, "(Iii)I", NULL},
 	{"spi_cursor_close", (void *) h_I, "(I)", NULL},
 	{"numeric_op", (void *) h_numeric_op, "(iiiiiiii)i", NULL},
+	{"tz_convert", (void *) h_tz_convert, "(iIii)I", NULL},
 };
 
 void *

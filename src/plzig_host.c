@@ -2126,6 +2126,68 @@ host_numeric_op(wasm_exec_env_t env, uint32 op, uint32 a_ptr, uint32 a_len,
 	return result;
 }
 
+/* ---------------------------------------------------------------------
+ * time zones
+ * ---------------------------------------------------------------------
+ */
+
+/*
+ * tz_convert(op, value, zone, zone_len): a timestamptz to the local time
+ * (timestamp) in a time zone, or a local time to a timestamptz, by
+ * PostgreSQL's own functions: timestamptz_timestamp/timestamp_timestamptz
+ * in the session's TimeZone (zone_len = 0), timestamptz_zone/timestamp_zone
+ * (AT TIME ZONE) in the named zone otherwise.  The guest never sees the time
+ * zone database or the TimeZone setting; it only gets what the equivalent
+ * SQL would give.  The value is range-checked first like an SPI parameter;
+ * infinities stay infinities.  An unknown zone or a result out of range is
+ * an SQL error like any other.
+ */
+static int64
+host_tz_convert(wasm_exec_env_t env, uint32 op, int64 value, uint32 zone_ptr, uint32 zone_len)
+{
+	PlzigCallCtx *ctx = host_ctx(env);
+	MemoryContext oldcxt = CurrentMemoryContext;
+	int64		result = 0;
+
+	if (ctx == NULL)
+		return 0;
+	PG_TRY();
+	{
+		Datum		in;
+		Datum		r;
+		bool		to_local = (op == PLZIG_TZ_TO_LOCAL);
+
+		MemoryContextReset(ctx->scratch);
+		MemoryContextSwitchTo(ctx->scratch);
+		if (op != PLZIG_TZ_TO_LOCAL && op != PLZIG_TZ_FROM_LOCAL)
+			ereport(ERROR,
+					(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+					 errmsg("PL/Zig: invalid time zone operation %u", op)));
+		in = plzig_scalar_from_guest(to_local ? PLZIG_T_TIMESTAMPTZ : PLZIG_T_TIMESTAMP,
+									 (uint64) value, 0, "the value to convert");
+		if (zone_len == 0)
+			r = DirectFunctionCall1(to_local ? timestamptz_timestamp : timestamp_timestamptz, in);
+		else
+		{
+			text	   *zone = guest_text(env, zone_ptr, zone_len, PLZIG_MAX_TZ_NAME,
+										  "time zone name");
+
+			r = DirectFunctionCall2(to_local ? timestamptz_zone : timestamp_zone,
+									PointerGetDatum(zone), in);
+		}
+		result = DatumGetInt64(r);
+		MemoryContextSwitchTo(oldcxt);
+		MemoryContextReset(ctx->scratch);
+	}
+	PG_CATCH();
+	{
+		host_catch(ctx, env, oldcxt);
+		result = 0;
+	}
+	PG_END_TRY();
+	return result;
+}
+
 /*
  * Called by the call handler after a successful guest call: close every
  * cursor the guest left open, then end the SPI connection (which frees all
@@ -2176,6 +2238,7 @@ static NativeSymbol plzig_native_symbols[] = {
 	{"spi_cursor_fetch", (void *) host_spi_cursor_fetch, "(Iii)I", NULL},
 	{"spi_cursor_close", (void *) host_spi_cursor_close, "(I)", NULL},
 	{"numeric_op", (void *) host_numeric_op, "(iiiiiiii)i", NULL},
+	{"tz_convert", (void *) host_tz_convert, "(iIii)I", NULL},
 };
 
 void *

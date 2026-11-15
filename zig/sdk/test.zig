@@ -1219,3 +1219,102 @@ test "Numeric as typed column, parameter, argument and result" {
     try testing.expectEqual(@as(u64, @intFromPtr(n.wire.ptr)), out.val);
     try testing.expectEqual(@as(u32, @intCast(n.wire.len)), out.len);
 }
+
+// ---------------------------------------------------------------------------
+// calendar and time zones
+
+test "Date.fromYmd: make_date's rules and PostgreSQL's range" {
+    const D = plzig.Date;
+    try testing.expectEqual(@as(i32, 0), (try D.fromYmd(2000, 1, 1)).days);
+    try testing.expectEqual(@as(i32, -10957), (try D.fromYmd(1970, 1, 1)).days);
+    try testing.expectEqual(@as(i32, 8825), (try D.fromYmd(2024, 2, 29)).days);
+    try testing.expectEqual(@as(i32, -2451545), (try D.fromYmd(-4714, 11, 24)).days); // first day: 4714-11-24 BC
+    try testing.expectEqual(@as(i32, 2145031948), (try D.fromYmd(5874897, 12, 31)).days); // last day
+    try testing.expectEqual(@as(i32, -730120), (try D.fromYmd(-1, 12, 31)).days); // 1 BC
+    try testing.expectEqual(@as(i32, -730119), (try D.fromYmd(1, 1, 1)).days);
+    _ = try D.fromYmd(-1, 2, 29); // 1 BC is a leap year (astronomical 0)
+    _ = try D.fromYmd(-5, 2, 29); // 5 BC = astronomical -4
+    _ = try D.fromYmd(2000, 2, 29);
+    for ([_][3]i32{ .{ 0, 1, 1 }, .{ 2023, 2, 29 }, .{ 1900, 2, 29 }, .{ -2, 2, 29 }, .{ 2024, 13, 1 }, .{ 2024, 0, 1 }, .{ 2024, 4, 31 }, .{ 2024, 1, 0 }, .{ 2024, 1, 32 }, .{ std.math.minInt(i32), 1, 1 } }) |f| {
+        try testing.expectError(error.InvalidDate, D.fromYmd(f[0], @intCast(f[1]), @intCast(f[2])));
+    }
+    for ([_][3]i32{ .{ -4714, 11, 23 }, .{ -4714, 10, 31 }, .{ -5000, 1, 1 }, .{ 5874898, 1, 1 }, .{ 5874898, 6, 3 }, .{ std.math.maxInt(i32), 1, 1 }, .{ std.math.minInt(i32) + 1, 1, 1 } }) |f| {
+        try testing.expectError(error.OutOfRange, D.fromYmd(f[0], @intCast(f[1]), @intCast(f[2])));
+    }
+}
+
+test "Date.ymd, dayOfWeek, dayOfYear, toTimestamp: round trips over the whole range" {
+    const D = plzig.Date;
+    var d: i64 = -2451545;
+    while (d <= 2145031948) : (d += 104729) {
+        const x: D = .{ .days = @intCast(d) };
+        const f = try x.ymd();
+        try testing.expectEqual(x, try D.fromYmd(f.year, f.month, f.day));
+        const doy = try x.dayOfYear();
+        try testing.expect(doy >= 1 and doy <= 366);
+        try testing.expectEqual(@as(u8, @intCast(@mod(d + 6, 7))), try x.dayOfWeek()); // 2000-01-01 was a Saturday
+    }
+    try testing.expectEqual(plzig.Ymd{ .year = -4714, .month = 11, .day = 24 }, try (D{ .days = -2451545 }).ymd());
+    try testing.expectEqual(plzig.Ymd{ .year = -1, .month = 12, .day = 31 }, try (D{ .days = -730120 }).ymd());
+    try testing.expectEqual(@as(u16, 366), try (try D.fromYmd(2024, 12, 31)).dayOfYear());
+    try testing.expectEqual(@as(u8, 6), try (D{ .days = 0 }).dayOfWeek());
+    try testing.expectError(error.NotFinite, D.infinity.ymd());
+    try testing.expectError(error.NotFinite, D.neg_infinity.dayOfWeek());
+    try testing.expectEqual(plzig.Timestamp{ .usecs = -86_400_000_000 }, try (D{ .days = -1 }).toTimestamp());
+    try testing.expectEqual(plzig.Timestamp.infinity, try D.infinity.toTimestamp());
+    try testing.expectError(error.OutOfRange, (D{ .days = 2145031948 }).toTimestamp());
+}
+
+test "Time and Timestamp fields: make_time/make_timestamp rules, leap seconds, the range" {
+    const T = plzig.Time;
+    const TS = plzig.Timestamp;
+    try testing.expectEqual(@as(i64, 86_400_000_000), (try T.fromHms(24, 0, 0, 0)).usecs);
+    try testing.expectEqual(@as(i64, 86_400_000_000), (try T.fromHms(23, 59, 60, 0)).usecs);
+    try testing.expectEqual(@as(i64, 45_296_000_007), (try T.fromHms(12, 34, 56, 7)).usecs);
+    for ([_][4]u32{ .{ 24, 0, 0, 1 }, .{ 25, 0, 0, 0 }, .{ 0, 60, 0, 0 }, .{ 0, 0, 61, 0 }, .{ 0, 0, 60, 1 }, .{ 0, 0, 0, 1_000_000 }, .{ 23, 59, 60, 1 } }) |f| {
+        try testing.expectError(error.InvalidTime, T.fromHms(@intCast(f[0]), @intCast(f[1]), @intCast(f[2]), f[3]));
+    }
+    try testing.expectEqual(plzig.Hms{ .hour = 24, .minute = 0, .second = 0 }, (T{ .usecs = 86_400_000_000 }).hms());
+    try testing.expectEqual(plzig.Hms{ .hour = 12, .minute = 34, .second = 56, .microsecond = 7 }, (T{ .usecs = 45_296_000_007 }).hms());
+
+    try testing.expectEqual(TS{ .usecs = 0 }, try TS.fromFields(.{ .year = 2000, .month = 1, .day = 1 }));
+    // leap second: carried into the next minute (here: the next year)
+    try testing.expectEqual(try TS.fromFields(.{ .year = 2017, .month = 1, .day = 1 }), try TS.fromFields(.{ .year = 2016, .month = 12, .day = 31, .hour = 23, .minute = 59, .second = 60 }));
+    try testing.expectEqual(TS{ .usecs = -211813488000000000 }, try TS.fromFields(.{ .year = -4714, .month = 11, .day = 24 }));
+    try testing.expectEqual(TS{ .usecs = 9223371331199999999 }, try TS.fromFields(.{ .year = 294276, .month = 12, .day = 31, .hour = 23, .minute = 59, .second = 59, .microsecond = 999_999 }));
+    try testing.expectError(error.OutOfRange, TS.fromFields(.{ .year = 294277, .month = 1, .day = 1 }));
+    // far beyond the timestamp range, but still a valid Julian day: no overflow
+    try testing.expectError(error.OutOfRange, TS.fromFields(.{ .year = 5874897, .month = 12, .day = 31, .hour = 23 }));
+    try testing.expectError(error.OutOfRange, TS.fromFields(.{ .year = 294277, .month = 12, .day = 1 }));
+    try testing.expectError(error.OutOfRange, TS.fromFields(.{ .year = 294276, .month = 12, .day = 31, .hour = 24 }));
+    try testing.expectError(error.InvalidDate, TS.fromFields(.{ .year = 0, .month = 1, .day = 1 }));
+    try testing.expectError(error.InvalidTime, TS.fromFields(.{ .year = 2000, .month = 1, .day = 1, .hour = 24, .second = 1 }));
+    // fields round trip, including before 2000 and BC (floor division)
+    var t: i64 = -211813488000000000;
+    while (t < 9223371331200000000 - 7_654_321_987_654_321) : (t += 7_654_321_987_654_321) {
+        const x: TS = .{ .usecs = t };
+        try testing.expectEqual(x, try TS.fromFields(try x.fields()));
+        try testing.expectEqual(x.usecs, @as(i64, x.date().days) * 86_400_000_000 + (try x.time()).usecs);
+    }
+    try testing.expectEqual(plzig.DateTime{ .year = 1999, .month = 12, .day = 31, .hour = 23, .minute = 59, .second = 59, .microsecond = 999_999 }, try (TS{ .usecs = -1 }).fields());
+    try testing.expectEqual(plzig.Date{ .days = -1 }, (TS{ .usecs = -1 }).date());
+    try testing.expectEqual(plzig.Date.infinity, TS.infinity.date());
+    try testing.expectError(error.NotFinite, TS.neg_infinity.fields());
+    try testing.expectError(error.NotFinite, TS.infinity.time());
+}
+
+test "TimestampTz: local time by the host (zone name passed through, null = session)" {
+    try setup(64);
+    const tz: plzig.TimestampTz = .{ .usecs = 0 };
+    try testing.expectEqual(plzig.Timestamp{ .usecs = 3_600_000_000 }, tz.toLocal("Europe/Berlin"));
+    try testing.expectEqual(@as(u32, 1), env.last_tz_op);
+    try testing.expectEqualStrings("Europe/Berlin", env.last_tz_zone[0..env.last_tz_zone_len]);
+    _ = tz.toLocal(null);
+    try testing.expectEqual(@as(usize, 0), env.last_tz_zone_len);
+    try testing.expectEqual(tz, plzig.TimestampTz.fromLocal(.{ .usecs = 3_600_000_000 }, "x"));
+    try testing.expectEqual(@as(u32, 2), env.last_tz_op);
+    const f = try tz.fields("UTC+1");
+    try testing.expectEqual(@as(u8, 1), f.hour);
+    try testing.expectEqual(tz, try plzig.TimestampTz.fromFields(f, "UTC+1"));
+    try testing.expectError(error.NotFinite, plzig.TimestampTz.infinity.fields(null));
+}

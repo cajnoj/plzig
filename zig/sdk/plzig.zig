@@ -85,6 +85,7 @@ const wasm_env = struct {
         extern "plzig" fn spi_cursor_open_plan(handle: u64, params_ptr: [*]const Value, nparams: u32) u64;
         extern "plzig" fn spi_cursor_fetch(cursor: u64, buf: [*]u8, buf_len: u32) i64;
         extern "plzig" fn spi_cursor_close(cursor: u64) void;
+        extern "plzig" fn tz_convert(op: u32, value: i64, zone_ptr: [*]const u8, zone_len: u32) i64;
         extern "plzig" fn numeric_op(op: u32, a_ptr: [*]const u8, a_len: u32, b_ptr: [*]const u8, b_len: u32, arg: i32, out_ptr: [*]u8, out_cap: u32) i32;
     };
 };
@@ -125,12 +126,180 @@ pub const Date = extern struct {
     pub fn isFinite(self: Date) bool {
         return self.days != infinity.days and self.days != neg_infinity.days;
     }
+
+    /// The date of a calendar day, as SQL make_date(year, month, day): the
+    /// proleptic Gregorian calendar, a negative year is BC (-1 = 1 BC;
+    /// there is no year 0).  error.InvalidDate for fields that are no day
+    /// (year 0, month 13, February 30, ...), error.OutOfRange beyond
+    /// PostgreSQL's date range (4714-11-24 BC .. 5874897-12-31).
+    pub fn fromYmd(year: i32, month: u8, day: u8) CalendarError!Date {
+        const y = try astronomicalYear(year, month, day);
+        if (!isValidJulian(y, month)) return error.OutOfRange;
+        const d = @as(i64, date2j(y, month, day)) - postgres_epoch_jdate;
+        if (d < min_date_days or d > max_date_days) return error.OutOfRange;
+        return .{ .days = @intCast(d) };
+    }
+
+    /// Year, month and day (as EXTRACT gives them: a negative year is BC).
+    /// error.NotFinite for the infinities.
+    pub fn ymd(self: Date) error{NotFinite}!Ymd {
+        if (!self.isFinite()) return error.NotFinite;
+        return j2date(@as(i64, self.days) + postgres_epoch_jdate);
+    }
+
+    /// Day of the week, 0 = Sunday .. 6 = Saturday (EXTRACT(dow)).
+    pub fn dayOfWeek(self: Date) error{NotFinite}!u8 {
+        if (!self.isFinite()) return error.NotFinite;
+        return @intCast(@mod(@as(i64, self.days) + postgres_epoch_jdate + 1, 7));
+    }
+
+    /// Day of the year, 1 .. 366 (EXTRACT(doy)).
+    pub fn dayOfYear(self: Date) error{NotFinite}!u16 {
+        const d = try self.ymd();
+        const y = astronomical(d.year);
+        return @intCast(@as(i64, self.days) + postgres_epoch_jdate - date2j(y, 1, 1) + 1);
+    }
+
+    /// Midnight of this day (date::timestamp): the infinities stay
+    /// infinities; error.OutOfRange past the end of the timestamp range.
+    pub fn toTimestamp(self: Date) error{OutOfRange}!Timestamp {
+        if (self.days == infinity.days) return Timestamp.infinity;
+        if (self.days == neg_infinity.days) return Timestamp.neg_infinity;
+        // date2timestamp: TIMESTAMP_END_JULIAN; earlier days all fit
+        if (self.days >= 109203528 - postgres_epoch_jdate) return error.OutOfRange;
+        return .{ .usecs = @as(i64, self.days) * usecs_per_day };
+    }
 };
+
+/// A calendar day; `year` < 0 is BC (-1 = 1 BC), as EXTRACT(year) gives it.
+pub const Ymd = struct { year: i32, month: u8, day: u8 };
+
+/// A time of day; 24:00:00 is a valid time.
+pub const Hms = struct { hour: u8, minute: u8, second: u8, microsecond: u32 = 0 };
+
+/// A calendar day and a time of day (`year` < 0 is BC).
+pub const DateTime = struct {
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8 = 0,
+    minute: u8 = 0,
+    second: u8 = 0,
+    microsecond: u32 = 0,
+};
+
+pub const CalendarError = error{ InvalidDate, InvalidTime, OutOfRange };
+
+const postgres_epoch_jdate: i64 = 2451545; // date2j(2000, 1, 1)
+const usecs_per_day: i64 = 86_400_000_000;
+const min_date_days: i64 = 0 - postgres_epoch_jdate; // DATETIME_MIN_JULIAN
+const max_date_days: i64 = 2147483494 - postgres_epoch_jdate - 1; // DATE_END_JULIAN
+const min_timestamp: i64 = -211813488000000000; // MIN_TIMESTAMP
+const end_timestamp: i64 = 9223371331200000000; // END_TIMESTAMP
+
+/// PostgreSQL's date2j (proleptic Gregorian, astronomical year numbering).
+fn date2j(year: i32, month: u8, day: u8) i32 {
+    var y: i32 = year;
+    var m: i32 = month;
+    if (m > 2) {
+        m += 1;
+        y += 4800;
+    } else {
+        m += 13;
+        y += 4799;
+    }
+    const century = @divTrunc(y, 100);
+    var julian = y * 365 - 32167;
+    julian += @divTrunc(y, 4) - century + @divTrunc(century, 4);
+    julian += @divTrunc(7834 * m, 256) + day;
+    return julian;
+}
+
+/// PostgreSQL's j2date; the year as EXTRACT gives it (BC negative).
+fn j2date(jd: i64) Ymd {
+    var julian: u32 = @intCast(jd + 32044);
+    var quad: u32 = julian / 146097;
+    const extra: u32 = (julian - quad * 146097) * 4 + 3;
+    julian += 60 + quad * 3 + extra / 146097;
+    quad = julian / 1461;
+    julian -= quad * 1461;
+    var y: i32 = @intCast(julian * 4 / 1461);
+    julian = (if (y != 0) (julian + 305) % 365 else (julian + 306) % 366) + 123;
+    y += @intCast(quad * 4);
+    const year = y - 4800;
+    const q2 = julian * 2141 / 65536;
+    return .{
+        .year = if (year > 0) year else year - 1,
+        .month = @intCast((q2 + 10) % 12 + 1),
+        .day = @intCast(julian - 7834 * q2 / 256),
+    };
+}
+
+fn isLeap(y: i32) bool {
+    return @mod(y, 4) == 0 and (@mod(y, 100) != 0 or @mod(y, 400) == 0);
+}
+
+/// BC year (-1 = 1 BC) to astronomical numbering (1 BC = 0)
+fn astronomical(year: i32) i32 {
+    return if (year < 0) year + 1 else year;
+}
+
+/// ValidateDate for make_date's fields: no year 0, month 1..12, a day of
+/// that month; the astronomical year
+fn astronomicalYear(year: i32, month: u8, day: u8) CalendarError!i32 {
+    if (year == 0 or year == s.math.minInt(i32)) return error.InvalidDate;
+    const y = astronomical(year);
+    if (month < 1 or month > 12 or day < 1) return error.InvalidDate;
+    const days = [12]u8{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    const last: u8 = if (month == 2 and isLeap(y)) 29 else days[month - 1];
+    if (day > last) return error.InvalidDate;
+    return y;
+}
+
+/// IS_VALID_JULIAN (4713-11-01 BC .. 5874898-06-xx, by month)
+fn isValidJulian(y: i32, m: u8) bool {
+    return (y > -4713 or (y == -4713 and m >= 11)) and (y < 5874898 or (y == 5874898 and m < 6));
+}
+
+/// float_time_overflows + tm2time: hour 0..24, minute 0..59, second 0..60
+/// (60 only with microsecond 0: a leap second, carried into the next
+/// minute), the total at most 24:00:00
+fn timeFromFields(hour: u8, minute: u8, second: u8, microsecond: u32) CalendarError!i64 {
+    if (hour > 24 or minute > 59 or microsecond > 999_999) return error.InvalidTime;
+    const sec_us = @as(i64, second) * 1_000_000 + microsecond;
+    if (sec_us > 60_000_000) return error.InvalidTime;
+    const t = (@as(i64, hour) * 60 + minute) * 60_000_000 + sec_us;
+    if (t > usecs_per_day) return error.InvalidTime;
+    return t;
+}
+
+fn hmsOf(t: i64) Hms {
+    var x = t;
+    const hour = @divTrunc(x, 3_600_000_000);
+    x -= hour * 3_600_000_000;
+    const minute = @divTrunc(x, 60_000_000);
+    x -= minute * 60_000_000;
+    const second = @divTrunc(x, 1_000_000);
+    return .{ .hour = @intCast(hour), .minute = @intCast(minute), .second = @intCast(second), .microsecond = @intCast(x - second * 1_000_000) };
+}
 
 /// SQL `time` (without time zone): microseconds since midnight,
 /// 0 ..= 86_400_000_000 ('24:00:00' is a valid time).
 pub const Time = extern struct {
     usecs: i64,
+
+    /// The time of hour, minute, second and microsecond, as SQL make_time:
+    /// hour 0..24, minute 0..59, second 0..60 (a leap second: 60 only with
+    /// microsecond 0), at most 24:00:00; error.InvalidTime otherwise.
+    pub fn fromHms(hour: u8, minute: u8, second: u8, microsecond: u32) CalendarError!Time {
+        return .{ .usecs = try timeFromFields(hour, minute, second, microsecond) };
+    }
+
+    /// Hour, minute, second and microsecond (24:00:00 for the end of day).
+    /// Assumes a valid time (0 ..= 86_400_000_000), as the host passes it.
+    pub fn hms(self: Time) Hms {
+        return hmsOf(s.math.clamp(self.usecs, 0, usecs_per_day));
+    }
 };
 
 /// SQL `time with time zone`: microseconds since midnight and the zone
@@ -152,6 +321,45 @@ pub const Timestamp = extern struct {
     pub fn isFinite(self: Timestamp) bool {
         return self.usecs != infinity.usecs and self.usecs != neg_infinity.usecs;
     }
+
+    /// The timestamp of a calendar day and time of day, as SQL
+    /// make_timestamp (a negative year is BC, second 60 a leap second).
+    /// error.InvalidDate / error.InvalidTime for impossible fields,
+    /// error.OutOfRange outside PostgreSQL's timestamp range.
+    pub fn fromFields(f: DateTime) CalendarError!Timestamp {
+        // the order of make_timestamp's checks: date fields, Julian range,
+        // time fields, timestamp range
+        const y = try astronomicalYear(f.year, f.month, f.day);
+        if (!isValidJulian(y, f.month)) return error.OutOfRange;
+        const t = try timeFromFields(f.hour, f.minute, f.second, f.microsecond);
+        const d = @as(i64, date2j(y, f.month, f.day)) - postgres_epoch_jdate;
+        const r = s.math.add(i64, s.math.mul(i64, d, usecs_per_day) catch return error.OutOfRange, t) catch return error.OutOfRange;
+        if (r < min_timestamp or r >= end_timestamp) return error.OutOfRange;
+        return .{ .usecs = r };
+    }
+
+    /// The calendar fields (timestamp2tm; a negative year is BC).
+    /// error.NotFinite for the infinities.
+    pub fn fields(self: Timestamp) error{NotFinite}!DateTime {
+        if (!self.isFinite()) return error.NotFinite;
+        const days = @divFloor(self.usecs, usecs_per_day);
+        const d = j2date(days + postgres_epoch_jdate);
+        const t = hmsOf(self.usecs - days * usecs_per_day);
+        return .{ .year = d.year, .month = d.month, .day = d.day, .hour = t.hour, .minute = t.minute, .second = t.second, .microsecond = t.microsecond };
+    }
+
+    /// The day (timestamp::date); the infinities map to the date infinities.
+    pub fn date(self: Timestamp) Date {
+        if (self.usecs == infinity.usecs) return Date.infinity;
+        if (self.usecs == neg_infinity.usecs) return Date.neg_infinity;
+        return .{ .days = @intCast(@divFloor(self.usecs, usecs_per_day)) };
+    }
+
+    /// The time of day (timestamp::time); error.NotFinite for the infinities.
+    pub fn time(self: Timestamp) error{NotFinite}!Time {
+        if (!self.isFinite()) return error.NotFinite;
+        return .{ .usecs = @mod(self.usecs, usecs_per_day) };
+    }
 };
 
 /// SQL `timestamp with time zone`: microseconds since 2000-01-01 00:00:00 UTC.
@@ -164,7 +372,42 @@ pub const TimestampTz = extern struct {
     pub fn isFinite(self: TimestampTz) bool {
         return self.usecs != infinity.usecs and self.usecs != neg_infinity.usecs;
     }
+
+    /// The local time in time zone `zone` (`ts AT TIME ZONE zone`), or in
+    /// the session's TimeZone if `zone` is null (`ts::timestamp`).  Done by
+    /// the host with PostgreSQL's own time zone code; an unknown zone is an
+    /// SQL error.  The infinities stay infinities.
+    pub fn toLocal(self: TimestampTz, zone: ?[]const u8) Timestamp {
+        return .{ .usecs = tzConvert(.to_local, self.usecs, zone) };
+    }
+
+    /// The moment at which the local time `local` occurs in time zone
+    /// `zone` (`local AT TIME ZONE zone`), or in the session's TimeZone if
+    /// `zone` is null (`local::timestamptz`); PostgreSQL's rules for
+    /// skipped and repeated local times apply.
+    pub fn fromLocal(local: Timestamp, zone: ?[]const u8) TimestampTz {
+        return .{ .usecs = tzConvert(.from_local, local.usecs, zone) };
+    }
+
+    /// The calendar fields of the local time in `zone` (null: the session's
+    /// TimeZone).  error.NotFinite for the infinities.
+    pub fn fields(self: TimestampTz, zone: ?[]const u8) error{NotFinite}!DateTime {
+        return self.toLocal(zone).fields();
+    }
+
+    /// The moment of a local calendar time in `zone` (null: the session's
+    /// TimeZone), as SQL make_timestamptz.
+    pub fn fromFields(f: DateTime, zone: ?[]const u8) CalendarError!TimestampTz {
+        return fromLocal(try Timestamp.fromFields(f), zone);
+    }
 };
+
+const TzOp = enum(u32) { to_local = 1, from_local = 2 };
+
+fn tzConvert(op: TzOp, usecs: i64, zone: ?[]const u8) i64 {
+    const z: []const u8 = zone orelse "";
+    return host.tz_convert(@intFromEnum(op), usecs, z.ptr, hostLen(z));
+}
 
 /// SQL `interval`: PostgreSQL's three independent fields (an interval of
 /// 1 month is not 30 days).  Same layout as PostgreSQL's Interval.
