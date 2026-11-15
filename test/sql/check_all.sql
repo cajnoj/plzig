@@ -138,7 +138,7 @@ DROP TYPE ca_ab;
 CREATE FUNCTION cu_helper(x int) RETURNS int STRICT LANGUAGE plzig AS $$ return x + 1; $$;
 CREATE FUNCTION cu_user(x int) RETURNS int STRICT LANGUAGE plzig AS $$
 //#use public.cu_helper(integer) as h
-    return (try h(x)).?;
+    return (try h.call(x)).?;
 $$;
 SELECT * FROM checked WHERE function LIKE 'cu\_%';
 -- a used function that may no longer be used: reported for its user

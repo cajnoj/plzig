@@ -379,13 +379,16 @@ plzig_generate_source(const PlzigSignature *sig, const char *body,
 
 	/*
 	 * The functions this one uses (//#use directives, plzig_use.c): each is
-	 * a module of its own, imported under a name only the host gives it;
-	 * the alias is its `call`.  Aliases were validated as identifiers.
+	 * a module of its own, imported under a name only the host gives it.
+	 * The alias is that module: alias.call is the function, and whatever
+	 * else its source declares `pub` (helpers, constants, types) is reachable
+	 * as alias.name.  The generated part of a file declares nothing pub but
+	 * `call`.  Aliases were validated as identifiers.
 	 */
 	for (i = 0; i < nuses; i++)
 	{
 		Assert(plzig_valid_identifier(use_aliases[i]));
-		appendStringInfo(&buf, "const @\"%s\" = @import(\"" PLZIG_USE_IMPORT_PREFIX "%s\").call; ",
+		appendStringInfo(&buf, "const @\"%s\" = @import(\"" PLZIG_USE_IMPORT_PREFIX "%s\"); ",
 						 use_aliases[i], use_aliases[i]);
 	}
 

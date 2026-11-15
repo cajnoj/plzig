@@ -2135,7 +2135,9 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       `plzig` and on its own uses; a file imports a used function under the
       host-chosen name `plzig.use.<alias>` (`--dep plzig.use.<alias>=
       plzig.unit.<i>`), and the generated header line declares `const
-      @"alias" = @import("plzig.use.alias").call;`. Transitive; a function
+      @"alias" = @import("plzig.use.alias");` (the alias is the
+      module: `alias.call(...)` is the function and `alias.name` reaches
+      what its source declares `pub`; owner request, 2026-11-15). Transitive; a function
       reached twice is one module; at most 8 levels and 32 functions
       (54000); a cycle between different functions, or a function using
       itself, is 42P13 (direct recursion through `call` needs nothing);

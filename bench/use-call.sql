@@ -43,7 +43,7 @@ CREATE FUNCTION bench_use.loop_use(n int) RETURNS bigint STRICT LANGUAGE plzig A
 //#use bench_use.mix(bigint) as mix
     var acc: i64 = 1;
     var i: i32 = 0;
-    while (i < n) : (i += 1) acc = (try mix(acc)).?;
+    while (i < n) : (i += 1) acc = (try mix.call(acc)).?;
     return acc;
 $$;
 

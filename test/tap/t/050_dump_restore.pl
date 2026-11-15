@@ -41,7 +41,7 @@ CREATE FUNCTION owned_by_dev() RETURNS text LANGUAGE plzig AS $$ return "dev"; $
 CREATE FUNCTION zzz_helper(x int) RETURNS int STRICT LANGUAGE plzig AS $$ return x + 1; $$;
 CREATE FUNCTION aaa_user(x int) RETURNS int STRICT LANGUAGE plzig AS $$
 //#use public.zzz_helper(integer) as helper
-    return (try helper(x)).? * 10;
+    return (try helper.call(x)).? * 10;
 $$;
 RESET ROLE;
 });

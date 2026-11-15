@@ -25,7 +25,7 @@ SET ROLE dev;
 CREATE FUNCTION s.helper(x int) RETURNS int STRICT LANGUAGE plzig AS $$ return x + 1; $$;
 CREATE FUNCTION s.user_fn(x int) RETURNS int STRICT LANGUAGE plzig AS $$
 //#use s.helper(integer) as helper
-    return (try helper(x)).? * 10;
+    return (try helper.call(x)).? * 10;
 $$;
 });
 
@@ -112,7 +112,7 @@ SET ROLE dev;
 SET check_function_bodies = off;
 CREATE FUNCTION s.lazy_user(x int) RETURNS int STRICT LANGUAGE plzig AS $$
 //#use s.helper2(integer) as h
-    return (try h(x)).?;
+    return (try h.call(x)).?;
 $$;
 RESET check_function_bodies;
 CREATE FUNCTION s.helper2(x int) RETURNS int STRICT LANGUAGE plzig AS $$ return x + 5; $$;

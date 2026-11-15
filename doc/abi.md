@@ -654,7 +654,7 @@ const plzig = @import("plzig"); const std = plzig.std; pub fn call(@"a": i32, @"
   unnamed parameters are `arg1..argN`.
 * `DO` blocks: `pub fn call() anyerror!void {`.
 * Used functions (`//#use schema.f(types) as name`, `src/plzig_use.c`):
-  right after the prelude, one `const @"name" = @import("plzig.use.name").call;`
+  right after the prelude, one `const @"name" = @import("plzig.use.name");`
   per directive, on the header line. Each used function is compiled from
   its own generated source (exactly as when it is compiled standalone) as
   module `plzig.unit.<i>` from `src/unit<i>.zig`, with `--dep plzig` and a

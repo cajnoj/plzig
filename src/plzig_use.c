@@ -10,7 +10,8 @@
  *
  * Each used function is compiled into the user's module as a Zig module of
  * its own, from exactly the source it is compiled from when standalone, and
- * the alias is its `call`: a plain Zig function call, no SPI.  The lines stay
+ * the alias names that module: alias.call(...) is a plain Zig function call,
+ * no SPI, and alias.name reaches what the function declares pub.  The lines stay
  * in the source as Zig comments (a line starting with // is always a comment
  * in Zig: there are no block comments and no string literal spans lines
  * except \\ lines), so compiler line numbers do not move, and this file needs

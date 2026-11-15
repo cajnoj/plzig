@@ -746,7 +746,7 @@ RETURNS text STRICT LANGUAGE plzig AS $$ ... $$;
 CREATE FUNCTION hashids.encode(n bigint, salt text) RETURNS text STRICT LANGUAGE plzig AS $$
 //#use hashids.encode_list(bigint[], text, integer, text) as encode_list
     const list = try std.fmt.allocPrint(plzig.allocator, "{{{d}}}", .{n});
-    return (try encode_list(list, salt, 0, "abcdefghijklmnopqrstuvwxyz")).?;
+    return (try encode_list.call(list, salt, 0, "abcdefghijklmnopqrstuvwxyz")).?;
 $$;
 ```
 
@@ -761,12 +761,32 @@ $$;
   comments may precede them). They stay in the source as comments, so line
   numbers in compiler messages do not move. A malformed directive, an
   unknown one (`//#include`) or one after code is an error at `CREATE`.
-* `name` is the used function's `call`, with exactly the Zig signature its
-  body has when it is compiled on its own: plain parameter types for a
-  `STRICT` function, optionals otherwise; the result is `anyerror!?T`
-  (`anyerror!void` for `void`). So `try encode_list(...)` propagates its
-  Zig errors, and its `plzig.raise`, panics and SPI errors abort the call
-  as the caller's own would.
+* `name` is the used function as a Zig namespace. `name.call(...)` is the
+  function itself, with exactly the Zig signature its body has when it is
+  compiled on its own: plain parameter types for a `STRICT` function,
+  optionals otherwise; the result is `anyerror!?T` (`anyerror!void` for
+  `void`). So `try name.call(...)` propagates its Zig errors, and its
+  `plzig.raise`, panics and SPI errors abort the call as the caller's own
+  would.
+* Whatever the used function declares `pub` after its body (functions,
+  constants, types) is reachable as `name.declaration`, with its native Zig
+  types: no conversion to SQL types and back. Declarations without `pub`
+  stay private. This makes a function usable as a library:
+
+  ```sql
+  CREATE FUNCTION lib.clamp(x int) RETURNS int STRICT LANGUAGE plzig AS $$
+      return clampTo(i32, x, 0, limit);
+  }
+  pub const limit = 100;
+  pub fn clampTo(comptime T: type, v: T, lo: T, hi: T) T {
+      return @max(lo, @min(hi, v));
+  $$;
+
+  CREATE FUNCTION lib.clamp8(x bigint) RETURNS bigint STRICT LANGUAGE plzig AS $$
+  //#use lib.clamp(integer) as clamp
+      return clamp.clampTo(i64, x, -clamp.limit, clamp.limit);
+  $$;
+  ```
 * Each used function is compiled as a Zig module of its own, so its private
   helpers (code after its body) never clash with the user's. It may itself
   use other functions (at most 8 levels deep and 32 functions in all); a
