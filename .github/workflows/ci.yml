@@ -4,6 +4,12 @@
 #
 # The variants that need the vendored PostgreSQL sources (hardened, Valgrind,
 # ASan, coverage, pg_upgrade) are not run here; see docker/run-all.sh.
+# Exception: a short smoke run of every fuzz target (job fuzz-smoke; the
+# source of the ASan server is fetched at its pinned commit).  The long
+# fuzzing runs are in fuzz-nightly.yml.  Job zig-newest is an early warning
+# for the next Zig upgrade and may fail.
+#
+# GitHub-hosted runners only (owner's decision): no self-hosted labels.
 #
 # The compiler sandbox defaults to "require", which needs Landlock ABI >= 6
 # (Linux 6.12) and seccomp on the runner's kernel.  The tests do not weaken
@@ -71,3 +77,49 @@ jobs:
           name: logs-${{ matrix.pg }}-${{ matrix.arch }}
           path: build/test-logs/
           if-no-files-found: ignore
+
+  fuzz-smoke:
+    name: Fuzz smoke (every target, 60 s)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Fetch the PostgreSQL source (pinned commit)
+        run: docker/fetch-pg-source.sh 18.7
+
+      - name: Fuzz smoke
+        run: docker/run-fuzz.sh smoke 60
+
+      - name: Upload fuzz output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-smoke
+          path: |
+            build/fuzz/
+            !build/fuzz/*/corpus/
+          if-no-files-found: ignore
+
+  zig-newest:
+    name: Newest Zig release (early warning, may fail)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Early warning only (PLAN.md section 14): the validator and SDK unit
+    # tests with the newest Zig release.  The product build stays pinned.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Validator and SDK unit tests with the newest Zig
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" postgres:18.7-bookworm bash -c '
+            set -e
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends build-essential curl ca-certificates xz-utils \
+                "postgresql-server-dev-${PG_MAJOR}=${PG_VERSION}" >/dev/null
+            sh /repo/docker/zig-newest-check.sh'

@@ -972,7 +972,9 @@ the validator, SDK and flag sets that need review and fuzzing.
   3. An overlap period in which the previous PL/Zig major (previous Zig)
      still receives fixes.
 - *CI:* the matrix stays PostgreSQL versions x one Zig. Add one job against
-  the newest Zig release that is allowed to fail (early warning only).
+  the newest Zig release that is allowed to fail (early warning only). *Done
+  2026-11-15 (Deviation 40): job `zig-newest`, validator and SDK unit tests
+  only.*
 
 ## Deviations from plan
 
@@ -2049,3 +2051,35 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       `fuzz/common/sql-lib.sh` matches the resulting `ERROR:  PL/Zig
       compiler terminated by signal 11` line and reports it as a finding;
       that check was left as it is (open, see the task report).
+40. **CI fuzzing and the newest-Zig job, GitHub-hosted runners only
+    (2026-11-15).** `ci.yml` gains `fuzz-smoke` (every target 60 s on push
+    and pull request) and `zig-newest` (`continue-on-error`); the new
+    `fuzz-nightly.yml` runs each target as a job of its own (schedule and
+    `workflow_dispatch` with duration and targets inputs). Decisions:
+    - *PostgreSQL source in CI*: the ASan server is built from source;
+      `docker/fetch-pg-source.sh <version>` clones the release tag and
+      verifies the pinned commit (the same commits as the vendored trees),
+      like `third_party/prepare-wamr.sh` does for WAMR.
+    - *Duration*: 18900 s of fuzzing per target by default (~15-20 min of
+      image builds plus upload keep the job at about 5.5 h, under the 6-h
+      limit; `timeout-minutes: 355`). Longer inputs are refused.
+    - *Corpus*: Actions cache (`actions/cache/restore@v6` with a per-run
+      key and the target as restore prefix, `actions/cache/save@v6`), for
+      the native targets only (the SQL targets keep no corpus). Chosen over
+      artifacts because restoring the newest entry needs no API token or
+      third-party action; eviction after 7 days loses progress, never
+      findings. Saved only by runs on the default branch; the workflow has
+      no `pull_request` trigger, so no fork can seed the corpus.
+    - *Findings*: `run-fuzz.sh`'s exit status fails the job; the target's
+      output directory (without the corpus) is uploaded always.
+    - *Newest Zig without weakening the pin*: running the product against
+      another Zig is impossible without changing it (the server refuses any
+      compiler but `PLZIG_ZIG_VERSION`), so `docker/zig-newest-check.sh`
+      only runs `make check-zig` (validator and SDK unit tests) with the
+      newest release from `ziglang.org/download/index.json` (SHA-256 from
+      the index, over HTTPS), overriding `ZIG_VERSION` for that one make
+      invocation in a scratch copy. Verified locally with 0.17.1 (pass) and
+      0.16.0 (fails: the validator's builtin table, as intended).
+    - *Not verifiable here*: the workflows were not run on GitHub; they pass
+      `actionlint` 1.7.12 (with shellcheck) and the commands they run were
+      run locally in Docker with short durations.

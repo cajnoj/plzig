@@ -92,6 +92,22 @@ replaces only what it calls in the rest of the server (`pgshim.c`,
   SQLsmith-style random SQL, the TAP-level fault injection (covered
   deterministically by `test/tap`).
 
+## CI
+
+* Every push and pull request: `docker/run-fuzz.sh smoke 60` (job
+  `fuzz-smoke` in `.github/workflows/ci.yml`; the PostgreSQL source for the
+  ASan server is fetched at its pinned commit by
+  `docker/fetch-pg-source.sh`).
+* Nightly (`.github/workflows/fuzz-nightly.yml`, GitHub-hosted runners
+  only): each target is a job of its own fuzzing 18900 s (5 h 15 min; the
+  image builds and the upload keep the job under GitHub's 6-hour limit);
+  `workflow_dispatch` takes a shorter duration and a subset of targets. The
+  native targets' corpora persist in the Actions cache (restored from the
+  newest earlier run by key prefix, saved only by runs on the default
+  branch; the workflow has no pull-request trigger). A finding fails the
+  job; `artifacts/`, `finding-*.txt`, sanitizer reports and logs are
+  uploaded as an artifact.
+
 ## Long runs (pre-release)
 
 PLAN.md §13 C asks for at least 24 hours per target before a release:

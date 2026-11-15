@@ -128,6 +128,13 @@ running.
 
 ## Running the tests
 
+GitHub Actions (GitHub-hosted runners only) runs the per-version layers and
+a 60-second smoke run of every fuzz target on every push and pull request,
+an allowed-to-fail job with the newest Zig release (validator and SDK unit
+tests only, `docker/zig-newest-check.sh`), and every fuzz target for about
+5.5 hours nightly (`.github/workflows/fuzz-nightly.yml`, see
+[fuzz/README.md](fuzz/README.md#ci)).
+
 Two entry points, both Docker-based, CI-friendly (no TTY, plain output, exit
 status non-zero on any failure):
 

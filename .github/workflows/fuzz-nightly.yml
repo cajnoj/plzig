@@ -1,0 +1,131 @@
+# PL/Zig nightly fuzzing: every fuzz target of fuzz/ (fuzz/README.md) as a
+# job of its own for several hours, on GitHub-hosted runners only (owner's
+# decision: never self-hosted runners).  Short smoke runs of every target
+# are in ci.yml (job fuzz-smoke).
+#
+# Duration: GitHub stops a job after 6 hours.  The images (PostgreSQL from
+# source with assertions, PL/Zig and WAMR with ASan/UBSan, clang/libFuzzer)
+# take about 15-20 minutes to build, the upload a few, so a target fuzzes
+# 18900 s (5 h 15 min) by default and the job ends at about 5.5 hours.
+# workflow_dispatch takes a shorter duration for testing.
+#
+# Corpus: the native targets (validator, loader, jsonb) keep their grown
+# corpus between runs in the Actions cache (actions/cache/restore + save,
+# key per target and run, restore-keys = newest earlier run).  The cache
+# rather than artifacts: restoring the newest entry by prefix needs no
+# token and no third-party action, while downloading another run's
+# artifact needs an API token with actions:read; cache entries unused for
+# 7 days are evicted, which only loses fuzzing progress, never findings.
+# The SQL-driven targets generate their inputs and keep no corpus.
+# Only scheduled or manually started runs on the default branch save the
+# cache; this workflow has no pull_request trigger, so no pull request (in
+# particular none from a fork) can write the corpus a later run fuzzes from.
+#
+# Findings: run-fuzz.sh exits non-zero on any finding, which fails the job;
+# crash/leak/timeout inputs (artifacts/), finding-*.txt reproducer notes,
+# sanitizer reports and logs are uploaded as an artifact.
+name: Fuzz (nightly)
+
+on:
+  schedule:
+    - cron: "17 1 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Fuzzing time per target in seconds (default 18900 = 5 h 15 min)"
+        required: false
+        default: "18900"
+      targets:
+        description: "Targets, space-separated (default: all)"
+        required: false
+        default: "validator loader jsonb hostabi marshal pipeline"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  targets:
+    name: Select targets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      list: ${{ steps.sel.outputs.list }}
+    steps:
+      - id: sel
+        env:
+          WANT: ${{ github.event.inputs.targets || 'validator loader jsonb hostabi marshal pipeline' }}
+        run: |
+          list=""
+          for t in $WANT; do
+            case $t in
+              validator|loader|jsonb|hostabi|marshal|pipeline) list="$list\"$t\"," ;;
+              *) echo "unknown target: $t" >&2; exit 1 ;;
+            esac
+          done
+          [ -n "$list" ] || { echo "no targets" >&2; exit 1; }
+          echo "list=[${list%,}]" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    needs: targets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.list) }}
+    env:
+      FUZZ_SECONDS: ${{ github.event.inputs.seconds || '18900' }}
+      # the native targets keep a corpus between runs
+      KEEP_CORPUS: ${{ contains(fromJSON('["validator", "loader", "jsonb"]'), matrix.target) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check the duration
+        run: |
+          case $FUZZ_SECONDS in ''|*[!0-9]*) echo "seconds must be a number" >&2; exit 1 ;; esac
+          if [ "$FUZZ_SECONDS" -gt 18900 ]; then echo "seconds must be at most 18900 (6 h job limit)" >&2; exit 1; fi
+
+      - name: Fetch the PostgreSQL source (pinned commit)
+        run: docker/fetch-pg-source.sh 18.7
+
+      - name: Restore the corpus
+        if: env.KEEP_CORPUS == 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: build/fuzz/${{ matrix.target }}/corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      - name: Fuzz
+        env:
+          PLZIG_FUZZ_JOBS: "4"
+          TARGET: ${{ matrix.target }}
+        run: docker/run-fuzz.sh "$TARGET" "$FUZZ_SECONDS"
+
+      - name: Save the corpus
+        if: >-
+          !cancelled() && env.KEEP_CORPUS == 'true' &&
+          github.event_name != 'pull_request' &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+          hashFiles(format('build/fuzz/{0}/corpus/**', matrix.target)) != ''
+        uses: actions/cache/save@v6
+        with:
+          path: build/fuzz/${{ matrix.target }}/corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+
+      - name: Upload findings and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            build/fuzz/${{ matrix.target }}/
+            !build/fuzz/${{ matrix.target }}/corpus/
+          if-no-files-found: ignore
