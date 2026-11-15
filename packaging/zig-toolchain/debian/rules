@@ -1,0 +1,44 @@
+#!/usr/bin/make -f
+# plzig-zig-toolchain: repackages the official Zig build (doc/packaging.md).
+# The upstream tarballs are the component tarballs orig-amd64 and orig-arm64
+# (unpacked as amd64/ and arm64/); the main orig tarball holds NOTICE, the
+# license texts, install-pruned.sh and zig.sha256sums (the pinned checksums
+# of the compiler binaries).
+
+include /usr/share/dpkg/architecture.mk
+include /usr/share/dpkg/pkg-info.mk
+ZIG_VERSION := $(DEB_VERSION_UPSTREAM)
+ZIG_DIR := /usr/libexec/plzig-zig-toolchain/$(ZIG_VERSION)
+
+%:
+	dh $@
+
+# the unpacked compiler must be the pinned upstream file
+override_dh_auto_configure:
+	test -f $(DEB_HOST_ARCH)/zig || { echo "no Zig build for $(DEB_HOST_ARCH)" >&2; exit 1; }
+	grep -E " $(DEB_HOST_ARCH)/zig$$" zig.sha256sums | sha256sum -c -
+
+override_dh_auto_build:
+
+override_dh_auto_install:
+	sh install-pruned.sh $(DEB_HOST_ARCH) $(CURDIR)/debian/plzig-zig-toolchain$(ZIG_DIR)
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	test "$$($(DEB_HOST_ARCH)/zig version)" = "$(ZIG_VERSION)"
+endif
+
+execute_after_dh_installdocs:
+	install -d debian/plzig-zig-toolchain/usr/share/doc/plzig-zig-toolchain/licenses
+	install -m 0644 licenses/* debian/plzig-zig-toolchain/usr/share/doc/plzig-zig-toolchain/licenses/
+
+# Ship the upstream files byte for byte: the compiler's SHA-256 stays the
+# official one (usable for plzig.zig_sha256); it is static, no shlibs.
+override_dh_strip:
+override_dh_dwz:
+override_dh_strip_nondeterminism:
+override_dh_shlibdeps:
+# dh_fixperms makes every file below usr/libexec executable; install-pruned.sh
+# already set the modes (0755 for the compiler, 0644 for lib/)
+override_dh_fixperms:
+	dh_fixperms -Xusr/libexec/plzig-zig-toolchain

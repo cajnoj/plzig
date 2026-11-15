@@ -1,0 +1,7 @@
+# Copied by debian/rules to debian/postgresql-<major>-plzig.lintian-overrides
+# for every major built.
+#
+# plzig-validate is a static PIE (an ELF of type DYN without a program
+# interpreter or DT_NEEDED), not a shared library: the backend runs it under
+# Landlock, whose file rules give it no dynamic loader or shared libraries.
+postgresql-*-plzig: shared-library-lacks-prerequisites [usr/lib/postgresql/*/lib/plzig/plzig-validate]

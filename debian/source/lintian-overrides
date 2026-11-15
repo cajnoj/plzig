@@ -1,0 +1,11 @@
+# The fuzzing corpora and reproducers (fuzz/loader/corpus, fuzz/loader/findings)
+# are WebAssembly test inputs for the fuzz harnesses (fuzz/README.md), made by
+# the project's own tooling; nothing is built from them and nothing of them is
+# installed.
+plzig source: source-contains-prebuilt-wasm-binary [fuzz/*]
+
+# The file named is the notice file of the Zig toolchain package's sources
+# (packaging/zig-toolchain/), not of this package; the notices for what this
+# package contains (WAMR: Apache-2.0 WITH LLVM-exception, which ships no NOTICE
+# file) are in THIRD-PARTY-NOTICES and debian/copyright.
+plzig source: missing-notice-file-for-apache-license [packaging/zig-toolchain/NOTICE]

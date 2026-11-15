@@ -1,0 +1,22 @@
+Source: plzig-zig-toolchain
+Section: devel
+Priority: optional
+Maintainer: PL/Zig maintainers <plzig@invalid>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+Homepage: https://ziglang.org/
+
+Package: plzig-zig-toolchain
+Architecture: amd64 arm64
+Depends: ${misc:Depends}
+Description: Zig compiler for PL/Zig (official build, pruned)
+ The official Zig compiler release (ziglang.org, SHA-256 pinned by PL/Zig),
+ for the PL/Zig procedural language of PostgreSQL. It is installed in
+ /usr/libexec/plzig-zig-toolchain/<version>, not on the PATH; the
+ postgresql-<major>-plzig packages use it as their default plzig.zig_path.
+ .
+ The compiler binary is the unchanged upstream build (statically linked, as
+ PL/Zig's default Landlock sandbox requires). Its lib/ directory holds only
+ the parts PL/Zig needs: Zig's standard library, compiler runtime and test
+ runner, no C/C++ library sources or headers.

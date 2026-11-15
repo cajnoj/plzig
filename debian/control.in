@@ -1,0 +1,37 @@
+Source: plzig
+Section: database
+Priority: optional
+Maintainer: PL/Zig maintainers <plzig@invalid>
+Build-Depends:
+ debhelper-compat (= 13),
+ postgresql-server-dev-all (>= 217~),
+ cmake,
+ patch,
+ plzig-zig-toolchain (>= 0.17.1),
+ plzig-zig-toolchain (<< 0.17.2~),
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+
+Package: postgresql-PGVERSION-plzig
+Architecture: amd64 arm64
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+ ${postgresql:Depends},
+ plzig-zig-toolchain (>= 0.17.1),
+ plzig-zig-toolchain (<< 0.17.2~),
+Description: PL/Zig procedural language for PostgreSQL PGVERSION
+ PL/Zig lets PostgreSQL functions, procedures, triggers and DO blocks be
+ written in Zig 0.17.1. Function bodies are compiled by the Zig compiler
+ (package plzig-zig-toolchain, the default plzig.zig_path) to WebAssembly
+ and run in an embedded interpreter (WAMR) inside the backend.
+ .
+ The compiler runs in a sandbox. Its default mode,
+ plzig.compiler_sandbox = require, needs Landlock ABI 6 or later (Linux
+ 6.12 or newer) and seccomp. On older kernels (the stock kernels of
+ Debian 12 and Ubuntu 22.04 and 24.04, for example) CREATE FUNCTION ...
+ LANGUAGE plzig refuses to compile until an administrator lowers
+ plzig.compiler_sandbox in postgresql.conf, which runs the compiler with
+ fewer restrictions (see the README's security model).
+ .
+ USAGE on the language is not granted to PUBLIC.

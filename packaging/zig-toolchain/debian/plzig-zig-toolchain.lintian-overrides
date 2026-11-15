@@ -1,0 +1,5 @@
+# The package is the official Zig build, unchanged (NOTICE): upstream links
+# it statically, with its own copies of LLVM, zlib, zstd and musl, and
+# PL/Zig's default Landlock sandbox needs a statically linked compiler.
+plzig-zig-toolchain: statically-linked-binary [usr/libexec/plzig-zig-toolchain/*/zig]
+plzig-zig-toolchain: embedded-library zlib [usr/libexec/plzig-zig-toolchain/*/zig]

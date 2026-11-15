@@ -1,0 +1,102 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: PL/Zig
+Upstream-Contact: PL/Zig maintainers <plzig@invalid>
+Comment:
+ The binary packages contain plzig.so (PL/Zig and, statically linked, the
+ WebAssembly Micro Runtime, WAMR 2.4.5, with PL/Zig's patch
+ third_party/wamr-interrupt.patch) and plzig-validate (PL/Zig and parts of
+ the Zig standard library). The WAMR source is the orig-wamr component
+ tarball (unpacked as wamr/). The Zig compiler used for the build comes
+ from the plzig-zig-toolchain package and is not part of this source.
+ See THIRD-PARTY-NOTICES.
+
+Files: *
+Copyright: 2026 Jonathan Jacobson
+License: PostgreSQL
+
+Files: wamr/*
+Copyright: 2019 Intel Corporation
+           2019-2021 Intel Corporation and others
+           2023 Amazon Inc.
+           2023 Midokura Japan KK
+           2024 Tencent Corporation
+           and others (see the individual source files)
+License: Apache-2.0 with LLVM exception
+
+Files: wamr/core/iwasm/include/wasm_c_api.h
+Copyright: WebAssembly C API authors
+License: Apache-2.0
+
+Files: third_party/wamr-interrupt.patch
+Copyright: 2026 Jonathan Jacobson
+License: Apache-2.0 with LLVM exception
+
+Files: LICENSES/MIT-Zig.txt
+Copyright: Zig contributors
+License: Expat
+Comment: License of the Zig standard library code compiled into
+ plzig-validate.
+
+Files: debian/*
+Copyright: 2026 PL/Zig maintainers
+License: PostgreSQL
+
+License: PostgreSQL
+ Permission to use, copy, modify, and distribute this software and its
+ documentation for any purpose, without fee, and without a written agreement is
+ hereby granted, provided that the above copyright notice and this paragraph
+ and the following two paragraphs appear in all copies.
+ .
+ IN NO EVENT SHALL JONATHAN JACOBSON BE LIABLE TO ANY PARTY FOR DIRECT,
+ INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING LOST
+ PROFITS, ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN
+ IF JONATHAN JACOBSON HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ .
+ JONATHAN JACOBSON SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING, BUT NOT
+ LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+ PARTICULAR PURPOSE. THE SOFTWARE PROVIDED HEREUNDER IS ON AN "AS IS" BASIS,
+ AND JONATHAN JACOBSON HAS NO OBLIGATIONS TO PROVIDE MAINTENANCE, SUPPORT,
+ UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+
+License: Apache-2.0
+ On Debian systems, the full text of the Apache License, Version 2.0 can be
+ found in /usr/share/common-licenses/Apache-2.0.
+
+License: Apache-2.0 with LLVM exception
+ On Debian systems, the full text of the Apache License, Version 2.0 can be
+ found in /usr/share/common-licenses/Apache-2.0. The LLVM exception:
+ .
+ ---- LLVM Exceptions to the Apache 2.0 License ----
+ .
+ As an exception, if, as a result of your compiling your source code, portions
+ of this Software are embedded into an Object form of such source code, you
+ may redistribute such embedded portions in such Object form without complying
+ with the conditions of Sections 4(a), 4(b) and 4(d) of the License.
+ .
+ In addition, if you combine or link compiled forms of this Software with
+ software that is licensed under the GPLv2 ("Combined Software") and if a
+ court of competent jurisdiction determines that the patent provision (Section
+ 3), the indemnity provision (Section 9) or other Section of the License
+ conflicts with the conditions of the GPLv2, you may retroactively and
+ prospectively choose to deem waived or otherwise exclude such Section(s) of
+ the License, but only in their entirety and only with respect to the Combined
+ Software.
+
+License: Expat
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ THE SOFTWARE.

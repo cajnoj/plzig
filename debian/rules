@@ -1,0 +1,55 @@
+#!/usr/bin/make -f
+# PL/Zig: one source, postgresql-<major>-plzig for every PostgreSQL major in
+# debian/pgversions that has a postgresql-server-dev package installed
+# (pg_buildext, built in-tree one major after the other: pgxs_loop, because
+# the Makefile builds WAMR and the validator below build/).  No network: Zig
+# comes from the plzig-zig-toolchain package, WAMR from the orig-wamr
+# component tarball (unpacked as wamr/).  See doc/packaging.md.
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+include /usr/share/dpkg/buildflags.mk
+
+ZIG_VERSION := $(shell sed -n 's/^ZIG_VERSION := //p' Makefile)
+export ZIG = /usr/libexec/plzig-zig-toolchain/$(ZIG_VERSION)/zig
+# compiled-in default of plzig.zig_path: the toolchain package's compiler
+export PLZIG_DEFAULT_ZIG_PATH = $(ZIG)
+export WAMR_SRC = $(CURDIR)/wamr
+# pg_buildext passes $CFLAGS as COPT; PGXS takes PostgreSQL's own flags and
+# ignores LDFLAGS from the environment, so hand them over as PG_LDFLAGS.
+# cmake (WAMR) reads CFLAGS/LDFLAGS from the environment.
+export CFLAGS CPPFLAGS LDFLAGS
+export PG_LDFLAGS = $(LDFLAGS)
+
+%:
+	dh $@ --with pgxs_loop
+
+# The regression suite needs a running server with Landlock ABI >= 6 and
+# seccomp (plzig.compiler_sandbox = require); it is run against the
+# installed packages by packaging/test-packages.sh.  At build time: the unit
+# tests of the source validator and the guest SDK (no server).
+override_dh_pgxs_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	$(MAKE) check-zig PG_CONFIG=/usr/lib/postgresql/$(shell pg_buildext supported-versions | tail -1)/bin/pg_config
+endif
+
+# license texts are in /usr/share/doc/<package>/copyright instead
+execute_after_dh_auto_install:
+	rm -rf debian/postgresql-*-plzig/usr/share/doc/postgresql-doc-*
+
+# the same lintian overrides for every postgresql-<major>-plzig
+execute_before_dh_lintian:
+	for v in $$(pg_buildext supported-versions); do \
+	    sed "s/^postgresql-\*-plzig:/postgresql-$$v-plzig:/" debian/postgresql-plzig.lintian-overrides.in \
+	        > debian/postgresql-$$v-plzig.lintian-overrides; \
+	done
+
+# build/ holds WAMR's patched copy and library, the validator, Zig caches
+execute_after_dh_auto_clean:
+	rm -rf build results regression.diffs regression.out plzig.control
+	rm -f debian/postgresql-[0-9]*-plzig.lintian-overrides
+
+# plzig-validate is a static PIE built and stripped by Zig: no debug symbols
+override_dh_dwz:
+	dh_dwz -Xplzig-validate
+override_dh_strip:
+	dh_strip -Xplzig-validate

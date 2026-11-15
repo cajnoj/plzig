@@ -1,0 +1,7 @@
+# The component tarballs orig-amd64 and orig-arm64 are the unmodified upstream
+# Zig release tarballs (their SHA-256 is pinned by PL/Zig).  Their lib/libc
+# holds C library headers of other projects, under other licenses; none of
+# lib/libc is installed (install-pruned.sh, NOTICE).  Whether a repository
+# accepts this source as it is, or wants a repacked tarball, is an open
+# question for each repository (doc/packaging.md).
+plzig-zig-toolchain source: license-problem-non-free-RFC [*/lib/libc/include/generic-freebsd/netlink/netlink.h]
