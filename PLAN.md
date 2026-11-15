@@ -2015,3 +2015,37 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
     *Tests*: `test/sql/errors.sql` (`plzig.raise`, `raiseMsg`, notice,
     warning, info, log and `@panic` with escape sequences, CR, BEL, BS, DEL,
     newline and tab).
+39. **Pipeline fuzz target: a generator whose bodies compile (2026-11-15).**
+    `fuzz/pipeline/gen.pl` produced bodies of one signature (`fz_p(a int)
+    RETURNS int STRICT`) of which almost none were accepted (measured on the
+    ASan image, 420 s: 14 of 412 accepted, 3.4%; 12 calls). It now writes
+    a body and a `.meta` (family, kind, statement head, call) per case:
+    14 families with fixed signatures (scalar, text, non-strict, native
+    types with four result types, `OUT` with a typmod, composite argument and
+    result, `TABLE` and `SETOF`, a row trigger, a procedure with transaction
+    control, `DO`), ~50% valid bodies assembled from type-correct statements
+    (including statements that fail at run time on purpose and results the
+    host must refuse), ~15% near-valid, ~35% the previous invalid bodies
+    (corpus mutations and stress fragments, unchanged). Measured (non-ASan
+    image, 300 s): 387 of 752 accepted (51%; valid 366/378, near 13/117,
+    invalid 8/257), 345 calls of all families. `run.sh` creates the
+    families' type and tables, reports the accepted share per kind and
+    family, and checks calls against the base set plus, per family, the
+    SQLSTATEs of the host's own result checks (22008 date/timestamp range,
+    22P05 a `\u0000` JSON escape, 22001 typmods, 22021 invalid UTF-8, 23502
+    `NOT NULL`, 39P01 trigger protocol, 24000 cursor closed by commit); the
+    base sets are unchanged.
+    - *Oracle correction for `DO`*: a `DO` block compiles **and runs** its
+      body in one statement, so it is now held to the union of the
+      `CREATE` set and the call set. The old oracle held it to the
+      `CREATE` set only and reported a `DO` block that panicked (SQLSTATE
+      38000) as a finding, although a panic is a clean external-routine
+      error (Deviation 5) exactly as in a called function, where 38000 was
+      always accepted. Nothing is accepted for `DO` that is not accepted for
+      a call; no other set was widened.
+    - *Seen while fuzzing*: the Zig compiler crashes with SIGSEGV on `while
+      (k < n) : (k += continue)` (a Zig bug, contained by the sandbox:
+      SQLSTATE 58000, counted). The shared server-log check of
+      `fuzz/common/sql-lib.sh` matches the resulting `ERROR:  PL/Zig
+      compiler terminated by signal 11` line and reports it as a finding;
+      that check was left as it is (open, see the task report).
