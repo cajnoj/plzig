@@ -664,26 +664,7 @@ pub const Numeric = struct {
     /// rounded; round first with `round(0)` for PostgreSQL's numeric::bigint
     /// behaviour), one outside the i64 range error.Overflow.
     pub fn toI64(self: Numeric) ToIntError!i64 {
-        if (!self.isFinite()) return error.NotFinite;
-        const nd = self.ndigits();
-        const w: i64 = self.weight();
-        // digits at index > weight are fractional
-        var i: i64 = @max(w + 1, 0);
-        while (i < nd) : (i += 1) {
-            if (self.digit(@intCast(i)) != 0) return error.NotIntegral;
-        }
-        var mag: u64 = 0;
-        i = 0;
-        while (i <= w) : (i += 1) {
-            mag = s.math.mul(u64, mag, 10000) catch return error.Overflow;
-            mag = s.math.add(u64, mag, self.digitAt(i)) catch return error.Overflow;
-        }
-        if (self.signField() == sign_neg) {
-            if (mag > @as(u64, 1) << 63) return error.Overflow;
-            return @bitCast(0 -% mag);
-        }
-        if (mag > s.math.maxInt(i64)) return error.Overflow;
-        return @intCast(mag);
+        return self.view().toI64();
     }
 
     pub const ToFloatError = error{ Overflow, Underflow };
@@ -694,51 +675,11 @@ pub const Numeric = struct {
     /// that rounds to zero error.Underflow (PostgreSQL raises "out of range"
     /// for both).
     pub fn toF64(self: Numeric) ToFloatError!f64 {
-        switch (self.signField()) {
-            sign_nan => return s.math.nan(f64),
-            sign_pinf => return s.math.inf(f64),
-            sign_ninf => return -s.math.inf(f64),
-            else => {},
-        }
-        // "[-]0.<digits>e<exp>": at most 800 significant digits, followed
-        // by a sticky 1 if anything nonzero was cut (enough for correct
-        // rounding: f64 needs at most 767 significant digits)
-        var buf: [840]u8 = undefined;
-        var n: usize = 0;
-        if (self.signField() == sign_neg) {
-            buf[n] = '-';
-            n += 1;
-        }
-        buf[n] = '0';
-        buf[n + 1] = '.';
-        n += 2;
-        const start = n;
-        var nonzero = false;
-        var sticky = false;
-        for (0..self.ndigits()) |i| {
-            const d = self.digit(i);
-            if (d != 0) nonzero = true;
-            if (n - start >= 800) {
-                if (d != 0) sticky = true;
-                continue;
-            }
-            buf[n] = '0' + @as(u8, @intCast(d / 1000));
-            buf[n + 1] = '0' + @as(u8, @intCast(d / 100 % 10));
-            buf[n + 2] = '0' + @as(u8, @intCast(d / 10 % 10));
-            buf[n + 3] = '0' + @as(u8, @intCast(d % 10));
-            n += 4;
-        }
-        if (!nonzero) return 0;
-        if (sticky) {
-            buf[n] = '1';
-            n += 1;
-        }
-        const e = s.fmt.bufPrint(buf[n..], "e{d}", .{(@as(i32, self.weight()) + 1) * 4}) catch unreachable;
-        n += e.len;
-        const v = s.fmt.parseFloat(f64, buf[0..n]) catch unreachable;
-        if (s.math.isInf(v)) return error.Overflow;
-        if (v == 0) return error.Underflow;
-        return v;
+        return self.view().toF64();
+    }
+
+    fn view(self: Numeric) DigitView {
+        return .{ .sign = self.signField(), .weight = self.weight(), .digits = self.wire[8..], .le = false };
     }
 
     /// The value of an i64 (scale 0), in the per-call arena.
@@ -760,7 +701,7 @@ pub const Numeric = struct {
         var lo: usize = 0; // trailing zero digits are not stored
         while (rev[lo] == 0) lo += 1;
         const nd = n - lo;
-        const out = try gpa.alloc(u8, 8 + 2 * nd);
+        const out = try allocBytes(gpa, 8 + 2 * nd);
         put16(out, 0, @intCast(nd));
         put16(out, 2, @bitCast(w));
         put16(out, 4, if (v < 0) sign_neg else sign_pos);
@@ -899,7 +840,7 @@ pub const Numeric = struct {
         while (j0 < total and baseDigit(src, offset, ddigits, j0) == 0) j0 += 1;
         if (j0 == total) {
             // zero: weight 0, positive (make_result)
-            const out = try gpa.alloc(u8, 8);
+            const out = try allocBytes(gpa, 8);
             @memset(out, 0);
             put16(out, 6, @intCast(dscale));
             return .{ .wire = out };
@@ -909,7 +850,7 @@ pub const Numeric = struct {
         const nd = j1 - j0 + 1;
         const fw = w - j0;
         if (nd > max_ndigits or fw > s.math.maxInt(i16) or fw < s.math.minInt(i16)) return error.Overflow;
-        const out = try gpa.alloc(u8, 8 + 2 * @as(usize, @intCast(nd)));
+        const out = try allocBytes(gpa, 8 + 2 * @as(usize, @intCast(nd)));
         put16(out, 0, @intCast(nd));
         put16(out, 2, @bitCast(@as(i16, @intCast(fw))));
         put16(out, 4, if (negative) sign_neg else sign_pos);
@@ -1042,13 +983,22 @@ pub const Numeric = struct {
 
     const Op = enum(u32) { add = 1, sub = 2, mul = 3, div = 4, div_trunc = 5, mod = 6, round = 7, trunc = 8, abs = 9, neg = 10 };
 
+    /// The host writes the result straight into arena memory taken without
+    /// the 0xAA fill (64 bytes: up to 28 base-10000 digits), whose unused
+    /// tail is given back at once; a larger result is computed again into a
+    /// block of the size the host reported.
     fn hostOp(op: Op, a: Numeric, b: Numeric, arg: i32) error{OutOfMemory}!Numeric {
-        var buf: [256]u8 = undefined;
-        const n = host.numeric_op(@intFromEnum(op), a.wire.ptr, hostLen(a.wire), b.wire.ptr, hostLen(b.wire), arg, &buf, buf.len);
-        if (n >= 0) return .{ .wire = try allocator.dupe(u8, buf[0..@intCast(n)]) };
-        // larger than the stack buffer: the host computes it again into a
-        // buffer of the size it reported
-        const out = try allocator.alloc(u8, @intCast(-@as(i64, n)));
+        const first = 64;
+        const p = allocator.rawAlloc(first, .@"1", @returnAddress()) orelse return error.OutOfMemory;
+        const n = host.numeric_op(@intFromEnum(op), a.wire.ptr, hostLen(a.wire), b.wire.ptr, hostLen(b.wire), arg, p, first);
+        if (n >= 0) {
+            const len: usize = @intCast(n);
+            // the most recent arena allocation: shrinks in place
+            _ = allocator.rawResize(p[0..first], .@"1", len, @returnAddress());
+            return .{ .wire = p[0..len] };
+        }
+        allocator.rawFree(p[0..first], .@"1", @returnAddress());
+        const out = try allocBytes(allocator, @intCast(-@as(i64, n)));
         if (host.numeric_op(@intFromEnum(op), a.wire.ptr, hostLen(a.wire), b.wire.ptr, hostLen(b.wire), arg, out.ptr, hostLen(out)) != out.len)
             raiseMsg("plzig: numeric result changed size");
         return .{ .wire = out };
@@ -1097,6 +1047,146 @@ pub const Numeric = struct {
         return hostOp(.neg, a, zero, 0);
     }
 };
+
+/// The sign, weight and base-10000 digits of a numeric, read in place from
+/// the wire format (big endian) or from the on-disk format inside a jsonb
+/// (little endian): the conversions to i64/f64 work on either without
+/// copying the digits first.
+const DigitView = struct {
+    sign: u16,
+    weight: i16,
+    digits: []const u8,
+    le: bool,
+
+    fn len(self: DigitView) usize {
+        return self.digits.len / 2;
+    }
+    fn at(self: DigitView, i: usize) u16 {
+        const b0: u16 = self.digits[2 * i];
+        const b1: u16 = self.digits[2 * i + 1];
+        return if (self.le) b0 | (b1 << 8) else (b0 << 8) | b1;
+    }
+    fn fastF64(self: DigitView) ?f64 {
+        return fastF64Impl(self);
+    }
+    fn atSigned(self: DigitView, i: i64) u16 {
+        if (i < 0 or i >= self.len()) return 0;
+        return self.at(@intCast(i));
+    }
+
+    /// Numeric.toI64
+    fn toI64(self: DigitView) Numeric.ToIntError!i64 {
+        if (self.sign != Numeric.sign_pos and self.sign != Numeric.sign_neg) return error.NotFinite;
+        const nd = self.len();
+        const w: i64 = self.weight;
+        // digits at index > weight are fractional
+        var i: i64 = @max(w + 1, 0);
+        while (i < nd) : (i += 1) {
+            if (self.at(@intCast(i)) != 0) return error.NotIntegral;
+        }
+        var mag: u64 = 0;
+        i = 0;
+        while (i <= w) : (i += 1) {
+            // mag * 10000 + d without overflow; a plain comparison instead of
+            // std.math.mul, which needs a 128-bit multiply (__multi3) on wasm32
+            const d: u64 = self.atSigned(i);
+            if (mag > (s.math.maxInt(u64) - d) / 10000) return error.Overflow;
+            mag = mag * 10000 + d;
+        }
+        if (self.sign == Numeric.sign_neg) {
+            if (mag > @as(u64, 1) << 63) return error.Overflow;
+            return @bitCast(0 -% mag);
+        }
+        if (mag > s.math.maxInt(i64)) return error.Overflow;
+        return @intCast(mag);
+    }
+
+    /// Numeric.toF64: "[-]0.<digits>e<exp>" parsed by std.fmt.parseFloat;
+    /// at most 800 significant digits, followed by a sticky 1 if anything
+    /// nonzero was cut (enough for correct rounding: f64 needs at most 767
+    /// significant digits).  The text goes to a static buffer: no per-call
+    /// fill of a large stack array (the guest is single-threaded and nothing
+    /// here calls out).
+    fn toF64(self: DigitView) Numeric.ToFloatError!f64 {
+        switch (self.sign) {
+            Numeric.sign_nan => return s.math.nan(f64),
+            Numeric.sign_pinf => return s.math.inf(f64),
+            Numeric.sign_ninf => return -s.math.inf(f64),
+            else => {},
+        }
+        if (self.fastF64()) |v| return v;
+        const buf = &f64_text;
+        var n: usize = 0;
+        if (self.sign == Numeric.sign_neg) {
+            buf[n] = '-';
+            n += 1;
+        }
+        buf[n] = '0';
+        buf[n + 1] = '.';
+        n += 2;
+        const start = n;
+        var nonzero = false;
+        var sticky = false;
+        for (0..self.len()) |i| {
+            const d = self.at(i);
+            if (d != 0) nonzero = true;
+            if (n - start >= 800) {
+                if (d != 0) sticky = true;
+                continue;
+            }
+            buf[n] = '0' + @as(u8, @intCast(d / 1000));
+            buf[n + 1] = '0' + @as(u8, @intCast(d / 100 % 10));
+            buf[n + 2] = '0' + @as(u8, @intCast(d / 10 % 10));
+            buf[n + 3] = '0' + @as(u8, @intCast(d % 10));
+            n += 4;
+        }
+        if (!nonzero) return 0;
+        if (sticky) {
+            buf[n] = '1';
+            n += 1;
+        }
+        const e = s.fmt.bufPrint(buf[n..], "e{d}", .{(@as(i32, self.weight) + 1) * 4}) catch unreachable;
+        n += e.len;
+        const v = s.fmt.parseFloat(f64, buf[0..n]) catch unreachable;
+        if (s.math.isInf(v)) return error.Overflow;
+        if (v == 0) return error.Underflow;
+        return v;
+    }
+};
+
+/// Exact fast path for the common case (Clinger): the significant digits
+/// form an integer m <= 2^53 and the decimal exponent e has |e| <= 22, so m
+/// and 10^|e| are exact doubles and one multiplication or division rounds
+/// correctly.  null when it does not apply (then the text path decides).
+fn fastF64Impl(self: DigitView) ?f64 {
+    var lo: usize = 0;
+    var hi: usize = self.len();
+    while (lo < hi and self.at(lo) == 0) lo += 1;
+    while (hi > lo and self.at(hi - 1) == 0) hi -= 1;
+    if (lo == hi) return null; // zero: the text path returns 0
+    if (hi - lo > 4) return null; // more than 16 digits
+    var m: u64 = 0;
+    for (lo..hi) |i| m = m * 10000 + self.at(i);
+    if (m > (1 << 53)) return null;
+    const e: i64 = 4 * (@as(i64, self.weight) - @as(i64, @intCast(hi - 1)));
+    if (e < -22 or e > 22) return null;
+    const pow10 = [_]f64{ 1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22 };
+    const fm: f64 = @floatFromInt(m);
+    const v = if (e >= 0) fm * pow10[@intCast(e)] else fm / pow10[@intCast(-e)];
+    return if (self.sign == Numeric.sign_neg) -v else v;
+}
+
+/// the text DigitView.toF64 builds (840 bytes: 800 digits, sticky, sign, "0.", exponent)
+var f64_text: [840]u8 = undefined;
+
+/// `n` bytes from `gpa` without the ReleaseSafe 0xAA fill of
+/// Allocator.alloc (done byte by byte by the interpreter): for buffers that
+/// are written completely right away.  Freed like any slice of `gpa`.
+fn allocBytes(gpa: s.mem.Allocator, n: usize) error{OutOfMemory}![]u8 {
+    if (n == 0) return &.{};
+    const p = gpa.rawAlloc(n, .@"1", @returnAddress()) orelse return error.OutOfMemory;
+    return p[0..n];
+}
 
 /// The 15 significant decimal digits of `v` (> 0, finite), rounded half to
 /// even from its exact binary value, as glibc's printf("%.15e") does; `d`
@@ -1332,31 +1422,19 @@ pub const JsonNumber = struct {
     /// The number as a `Numeric`, allocated with `gpa`.
     pub fn numericAlloc(self: JsonNumber, gpa: s.mem.Allocator) (JsonbError || error{OutOfMemory})!Numeric {
         const d = try self.decode();
-        const out = try gpa.alloc(u8, 8 + 2 * d.ndigits);
+        const out = try allocBytes(gpa, 8 + 2 * d.ndigits);
         d.toWire(out);
         return .{ .wire = out };
     }
 
     /// The number as an i64 (see `Numeric.toI64`).
-    pub fn toI64(self: JsonNumber) (JsonbError || Numeric.ToIntError || error{OutOfMemory})!i64 {
-        var buf: [256]u8 = undefined;
-        var fba = s.heap.FixedBufferAllocator.init(&buf);
-        const n = self.numericAlloc(fba.allocator()) catch |err| switch (err) {
-            error.OutOfMemory => try self.numeric(),
-            else => |e| return e,
-        };
-        return n.toI64();
+    pub fn toI64(self: JsonNumber) (JsonbError || Numeric.ToIntError)!i64 {
+        return (try self.decode()).view().toI64();
     }
 
     /// The number as an f64 (see `Numeric.toF64`).
-    pub fn toF64(self: JsonNumber) (JsonbError || Numeric.ToFloatError || error{OutOfMemory})!f64 {
-        var buf: [256]u8 = undefined;
-        var fba = s.heap.FixedBufferAllocator.init(&buf);
-        const n = self.numericAlloc(fba.allocator()) catch |err| switch (err) {
-            error.OutOfMemory => try self.numeric(),
-            else => |e| return e,
-        };
-        return n.toF64();
+    pub fn toF64(self: JsonNumber) (JsonbError || Numeric.ToFloatError)!f64 {
+        return (try self.decode()).view().toF64();
     }
 
     const Decoded = struct {
@@ -1365,6 +1443,10 @@ pub const JsonNumber = struct {
         dscale: u16,
         ndigits: usize,
         digits: []const u8, // little-endian i16, as stored
+
+        fn view(d: Decoded) DigitView {
+            return .{ .sign = d.sign, .weight = d.weight, .digits = d.digits, .le = true };
+        }
 
         fn toWire(d: Decoded, out: []u8) void {
             Numeric.put16(out, 0, @intCast(d.ndigits));
@@ -1491,6 +1573,10 @@ pub const JsonObject = struct {
     /// The value of `key`, or null if there is none: a binary search over
     /// the keys, exactly as jsonb_util.c's getKeyJsonValueFromContainer.
     pub fn get(self: JsonObject, key: []const u8) JsonbError!?JsonValue {
+        // up to 16 keys: one forward pass over the key entries (their
+        // offsets accumulate, lengths are compared first); the same result
+        // as the binary search for the unique keys PostgreSQL stores
+        if (self.c.count <= 16) return self.c.findKeyLinear(key);
         var lo: usize = 0;
         var hi: usize = self.c.count;
         while (lo < hi) {
@@ -1604,6 +1690,22 @@ const Container = struct {
         return .{ off, end };
     }
 
+    fn findKeyLinear(self: Container, key: []const u8) JsonbError!?JsonValue {
+        var off: u64 = 0;
+        for (0..self.count) |i| {
+            const je = self.jentry(i);
+            if (je & JENTRY_TYPEMASK != T_STRING) return error.InvalidJsonb;
+            const end: u64 = if (je & JENTRY_HAS_OFF != 0) je & JENTRY_OFFLENMASK else off + (je & JENTRY_OFFLENMASK);
+            if (end < off or self.base + end > self.data.len) return error.InvalidJsonb;
+            if (end - off == key.len) {
+                const k = self.data[self.base + @as(usize, @intCast(off)) .. self.base + @as(usize, @intCast(end))];
+                if (s.mem.eql(u8, k, key)) return try self.child(i + self.count);
+            }
+            off = end;
+        }
+        return null;
+    }
+
     fn keyAt(self: Container, i: usize) JsonbError![]const u8 {
         if (self.jentry(i) & JENTRY_TYPEMASK != T_STRING) return error.InvalidJsonb;
         const sp = try self.span(i);
@@ -1682,6 +1784,10 @@ fn writeJsonValue(gpa: s.mem.Allocator, out: *s.ArrayList(u8), root: JsonValue) 
     }
 }
 
+/// wire-format scratch of writeJsonNumber: static, so that serialising a
+/// document does not fill a stack buffer per number
+var json_num_wire: [512]u8 = undefined;
+
 /// escape_json
 fn writeJsonString(gpa: s.mem.Allocator, out: *s.ArrayList(u8), str: []const u8) error{OutOfMemory}!void {
     try out.append(gpa, '"');
@@ -1706,9 +1812,9 @@ fn writeJsonString(gpa: s.mem.Allocator, out: *s.ArrayList(u8), str: []const u8)
 /// numeric_out of a jsonb number
 fn writeJsonNumber(gpa: s.mem.Allocator, out: *s.ArrayList(u8), n: JsonNumber) (JsonbError || error{OutOfMemory})!void {
     const d = try n.decode();
-    var buf: [512]u8 = undefined;
+    const buf = &json_num_wire;
     const wire_len = 8 + 2 * d.ndigits;
-    const wire = if (wire_len <= buf.len) buf[0..wire_len] else try gpa.alloc(u8, wire_len);
+    const wire = if (wire_len <= buf.len) buf[0..wire_len] else try allocBytes(gpa, wire_len);
     defer if (wire_len > buf.len) gpa.free(wire);
     d.toWire(wire);
     const num: Numeric = .{ .wire = wire };
@@ -2109,7 +2215,9 @@ const Scratch = struct {
             // the arena reclaims the old buffer if nothing was allocated after it
             if (self.buf.len > 0) allocator.free(self.buf);
             self.buf = &.{};
-            self.buf = try allocator.alignedAlloc(u8, .@"8", want);
+            // written by the host before it is read: no 0xAA fill
+            const p = allocator.rawAlloc(want, .@"8", @returnAddress()) orelse return error.OutOfMemory;
+            self.buf = @alignCast(p[0..want]);
         }
         return self.buf[0..n];
     }
@@ -2140,7 +2248,7 @@ pub const Result = struct {
         const r: u32 = @intCast(@min(row_index, 0xffff_ffff));
         const n = host.spi_value_len(r, col);
         if (n < 0) return null;
-        const buf = try allocator.alloc(u8, @intCast(n));
+        const buf = try allocBytes(allocator, @intCast(n));
         if (buf.len > 0) {
             const got = host.spi_value_copy(r, col, buf.ptr, @intCast(buf.len));
             if (got != n) raiseMsg("plzig: SPI value changed size during copy");
@@ -2164,7 +2272,7 @@ pub const Result = struct {
         _ = self;
         const n = host.spi_colname_len(col);
         if (n < 0) raiseMsg("plzig: invalid column number");
-        const buf = try allocator.alloc(u8, @intCast(n));
+        const buf = try allocBytes(allocator, @intCast(n));
         if (buf.len > 0) _ = host.spi_colname_copy(col, buf.ptr, @intCast(buf.len));
         return buf;
     }
@@ -2233,8 +2341,10 @@ pub const Plan = struct {
     /// `Interval`, `Uuid`, `Oid`, `Numeric`, `JsonText` (jsonb), an
     /// optional of one of these, or `null`.
     pub fn execute(self: Plan, args: anytype) error{OutOfMemory}!Result {
-        var vals: [paramCount(@TypeOf(args))]Value = undefined;
-        var fixed: [paramCount(@TypeOf(args))][16]u8 align(8) = undefined;
+        // initialised word by word, not with the byte-wise 0xAA fill of
+        // `undefined`; `fixed` only has room for the 16-byte parameters
+        var vals: [paramCount(@TypeOf(args))]Value = @splat(null_value);
+        var fixed: [fixedCount(@TypeOf(args))][16]u8 align(8) = @splat(@splat(0));
         encodeParams(args, &vals, &fixed);
         const n = host.spi_execute_plan(self.handle, &vals, vals.len);
         return .{ .rows = @intCast(n), .columns = host.spi_ncols() };
@@ -2242,8 +2352,10 @@ pub const Plan = struct {
 
     /// Open a cursor over the prepared statement (see `execute` for `args`).
     pub fn open(self: Plan, args: anytype) error{OutOfMemory}!Cursor {
-        var vals: [paramCount(@TypeOf(args))]Value = undefined;
-        var fixed: [paramCount(@TypeOf(args))][16]u8 align(8) = undefined;
+        // initialised word by word, not with the byte-wise 0xAA fill of
+        // `undefined`; `fixed` only has room for the 16-byte parameters
+        var vals: [paramCount(@TypeOf(args))]Value = @splat(null_value);
+        var fixed: [fixedCount(@TypeOf(args))][16]u8 align(8) = @splat(@splat(0));
         encodeParams(args, &vals, &fixed);
         return .{ .handle = host.spi_cursor_open_plan(self.handle, &vals, vals.len) };
     }
@@ -2262,11 +2374,37 @@ fn paramCount(comptime Args: type) usize {
     return ti.@"struct".field_names.len;
 }
 
-/// 16-byte values (interval, uuid) are copied to `fixed[i]` and passed by
-/// that address: the caller keeps `fixed` until the host has read them.
+const null_value: Value = .{ .val = 0, .len = 0, .kind = 0, .is_null = 1 };
+
+/// whether a parameter type (or its optional) is a 16-byte value
+fn isFixed16Param(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .optional => |o| isFixed16(o.child),
+        else => isFixed16(T),
+    };
+}
+
+/// number of 16-byte parameters (interval, uuid) in the tuple type
+fn fixedCount(comptime Args: type) usize {
+    var n: usize = 0;
+    for (@typeInfo(Args).@"struct".field_types) |T| {
+        if (isFixed16Param(T)) n += 1;
+    }
+    return n;
+}
+
+/// 16-byte values (interval, uuid) are copied to the next entry of `fixed`
+/// and passed by that address: the caller keeps `fixed` until the host has
+/// read them.
 fn encodeParams(args: anytype, out: []Value, fixed: [][16]u8) void {
+    comptime var k: usize = 0;
     inline for (0..comptime paramCount(@TypeOf(args))) |i| {
-        out[i] = encodeParam(args[i], &fixed[i]);
+        if (comptime isFixed16Param(@TypeOf(args[i]))) {
+            out[i] = encodeParam(args[i], &fixed[k]);
+            k += 1;
+        } else {
+            out[i] = encodeParam(args[i], undefined);
+        }
     }
 }
 
@@ -2340,7 +2478,8 @@ fn encodeParam(v: anytype, fixed: *[16]u8) Value {
 }
 
 fn textSlots(params: []const ?[]const u8) error{OutOfMemory}![]Slot {
-    const slots = try allocator.alloc(Slot, params.len);
+    // every slot is written below: no 0xAA fill
+    const slots: []Slot = if (params.len == 0) &.{} else @as([*]Slot, @ptrCast(@alignCast(allocator.rawAlloc(params.len * @sizeOf(Slot), .of(Slot), @returnAddress()) orelse return error.OutOfMemory)))[0..params.len];
     for (params, slots) |p, *slot| {
         if (p) |v| {
             slot.* = .{ .val = @intFromPtr(v.ptr), .len = @intCast(v.len), .is_null = 0 };

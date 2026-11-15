@@ -325,7 +325,7 @@ $$;
   host: `add`, `sub`, `mul`, `div`, `divTrunc`, `mod`, `round(digits)`,
   `trunc(digits)`, `abs`, `neg` -- results are PostgreSQL's exactly,
   division by zero is the usual SQL error. Every result is allocated in the
-  arena (a few dozen bytes per operation).
+  arena (the size of the result, typically 10–20 bytes per operation).
 * **jsonb**: `doc.root()` gives a `plzig.JsonValue` (`.null`, `.bool`,
   `.string`, `.number`, `.array`, `.object`); `obj.get(key)` (a binary
   search, as jsonb does), `obj.iterator()` (keys in jsonb's order: by

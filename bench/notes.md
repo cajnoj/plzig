@@ -31,38 +31,38 @@
 `doc/benchmarks.md`, PostgreSQL 18.7, JIT off.)
 
 **Where PL/Zig wins: computation inside one call.** Integer loops (task 2
-primes: 0.28× PL/pgSQL's time), floating point (Mandelbrot row: 0.20×), a
-checksum loop over a 1 MB `bytea` (task 5: 0.23×) and edit distance against
-10 000 rows fetched through a cursor (task 6: 0.56×). In all of these PL/Zig
-is also faster than PL/Python and PL/Perl (1.7–4.3× on task 2, 6–8× on task 5). This is
+primes: 0.26× PL/pgSQL's time), floating point (Mandelbrot row: 0.18×), a
+checksum loop over a 1 MB `bytea` (task 5: 0.24×) and edit distance against
+10 000 rows fetched through a cursor (task 6: 0.50×). In all of these PL/Zig
+is also faster than PL/Python and PL/Perl (1.8–4.9× on task 2, 5.7–7.5× on task 5). This is
 the case the design predicts: compiled Zig is interpreted at roughly
 10–15 ns per byte for a simple loop (task 5: 11 ms for 1 MB; one call), which
 beats PL/pgSQL's per-statement expression evaluation, but is far from native
 code: compiled C would be one to two orders of magnitude faster still.
 
 **About even: per-call overhead and SPI-heavy loops with prepared
-statements.** Task 1 (one million calls of a trivial function: 1.05×, about
-0.24 µs per call against 0.23 µs), task 7 (100 000 lookups by key: 1.02×),
-task 9 (20 000 inserts + 20 000 updates: 1.09×), and under concurrency
+statements.** Task 1 (one million calls of a trivial function: 1.03×, about
+0.23 µs per call against 0.22 µs), task 7 (100 000 lookups by key: 1.01×),
+task 9 (20 000 inserts + 20 000 updates: 1.05×), and under concurrency
 (pgbench: task 7 within 2 % of PL/pgSQL at 1–8 clients, task 1 within 5 %).
 For SPI the time goes into the executor, which every language shares;
 PL/Zig's boundary crossing (host import, typed parameter and row encoding)
 costs about as much as PL/pgSQL's own statement overhead. A call now enters
 the interpreter once and reuses its instance's memory contexts (see
 *Per-call and per-row overhead before and after*: task 1 went from about 1.6× to
-1.05×). Without a prepared statement (`spi.execute`: parse, plan, text
+1.03×). Without a prepared statement (`spi.execute`: parse, plan, text
 parameters, text result for every lookup) PL/Zig is 5.3× slower than with
 one: prepare anything that runs in a loop.
 
 **Where PL/Zig loses, and why (measured, see *Profiling*):**
 
-* **Row-at-a-time cursor loops (task 8: 1.30×).** Every row crosses the
+* **Row-at-a-time cursor loops (task 8: 1.27×).** Every row crosses the
   boundary once (`spi_cursor_fetch` writes it into the cursor's guest
-  buffer) and is encoded on the way (one `Value` per column); ~0.21 µs per
-  row against ~0.17 µs for PL/pgSQL's `FOR r IN SELECT`. Before the
+  buffer) and is encoded on the way (one `Value` per column); ~0.19 µs per
+  row against ~0.15 µs for PL/pgSQL's `FOR r IN SELECT`. Before the
   per-row change it was two host calls and a per-row allocation (about 1.7×).
-* **String building with `std.fmt` (task 3: 4.1×) and parsing (task 4:
-  2.1×).** Here the competitors run their inner work in C: PL/pgSQL's
+* **String building with `std.fmt` (task 3: 3.8×) and parsing (task 4:
+  2.0×).** Here the competitors run their inner work in C: PL/pgSQL's
   `string_to_array`, `btrim`, `lower` and regular expressions, Perl's and
   Python's string primitives. PL/Zig runs it all as interpreted code: task 4
   makes about four passes over ~9 MB of input at ~13–23 ns per byte and pass
@@ -70,14 +70,14 @@ one: prepare anything that runs in a loop.
   `ReleaseSafe` every allocation is first filled with `0xAA` byte by byte
   (another ~8 ns per byte for the output buffer). Formatting an integer with
   `std.fmt` costs about 0.8 µs in the interpreter (task 3: 200 000 items,
-  159 ms). PL/Python is 4× faster than PL/Zig on task 4 and 6× on task 3.
-* **Large values (task 10): 1.12× for `bytea`, 1.32× for `text`.** One copy
+  149 ms). PL/Python is 4× faster than PL/Zig on task 4 and 6× on task 3.
+* **Large values (task 10): 1.06× for `bytea`, 1.29× for `text`.** One copy
   in, one copy out (plus the arena), and `text` results are validated
   (UTF-8, no NUL), which PL/pgSQL, returning its argument unchanged, does
   not need to do. Before this phase these were 20× and 8× (see *Task 10
   before and after*).
 * **Start-up and compile (task 11).** The first call in a new session costs
-  ~1.1 ms (WAMR initialisation, reading and validating the cached module,
+  ~1.2 ms (WAMR initialisation, reading and validating the cached module,
   instantiation) against ~0.4 ms for PL/pgSQL, but less than the ~7–8 ms that
   PL/Python and PL/Perl need to start their interpreters. `CREATE FUNCTION`
   compiles: **~160 ms with a warm Zig cache, ~1.8 s with a cold one** (the
@@ -92,11 +92,35 @@ one: prepare anything that runs in a loop.
   and SQL (~20 MB). Guest linear memory never shrinks; an instance that grew
   beyond `plzig.instance_cache_max_memory` (4 MB) is destroyed after the call.
 
+**The natively mapped types (task 13, added with ABI version 4).** A
+`timestamp` column summed over a cursor (100 000 rows) takes 0.87× PL/pgSQL's
+time: the raw value arrives in the row's `Value`, nothing is formatted or
+parsed. One field of a jsonb document per row (100 000 rows, `doc ->>
+'qty'`) is 5.0× (1.4 µs per row against 0.29 µs): the document is copied
+into the guest once and read in place (container header, a pass over the
+keys, the on-disk numeric converted in place); through the text
+representation (a domain over `jsonb`: `jsonb_out` on the host, a scan in
+the guest) it is 40×. Numeric arithmetic in a loop (200 000 iterations of
+`s + i * 1.25`) is 9.9×: two host calls per iteration, each validating its
+operands with `numeric_recv` and converting the result with
+`numeric_send`, about 0.6 µs per operation against PL/pgSQL working on
+`Numeric` values directly. Exactness and the never-trust-the-guest rule
+cost this; use `i64`/`f64` in a hot loop where the values allow it.
+
+These figures are after the hot-path work of PLAN.md Deviations 30: the
+first published run of task 13 had 34× and 52×. Most of that was the
+interpreter's block-address cache (64 sets by default) missing on every call
+for code that Zig had inlined into one large function, each miss rescanning
+the bytecode to a block's end; the rest were byte-wise 0xAA fills of
+`undefined` buffers on every operation. `BLOCK_ADDR_CACHE_SIZE=256` and
+unfilled buffers on the hot paths fixed both, without changing what modules
+may do.
+
 **JIT** makes no measurable difference to any language here: with the
 default thresholds only the outer statement of task 1's PL variants is
 compiled (its cost estimate counts 100 per function call), and the time is
 in the function calls, which JIT does not touch. Forcing JIT for every
-statement only adds compile time (task 8's SQL baseline: 1.5×).
+statement only adds compile time (task 8's SQL baseline: 1.6×).
 
 **Concurrency (pgbench).** Every language scales similarly from 1 to 4
 clients; at 8 clients the six physical cores (shared with the pgbench

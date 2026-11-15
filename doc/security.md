@@ -174,7 +174,10 @@ wrong-mode cache files), `test/tap/t/060_environment.pl`, fuzz target
   every optional feature off (AOT/JIT, WASI, libc, threads, shared memory,
   multi-module, GC, memory64, SIMD, reference types, bulk memory, tail
   calls, exception handling; `third_party/wamr/CMakeLists.txt`) and
-  software bounds checks (`WAMR_DISABLE_HW_BOUND_CHECK`), so it installs
+  software bounds checks (`WAMR_DISABLE_HW_BOUND_CHECK`), and a block
+  address cache of 256 sets instead of 64 (`BLOCK_ADDR_CACHE_SIZE`, a
+  performance setting: more memory per execution environment, no change to
+  what is accepted or executed), so it installs
   no signal handlers and creates no threads. After initialising it the
   backend compares every signal disposition and its thread count with a
   snapshot and exits with `FATAL` on any difference
@@ -617,6 +620,22 @@ Fuzzing (method and how to repeat it: `fuzz/README.md`):
 
 Static analysis and hardening: `docker/static-analysis.sh` clean after
   the fixes listed in PLAN.md.
+
+Runs for the native type mappings (PLAN.md §12 item 12, 2026-11-15; x86_64,
+PostgreSQL 18.7, images built from that tree):
+
+| Target | Budget | Executions | Result |
+|---|---|---|---|
+| jsonb (new) | 1208 s × 8 processes | 72.8 M | no finding |
+| jsonb, after the hot-path changes (in-place conversions checked against the wire-format ones) | 1209 s × 8 | 66.8 M | no finding |
+| marshal (range limits, jsonb documents, jsonb_out differential) | 600 s | 46 080 values, 720 stored rows, 2 160 signatures | no finding |
+| hostabi (`numeric_op`, `tz_convert`, every kind) | 600 s | 98 700 calls | no finding |
+| every target, smoke | 60 s each | – | no finding |
+
+The whole test matrix (`docker/run-tests.sh`, all six versions) and every
+variant of `docker/run-all.sh` (hardened, Valgrind, ASan/UBSan, coverage
+89.5 % of lines, GCC/Clang `-Wextra -Werror`, upgrade from 14, fuzz smoke,
+static analysis, full disk) passed on the same tree.
 
 Not done: 24-hour fuzzing runs (a pre-release step, `fuzz/README.md`),
 CodeQL, SQLsmith-style random SQL, `wasm-smith`-generated modules, aarch64.

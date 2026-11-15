@@ -1,8 +1,9 @@
 # PL/Zig benchmark suite
 
 Compares PL/Zig with SQL, PL/pgSQL, PL/Python (`plpython3u`) and PL/Perl
-(`plperl`) on the twelve tasks of PLAN.md §13 D. The published results and
-their discussion are in [`doc/benchmarks.md`](../doc/benchmarks.md).
+(`plperl`) on the twelve tasks of PLAN.md §13 D, plus task 13 (the
+natively mapped types: numeric, jsonb, timestamp; PLAN.md §12 item 12). The
+published results and their discussion are in [`doc/benchmarks.md`](../doc/benchmarks.md).
 
 **Benchmark only.** PL/Python and PL/Perl are installed only in the image
 built from `bench/Dockerfile`. They are not a build, test or runtime
@@ -32,15 +33,17 @@ rendered into `build/bench/<timestamp>/report/`; `--publish` writes it to
 `doc/benchmarks.md` and `doc/benchmarks/` (SVG charts, CSV copies) instead.
 The exit status is non-zero if a build, a run or the correctness gate fails.
 
-The published report was produced by
+The published report was produced by (last done 2026-11-15 for the native
+type mappings, with `n13-` directory names; the history directories are
+those of phase D)
 
 ```sh
-bench/run.sh --cpus 0-11 --clients 1,2,4,8 --out build/bench/pg18
-bench/run.sh --cpus 0-11 --versions "14.25 19rc2" --jit off --runs 10 --clients "" --out build/bench/xver
-bench/run.sh --cpus 0-11 --tasks 1,2,8 --jit off,on,force --clients "" --out build/bench/jit
-# combined: build/bench/pg18 plus the two version directories of xver,
-# and build/bench/jit/18.7 as pg18/jit/18.7
-bench/run.sh --report-only build/bench/pg18 --history build/bench/t10-history \
+bench/run.sh --cpus 0-11 --clients 1,2,4,8 --out build/bench/n13-pg18
+bench/run.sh --cpus 0-11 --versions "14.25 19rc2" --jit off --runs 10 --clients "" --out build/bench/n13-xver
+bench/run.sh --cpus 0-11 --tasks 1,2,8 --jit off,on,force --clients "" --out build/bench/n13-jit
+# combined: build/bench/n13-pg18 plus the two version directories of n13-xver,
+# and build/bench/n13-jit/18.7 as n13-pg18/jit/18.7
+bench/run.sh --report-only build/bench/n13-pg18 --history build/bench/t10-history \
     --call-history build/bench/abc-history --publish
 ```
 

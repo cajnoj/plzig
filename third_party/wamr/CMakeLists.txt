@@ -79,7 +79,15 @@ include(${WAMR_ROOT_DIR}/build-scripts/runtime_lib.cmake)
 
 # PL/Zig interrupt patch (third_party/wamr-interrupt.patch); route WAMR's
 # printf-style logging to the host (which discards it), hidden visibility.
-add_definitions(-DWASM_ENABLE_PLZIG_INTERRUPT=1 -DBH_VPRINTF=plzig_wamr_vprintf)
+# BLOCK_ADDR_CACHE_SIZE (config.h default 64, x2 ways, per exec env): the
+# classic interpreter looks up the end of a block in this cache when it
+# branches out of it, and rescans the bytecode to the block's end on a miss.
+# Zig inlines most of a function's callees into one large wasm function, so
+# with 64 sets hot blocks evicted each other on every call and the rescans
+# cost several microseconds per call (measured, PLAN.md Deviations 30);
+# 256 sets remove that for the SDK's hot paths.  Each exec env grows by
+# 192 x 2 x 24 bytes (about 9 kB); no change to what modules are accepted.
+add_definitions(-DWASM_ENABLE_PLZIG_INTERRUPT=1 -DBH_VPRINTF=plzig_wamr_vprintf -DBLOCK_ADDR_CACHE_SIZE=256)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fvisibility=hidden -fno-strict-aliasing")
 set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -Wa,--noexecstack")
 

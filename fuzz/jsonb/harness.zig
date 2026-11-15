@@ -83,6 +83,15 @@ fn walk(gpa: std.mem.Allocator, v: plzig.JsonValue, depth: usize) void {
         .number => |n| {
             const w = n.numericAlloc(gpa) catch return;
             const x = plzig.Numeric.fromWire(w.wire) catch finding("decoded jsonb number is not valid wire format", .{});
+            // in-place conversions from the on-disk digits agree with the
+            // wire-format ones
+            const ia = n.toI64() catch |e| @as(anyerror, e);
+            const ib = x.toI64() catch |e| @as(anyerror, e);
+            if (!std.meta.eql(ia, ib)) finding("jsonb toI64 differs from Numeric.toI64", .{});
+            const fa = n.toF64() catch |e| @as(anyerror, e);
+            const fb = x.toF64() catch |e| @as(anyerror, e);
+            const same = if (fa) |va| (if (fb) |vb| (va == vb or (std.math.isNan(va) and std.math.isNan(vb))) else |_| false) else |ea| (if (fb) |_| false else |eb| ea == eb);
+            if (!same) finding("jsonb toF64 differs from Numeric.toF64", .{});
             // (an unnormalised numeric prints leading zeros; PostgreSQL's
             // numerics are always normalised)
             if (!x.isFinite() or !isNormalised(x)) not_json = true;

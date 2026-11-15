@@ -228,8 +228,12 @@ test "plzig_init: the argument buffer, outside the arena" {
 // ---------------------------------------------------------------------------
 // Typed rows (Row.get) for every kind
 
+/// env.rows must outlive row(): later host calls (spi_ncols) read it
+var row_storage: [1][]const Col = undefined;
+
 fn row(cols: []const Col) !plzig.Row {
-    env.rows = &.{cols};
+    row_storage[0] = cols;
+    env.rows = &row_storage;
     const r: plzig.spi.Result = .{ .rows = 1, .columns = @intCast(cols.len) };
     return r.row(0);
 }
@@ -1514,4 +1518,28 @@ test "Jsonb as an argument, a typed column, and JsonText as result and parameter
     var out: Slot = undefined;
     sdk_root.encode(plzig.JsonText, jt, &out);
     try testing.expectEqual(Slot{ .val = @intFromPtr(jt.text.ptr), .len = 3, .is_null = 0 }, out);
+}
+
+test "Numeric.toF64: the exact fast path agrees with correctly rounded parsing" {
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const r = prng.random();
+    var buf: [64]u8 = undefined;
+    for (0..20000) |i| {
+        const m = r.uintLessThan(u64, if (i % 2 == 0) 1 << 53 else 100000);
+        const e = @as(i32, r.intRangeAtMost(i32, -30, 30));
+        const neg = r.boolean();
+        const t = try std.fmt.bufPrint(&buf, "{s}{d}e{d}", .{ if (neg) "-" else "", m, e });
+        const n = try Numeric.parseAlloc(testing.allocator, t);
+        defer freeNum(n);
+        if (n.isZero()) continue;
+        const want = std.fmt.parseFloat(f64, t) catch unreachable;
+        const got = n.toF64() catch |err| {
+            try testing.expect(err == error.Underflow or err == error.Overflow);
+            continue;
+        };
+        testing.expectEqual(want, got) catch |err| {
+            std.debug.print("{s}\n", .{t});
+            return err;
+        };
+    }
 }

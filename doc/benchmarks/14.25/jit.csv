@@ -58,3 +58,13 @@ version,jit,task,variant,impl,total_cost,jit_compiled
 14.25,off,10,bytea_1MB,plpython,6.57,no
 14.25,off,10,bytea_1MB,plperl,6.57,no
 14.25,off,10,bytea_1MB,plzig,6.57,no
+14.25,off,13,numeric_loop,sql,0.01,no
+14.25,off,13,numeric_loop,plpgsql,0.01,no
+14.25,off,13,numeric_loop,plzig,0.01,no
+14.25,off,13,jsonb_field,sql,4558.01,no
+14.25,off,13,jsonb_field,plpgsql,28808.01,no
+14.25,off,13,jsonb_field,plzig,28808.01,no
+14.25,off,13,jsonb_field,plzig_text,28808.01,no
+14.25,off,13,timestamp_sum,sql,0.26,no
+14.25,off,13,timestamp_sum,plpgsql,0.26,no
+14.25,off,13,timestamp_sum,plzig,0.26,no

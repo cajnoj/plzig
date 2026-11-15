@@ -1619,7 +1619,82 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       from PostgreSQL), fuzz target `jsonb` (new) and extensions of
       `hostabi` (both new imports, every kind) and `marshal` (range-limit
       values, random jsonb documents, jsonb_out differential).
+    - *Verification*: `docker/run-tests.sh` (six versions) and every
+      `docker/run-all.sh` variant pass (coverage 89.5 % of lines); fuzz
+      `jsonb` 1208 s × 8 (72.8 M executions), `marshal` and `hostabi` 600 s
+      each, no finding (doc/security.md §9). Found on the way and fixed:
+      the loader fuzz harness needed stand-ins for the new type helpers
+      `plzig_runtime.c` now calls; PostgreSQL 14's `interval_in` refuses
+      some extreme literals the newer versions take (test data changed,
+      extremes built by the function instead).
     - *Benchmark*: task 13 (`bench/tasks/13_native_types`): numeric
       arithmetic loop, jsonb field extraction per row (binary and through
       the text representation of a domain over jsonb), timestamp column sum
-      over a cursor.
+      over a cursor. First measurement (superseded by Deviations 30),
+      PostgreSQL 18.7, full size, JIT off, PL/Zig ÷ PL/pgSQL:
+      timestamp sum 0.86× (17.7 / 20.6 ms, 100 000 rows); numeric loop 52×
+      (1474 / 28.4 ms, 200 000 iterations: two host calls with
+      `numeric_recv`/`numeric_send` per iteration); jsonb field 34× binary,
+      41× through text (933 / 1128 / 27.5 ms, 100 000 rows). The published
+      report was regenerated with the commands of bench/README.md (all
+      tasks rerun on this tree; tasks 1–12 moved by at most a few percent).
+30. **Hot-path cost of the native types (2026-11-15, follow-up to 29).**
+    Task 13 showed numeric arithmetic at 52× and jsonb field extraction at
+    34× PL/pgSQL's time. Profiling (perf on the benchmark backend, the
+    compiled modules' assembly, micro-functions over 100 000 rows) found:
+    - *Block-address cache misses in the interpreter* (25 % of all cycles in
+      `wasm_loader_find_block_addr`): WAMR's classic interpreter finds the end
+      of a block, when code branches out of it, in a 64-set two-way cache per
+      execution environment and rescans the bytecode up to the block's end
+      on a miss. Zig inlines the SDK into the user function's one large wasm
+      function, so hot blocks evicted each other on every call; the cost
+      depended on code layout (`numeric()` after `get()`: 7.7 µs per call;
+      `toF64` after a code change: 32 µs). `BLOCK_ADDR_CACHE_SIZE=256` (a
+      WAMR build define in `third_party/wamr/CMakeLists.txt`, no source
+      change; about 9 kB more per execution environment) removes it: 256,
+      1024 and 4096 sets measured the same.
+    - *0xAA fills*: in ReleaseSafe `undefined` stack arrays and
+      `Allocator.alloc` fill memory byte by byte (~10 ns per byte in the
+      interpreter). Removed from the hot paths: numeric results are written
+      by the host straight into arena memory taken with `rawAlloc` (64
+      bytes, shrunk in place to the result; a larger one is computed again
+      into a block of the reported size); `JsonNumber.toI64/toF64` read the
+      on-disk digits in place (a shared digit view; no 256-byte buffer, no
+      wire copy); `toF64` uses a static text buffer and an exact fast path
+      (Clinger: mantissa <= 2^53, |exponent| <= 22), falling back to
+      correctly rounded parsing; `Plan.execute/open` initialise their value
+      arrays word by word and reserve 16-byte slots only for interval/uuid
+      parameters; text results of `Result.get`, the parameter slots of
+      `spi.execute` and cursor scratch growth use unfilled memory the host
+      overwrites; the jsonb serialiser's numeric scratch is static.
+    - *Object lookup*: objects of up to 16 keys are searched in one forward
+      pass over the key entries (offsets accumulate, lengths compared first:
+      the same result as the binary search for PostgreSQL's unique sorted
+      keys); larger objects keep the binary search.
+    - `toI64`'s overflow check no longer needs compiler-rt's 128-bit
+      `__multi3`.
+    Task 13 (full run, PostgreSQL 18.7, JIT off, PL/Zig ÷ PL/pgSQL): jsonb
+    field 34× → 5.0× (933 → 144 ms), numeric loop 52× → 9.9× (1474 → 287
+    ms), timestamp sum 0.86× → 0.87×; tasks 1–12 within run-to-run noise.
+    The published report was regenerated (bench/README.md commands).
+    Measured (100 000 rows, per call, PostgreSQL 18.7): `get("qty")` 1.2 →
+    0.6 µs; `get` + `numeric()` 9.2 → 1.4 µs; `get` + `toI64()` 4.8 → 1.5 µs;
+    `get` + `toF64()` 6–32 → 2.1 µs; numeric add 3.1 → 0.44 µs. Not done:
+    a small inline representation for `Numeric` (`wire` is a public slice
+    field, so inline digits would make the struct self-referential and
+    break on every copy; results are now exactly sized, 10–20 bytes each,
+    and the arena is reset per call). New SDK unit test: the `toF64` fast
+    path against correctly rounded parsing (20 000 random values); the
+    jsonb fuzz target now also requires the in-place conversions to agree
+    with the wire-format ones. A test-harness bug was fixed on the way
+    (`row()` in `zig/sdk/test.zig` left `env.rows` pointing at a temporary).
+    The loader fuzz seeds (`fuzz/loader/corpus`) were regenerated for ABI 4
+    (they were still ABI-3 modules, rejected before execution).
+    Verification: six-version matrix and every `docker/run-all.sh` variant
+    pass (coverage 89.5 %); fuzz smoke on a freshly built image passes;
+    jsonb 1209 s × 8 (66.8 M executions) no finding. One `pipeline` smoke
+    run reported SQLSTATE 38000 for a generated `DO` block containing
+    `@panic("p")`: the target accepts 38000 for calls but not for `DO`,
+    which also runs its body -- an oracle gap unrelated to this change,
+    left as it is for the owner (replay: `perl fuzz/pipeline/gen.pl
+    690590262 50 fuzz/validator/corpus <dir>`, body 00030.zig).
