@@ -1,0 +1,374 @@
+--
+-- triggers: row and statement triggers (doc/abi.md, "Triggers").  NEW and
+-- OLD are bound to structs by column name at every call; the row a trigger
+-- returns is built by the host from NEW (or OLD) with checked column
+-- values, so it always has the table's row type.
+--
+\set VERBOSITY terse
+CREATE FUNCTION tg_err(q text) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN
+    EXECUTE q;
+    RETURN 'ok';
+EXCEPTION WHEN OTHERS THEN
+    RETURN SQLSTATE || ': ' || SQLERRM;
+END $$;
+CREATE TABLE tg_t (id int PRIMARY KEY, name text, qty int NOT NULL DEFAULT 0,
+                   price numeric(8,2), code varchar(4), changed timestamptz);
+-- BEFORE ROW: modify NEW, keep it, or skip the row
+CREATE FUNCTION tg_before() RETURNS trigger LANGUAGE plzig AS $$
+    const Row = struct { id: ?i32, name: ?[]const u8, qty: ?i32 };
+    const new = (try tg.new(Row)) orelse return .skip;
+    if (new.qty) |q| if (q < 0) return .skip;          // silently skip
+    if (new.name) |n| {
+        if (std.mem.eql(u8, n, "keep")) return .new;   // unchanged
+        const up = try plzig.allocator.alloc(u8, n.len);
+        _ = std.ascii.upperString(up, n);
+        return try tg.modify(.{ .name = up });         // only name changes
+    }
+    return try tg.modify(.{ .name = "unnamed" });
+$$;
+CREATE TRIGGER tg_t_before BEFORE INSERT OR UPDATE ON tg_t FOR EACH ROW EXECUTE FUNCTION tg_before();
+INSERT INTO tg_t (id, name, qty, price) VALUES (1, 'apple', 3, 1.5), (2, NULL, 1, NULL), (3, 'keep', 2, 9.99), (4, 'neg', -1, 0);
+SELECT id, name, qty, price FROM tg_t ORDER BY id;
+ id |  name   | qty | price 
+----+---------+-----+-------
+  1 | APPLE   |   3 |  1.50
+  2 | unnamed |   1 |      
+  3 | keep    |   2 |  9.99
+(3 rows)
+
+UPDATE tg_t SET name = 'pear' WHERE id = 1;
+UPDATE tg_t SET qty = -5 WHERE id = 3;       -- skipped by the trigger
+SELECT id, name, qty FROM tg_t ORDER BY id;
+ id |  name   | qty 
+----+---------+-----
+  1 | PEAR    |   3
+  2 | unnamed |   1
+  3 | keep    |   2
+(3 rows)
+
+INSERT INTO tg_t (id, name) VALUES (5, 'x') RETURNING *;
+ id | name | qty | price | code | changed 
+----+------+-----+-------+------+---------
+  5 | X    |   0 |       |      | 
+(1 row)
+
+-- the trigger's data (TG_*), and arguments
+CREATE TABLE tg_log (msg text);
+CREATE FUNCTION tg_info() RETURNS trigger LANGUAGE plzig AS $$
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.print(plzig.allocator, "{s} {s} {s} {s} on {s}.{s} nargs={d}", .{ tg.name(), @tagName(tg.when()),
+        if (tg.forEachRow()) "row" else "statement", @tagName(tg.op()), tg.tableSchema(), tg.tableName(), tg.argCount() });
+    var i: usize = 0;
+    while (tg.arg(i)) |a| : (i += 1) try buf.print(plzig.allocator, " [{s}]", .{a});
+    try buf.print(plzig.allocator, " new={} old={}", .{ tg.newRow() != null, tg.oldRow() != null });
+    _ = try plzig.spi.execute("INSERT INTO tg_log VALUES ($1)", &.{buf.items});
+    return .skip;
+$$;
+CREATE TABLE tg_i (a int, b text);
+CREATE TRIGGER tg_i_bs BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON tg_i FOR EACH STATEMENT EXECUTE FUNCTION tg_info('stmt', 'x y');
+CREATE TRIGGER tg_i_ar AFTER INSERT OR UPDATE OR DELETE ON tg_i FOR EACH ROW EXECUTE FUNCTION tg_info();
+INSERT INTO tg_i VALUES (1, 'a');
+UPDATE tg_i SET b = 'b';
+DELETE FROM tg_i;
+TRUNCATE tg_i;
+SELECT msg FROM tg_log;
+                                            msg                                            
+-------------------------------------------------------------------------------------------
+ tg_i_bs before statement insert on public.tg_i nargs=2 [stmt] [x y] new=false old=false
+ tg_i_ar after row insert on public.tg_i nargs=0 new=true old=false
+ tg_i_bs before statement update on public.tg_i nargs=2 [stmt] [x y] new=false old=false
+ tg_i_ar after row update on public.tg_i nargs=0 new=true old=true
+ tg_i_bs before statement delete on public.tg_i nargs=2 [stmt] [x y] new=false old=false
+ tg_i_ar after row delete on public.tg_i nargs=0 new=false old=true
+ tg_i_bs before statement truncate on public.tg_i nargs=2 [stmt] [x y] new=false old=false
+(7 rows)
+
+DELETE FROM tg_log;
+DROP TABLE tg_i;
+-- BEFORE DELETE: .old lets it happen, .skip prevents it; OLD as a struct
+CREATE FUNCTION tg_guard() RETURNS trigger LANGUAGE plzig AS $$
+    const old = (try tg.old(struct { id: i32, name: ?[]const u8 })).?;
+    if (old.id == 1) return .skip;
+    return .old;
+$$;
+CREATE TRIGGER tg_t_guard BEFORE DELETE ON tg_t FOR EACH ROW EXECUTE FUNCTION tg_guard();
+DELETE FROM tg_t WHERE id IN (1, 2);
+SELECT id FROM tg_t ORDER BY id;
+ id 
+----
+  1
+  3
+  5
+(3 rows)
+
+DROP TRIGGER tg_t_guard ON tg_t;
+-- the dynamic interface: positions and kinds of the columns as they are now
+CREATE FUNCTION tg_cols() RETURNS trigger LANGUAGE plzig AS $$
+    const row = tg.newRow().?;
+    var buf: std.ArrayList(u8) = .empty;
+    for (0..tg.columnCount()) |i| {
+        if (try tg.columnDropped(i)) continue;
+        try buf.print(plzig.allocator, "{s}:{s}:{} ", .{ try tg.columnName(i), @tagName(try tg.columnKind(i)), try row.isNull(i) });
+    }
+    plzig.notice("{s}", .{buf.items});
+    return .new;
+$$;
+CREATE TABLE tg_c (a int, gone int, b text, c date);
+ALTER TABLE tg_c DROP COLUMN gone;
+CREATE TRIGGER tg_c_cols BEFORE INSERT ON tg_c FOR EACH ROW EXECUTE FUNCTION tg_cols();
+INSERT INTO tg_c VALUES (1, NULL, '2024-01-01');
+NOTICE:  a:int4:false b:text:true c:date:false 
+--
+-- the returned row is checked column by column
+--
+CREATE DOMAIN tg_pos AS int CHECK (VALUE > 0);
+CREATE TABLE tg_chk (id int, code varchar(3), n numeric(5,2), p tg_pos, g int GENERATED ALWAYS AS (id * 2) STORED, nn text NOT NULL DEFAULT 'x');
+CREATE FUNCTION tg_set() RETURNS trigger LANGUAGE plzig AS $$
+    const what = try std.fmt.parseInt(i32, tg.arg(0).?, 10);
+    return switch (what) {
+        0 => try tg.modify(.{ .code = "abc", .n = try plzig.Numeric.parse("1.239"), .p = "5" }),
+        1 => try tg.modify(.{ .code = "abcd" }),
+        2 => try tg.modify(.{ .n = try plzig.Numeric.parse("12345") }),
+        3 => try tg.modify(.{ .p = "0" }),
+        4 => try tg.modify(.{ .g = @as(i32, 7) }),
+        5 => try tg.modify(.{ .nn = @as(?[]const u8, null) }),
+        6 => try tg.modify(.{ .missing = @as(i32, 1) }),
+        7 => try tg.modify(.{ .id = "text for an int" }),
+        8 => try tg.modify(.{ .id = @as(i64, 1) }),
+        9 => .old,
+        else => .new,
+    };
+$$;
+CREATE FUNCTION tg_try(what int) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE r text;
+BEGIN
+    EXECUTE format('CREATE TRIGGER tg_chk_set BEFORE INSERT ON tg_chk FOR EACH ROW EXECUTE FUNCTION tg_set(%s)', what);
+    r := tg_err('INSERT INTO tg_chk (id) VALUES (1)');
+    DROP TRIGGER tg_chk_set ON tg_chk;
+    RETURN r;
+END $$;
+SELECT w, tg_try(w) FROM generate_series(0, 10) w;
+ w  |                                       tg_try                                       
+----+------------------------------------------------------------------------------------
+  0 | ok
+  1 | 22001: value too long for type character varying(3)
+  2 | 22003: numeric field overflow
+  3 | 23514: value for domain tg_pos violates check constraint "tg_pos_check"
+  4 | 39P01: cannot set generated column "g"
+  5 | 23502: null value in column "nn" of relation "tg_chk" violates not-null constraint
+  6 | 38000: plzig function failed: NoSuchColumn
+  7 | 38000: plzig function failed: TypeMismatch
+  8 | 38000: plzig function failed: TypeMismatch
+  9 | 39P01: PL/Zig: the trigger returned OLD, but this trigger has no OLD row
+ 10 | ok
+(11 rows)
+
+SELECT * FROM tg_chk;
+ id | code |  n   | p | g | nn 
+----+------+------+---+---+----
+  1 | abc  | 1.24 | 5 | 2 | x
+  1 |      |      |   | 2 | x
+(2 rows)
+
+--
+-- a table changed after the function was compiled: bound by name at every
+-- call, so the change is noticed, never misread
+--
+CREATE TABLE tg_ev (id int, name text);
+CREATE FUNCTION tg_evf() RETURNS trigger LANGUAGE plzig AS $$
+    const r = (try tg.new(struct { id: ?i32, name: ?[]const u8 })).?;
+    return try tg.modify(.{ .name = try std.fmt.allocPrint(plzig.allocator, "{?s}!{?d}", .{ r.name, r.id }) });
+$$;
+CREATE TRIGGER tg_ev_t BEFORE INSERT ON tg_ev FOR EACH ROW EXECUTE FUNCTION tg_evf();
+INSERT INTO tg_ev VALUES (1, 'a');
+ALTER TABLE tg_ev ADD COLUMN extra int DEFAULT 42;        -- new columns are kept
+INSERT INTO tg_ev VALUES (2, 'b', 7);
+ALTER TABLE tg_ev ADD COLUMN pad text, DROP COLUMN extra;  -- positions move
+INSERT INTO tg_ev VALUES (3, 'c', 'p');
+SELECT * FROM tg_ev ORDER BY id;
+ id | name | pad 
+----+------+-----
+  1 | a!1  | 
+  2 | b!2  | 
+  3 | c!3  | p
+(3 rows)
+
+ALTER TABLE tg_ev ALTER COLUMN name TYPE int USING NULL;   -- the type no longer matches
+SELECT tg_err('INSERT INTO tg_ev VALUES (4, 5)');
+                   tg_err                   
+--------------------------------------------
+ 38000: plzig function failed: TypeMismatch
+(1 row)
+
+ALTER TABLE tg_ev DROP COLUMN name;                        -- the column is gone
+SELECT tg_err('INSERT INTO tg_ev VALUES (5)');
+                   tg_err                   
+--------------------------------------------
+ 38000: plzig function failed: NoSuchColumn
+(1 row)
+
+-- partitions with their columns in another order: bound by name
+CREATE TABLE tg_part (id int, k text, v int) PARTITION BY LIST (k);
+CREATE TABLE tg_part_a (v int, id int, k text);
+ALTER TABLE tg_part ATTACH PARTITION tg_part_a FOR VALUES IN ('a');
+CREATE TABLE tg_part_b PARTITION OF tg_part FOR VALUES IN ('b');
+CREATE FUNCTION tg_partf() RETURNS trigger LANGUAGE plzig AS $$
+    const r = (try tg.new(struct { id: i32, v: ?i32 })).?;
+    return try tg.modify(.{ .v = (r.v orelse 0) + r.id * 100 });
+$$;
+CREATE TRIGGER tg_part_t BEFORE INSERT ON tg_part FOR EACH ROW EXECUTE FUNCTION tg_partf();
+INSERT INTO tg_part VALUES (1, 'a', 1), (2, 'b', 2);
+SELECT tableoid::regclass, * FROM tg_part ORDER BY id;
+ tableoid  | id | k |  v  
+-----------+----+---+-----
+ tg_part_a |  1 | a | 101
+ tg_part_b |  2 | b | 202
+(2 rows)
+
+-- INSTEAD OF on a view: the trigger does the work
+CREATE TABLE tg_base (id int, label text);
+CREATE VIEW tg_view AS SELECT id, label FROM tg_base;
+CREATE FUNCTION tg_instead() RETURNS trigger LANGUAGE plzig AS $$
+    const r = (try tg.new(struct { id: i32, label: ?[]const u8 })).?;
+    var buf: [16]u8 = undefined;
+    _ = try plzig.spi.execute("INSERT INTO tg_base VALUES ($1::int, upper($2))",
+        &.{ try std.fmt.bufPrint(&buf, "{d}", .{r.id}), r.label });
+    return try tg.modify(.{ .label = "via trigger" });
+$$;
+CREATE TRIGGER tg_view_ins INSTEAD OF INSERT ON tg_view FOR EACH ROW EXECUTE FUNCTION tg_instead();
+INSERT INTO tg_view VALUES (1, 'one') RETURNING *;
+ id |    label    
+----+-------------
+  1 | via trigger
+(1 row)
+
+SELECT * FROM tg_base;
+ id | label 
+----+-------
+  1 | ONE
+(1 row)
+
+-- transition tables are visible to SQL in the trigger
+CREATE TABLE tg_tt (n int);
+CREATE FUNCTION tg_trans() RETURNS trigger LANGUAGE plzig AS $$
+    const r = try plzig.spi.execute("SELECT count(*), coalesce(sum(n), 0) FROM newrows", &.{});
+    const row = try r.row(0);
+    plzig.notice("{d} rows, sum {d}", .{ try row.get(i64, 0), try row.get(i64, 1) });
+    return .skip;
+$$;
+CREATE TRIGGER tg_tt_t AFTER INSERT ON tg_tt REFERENCING NEW TABLE AS newrows
+    FOR EACH STATEMENT EXECUTE FUNCTION tg_trans();
+INSERT INTO tg_tt SELECT generate_series(1, 10);
+NOTICE:  10 rows, sum 55
+-- recursion: a trigger whose SQL fires the same trigger (a second instance)
+CREATE TABLE tg_rec (n int);
+CREATE FUNCTION tg_recf() RETURNS trigger LANGUAGE plzig AS $$
+    const r = (try tg.new(struct { n: i32 })).?;
+    if (r.n > 0) {
+        var buf: [16]u8 = undefined;
+        _ = try plzig.spi.execute("INSERT INTO tg_rec VALUES ($1::int)", &.{try std.fmt.bufPrint(&buf, "{d}", .{r.n - 1})});
+    }
+    return .new;
+$$;
+CREATE TRIGGER tg_rec_t BEFORE INSERT ON tg_rec FOR EACH ROW EXECUTE FUNCTION tg_recf();
+INSERT INTO tg_rec VALUES (5);
+SELECT array_agg(n ORDER BY n) FROM tg_rec;
+   array_agg   
+---------------
+ {0,1,2,3,4,5}
+(1 row)
+
+-- results a trigger cannot give
+CREATE TABLE tg_bad (a int);
+CREATE FUNCTION tg_badres() RETURNS trigger LANGUAGE plzig AS $$
+    const what = tg.arg(0).?;
+    if (std.mem.eql(u8, what, "new")) return .new;
+    if (std.mem.eql(u8, what, "old")) return .old;
+    if (std.mem.eql(u8, what, "modify")) return try tg.modify(.{ .a = @as(i32, 1) });
+    if (std.mem.eql(u8, what, "error")) return error.TriggerFailed;
+    return .skip;
+$$;
+CREATE TRIGGER tg_bad_del BEFORE DELETE ON tg_bad FOR EACH ROW EXECUTE FUNCTION tg_badres('new');
+CREATE TRIGGER tg_bad_ins BEFORE INSERT ON tg_bad FOR EACH ROW EXECUTE FUNCTION tg_badres('old');
+INSERT INTO tg_bad VALUES (1);
+ERROR:  PL/Zig: the trigger returned OLD, but this trigger has no OLD row
+DROP TRIGGER tg_bad_ins ON tg_bad;
+INSERT INTO tg_bad VALUES (1);
+DELETE FROM tg_bad;
+ERROR:  PL/Zig: the trigger returned NEW, but this trigger has no NEW row
+DROP TRIGGER tg_bad_del ON tg_bad;
+CREATE TRIGGER tg_bad_st BEFORE INSERT ON tg_bad FOR EACH STATEMENT EXECUTE FUNCTION tg_badres('modify');
+INSERT INTO tg_bad VALUES (2);
+ERROR:  PL/Zig: the trigger returned a row, but this trigger has none to modify
+DROP TRIGGER tg_bad_st ON tg_bad;
+CREATE TRIGGER tg_bad_err AFTER INSERT ON tg_bad FOR EACH ROW EXECUTE FUNCTION tg_badres('error');
+INSERT INTO tg_bad VALUES (3);
+ERROR:  plzig function failed: TriggerFailed
+SELECT * FROM tg_bad;
+ a 
+---
+ 1
+(1 row)
+
+-- trigger functions: only as triggers, no declared arguments; event triggers refused
+SELECT tg_before();
+ERROR:  trigger functions can only be called as triggers
+CREATE FUNCTION tg_args(x int) RETURNS trigger LANGUAGE plzig AS $$ return .skip; $$;
+ERROR:  trigger functions cannot have declared arguments
+CREATE FUNCTION tg_set_of() RETURNS SETOF trigger LANGUAGE plzig AS $$ return .skip; $$;
+ERROR:  a PL/Zig trigger function must be a function returning trigger
+CREATE FUNCTION tg_evt() RETURNS event_trigger LANGUAGE plzig AS $$ return; $$;
+ERROR:  PL/Zig functions cannot return type event_trigger
+-- an ordinary function cannot be a trigger (PostgreSQL refuses it)
+CREATE FUNCTION tg_notrig() RETURNS int LANGUAGE plzig AS $$ return 1; $$;
+CREATE TRIGGER tg_x BEFORE INSERT ON tg_bad FOR EACH ROW EXECUTE FUNCTION tg_notrig();
+ERROR:  function tg_notrig must return type trigger
+--
+-- privileges: a trigger function runs as the user who fires it (or as its
+-- owner when SECURITY DEFINER), and row-level security applies to its SQL
+--
+CREATE TABLE tg_audit (who text, what text);
+CREATE TABLE tg_priv (n int);
+GRANT SELECT, INSERT ON tg_priv TO regress_plzig_dev;
+CREATE FUNCTION tg_auditf() RETURNS trigger LANGUAGE plzig AS $$
+    _ = try plzig.spi.execute("INSERT INTO tg_audit SELECT current_user, 'insert'", &.{});
+    return .new;
+$$;
+CREATE TRIGGER tg_priv_a BEFORE INSERT ON tg_priv FOR EACH ROW EXECUTE FUNCTION tg_auditf();
+SET ROLE regress_plzig_dev;
+INSERT INTO tg_priv VALUES (1);              -- no INSERT on tg_audit: refused
+ERROR:  permission denied for table tg_audit
+RESET ROLE;
+ALTER FUNCTION tg_auditf() SECURITY DEFINER;
+SET ROLE regress_plzig_dev;
+INSERT INTO tg_priv VALUES (2);              -- as the owner
+RESET ROLE;
+SELECT who <> 'regress_plzig_dev' AS as_owner, what FROM tg_audit;
+ as_owner |  what  
+----------+--------
+ t        | insert
+(1 row)
+
+SELECT * FROM tg_priv;
+ n 
+---
+ 2
+(1 row)
+
+CREATE TABLE tg_rls (owner text, secret text);
+INSERT INTO tg_rls VALUES ('regress_plzig_dev', 'mine'), ('someone_else', 'theirs');
+ALTER TABLE tg_rls ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tg_rls_p ON tg_rls USING (owner = current_user);
+GRANT SELECT ON tg_rls TO regress_plzig_dev;
+CREATE FUNCTION tg_peek() RETURNS trigger LANGUAGE plzig AS $$
+    const r = try plzig.spi.execute("SELECT string_agg(secret, ',') FROM tg_rls", &.{});
+    plzig.notice("visible: {?s}", .{try r.get(0, 0)});
+    return .new;
+$$;
+CREATE TRIGGER tg_priv_peek BEFORE INSERT ON tg_priv FOR EACH ROW EXECUTE FUNCTION tg_peek();
+SET ROLE regress_plzig_dev;
+INSERT INTO tg_priv VALUES (3);
+NOTICE:  visible: mine
+RESET ROLE;
+DROP FUNCTION tg_err(text);

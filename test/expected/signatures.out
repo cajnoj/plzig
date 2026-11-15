@@ -65,7 +65,7 @@ CREATE FUNCTION sg_ddl(x pg_ddl_command) RETURNS int LANGUAGE plzig AS $$ return
 ERROR:  PL/Zig functions cannot accept type pg_ddl_command
 -- triggers and event triggers (as result and as argument type)
 CREATE FUNCTION sg_trigger() RETURNS trigger LANGUAGE plzig AS $$ return null; $$;
-ERROR:  PL/Zig functions cannot return type trigger
+ERROR:  PL/Zig compilation failed
 CREATE FUNCTION sg_evt() RETURNS event_trigger LANGUAGE plzig AS $$ return; $$;
 ERROR:  PL/Zig functions cannot return type event_trigger
 CREATE FUNCTION sg_trigger_arg(x trigger) RETURNS int LANGUAGE plzig AS $$ return 1; $$;

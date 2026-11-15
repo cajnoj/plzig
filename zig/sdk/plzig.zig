@@ -2542,7 +2542,8 @@ pub fn encodeRow(comptime T: type, row: T, out: []Value, fixed: [][16]u8) error{
 pub fn isRowType(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and T != Numeric and T != JsonText and T != Jsonb and
         T != Date and T != Time and T != TimeTz and T != Timestamp and T != TimestampTz and
-        T != Interval and T != Uuid and T != Oid and T != Bytea;
+        T != Interval and T != Uuid and T != Oid and T != Bytea and T != Trigger and
+        T != TriggerResult;
 }
 
 /// Static buffers for the values of one row of type T (and its 16-byte
@@ -2577,6 +2578,241 @@ pub fn returnNext(comptime T: type, row: ?T) void {
         host.srf_return_next(&scalar_row, 1);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Triggers (doc/abi.md, "Triggers").
+//
+// A trigger function is `pub fn call(tg: plzig.Trigger) anyerror!plzig.TriggerResult`.
+// The trigger's data (event, relation, name, arguments, the relation's
+// columns as they are now, NEW and OLD) comes with the call: no host call
+// is needed to read it.
+
+/// The fixed part of the trigger information the host passes.
+const TriggerInfo = extern struct {
+    event: u32,
+    relid: u32,
+    natts: u32,
+    nargs: u32,
+    name_ptr: u32,
+    name_len: u32,
+    table_ptr: u32,
+    table_len: u32,
+    schema_ptr: u32,
+    schema_len: u32,
+    args_ptr: u32,
+    cols_ptr: u32,
+};
+
+const TriggerColumn = extern struct {
+    name_ptr: u32,
+    name_len: u32,
+    kind: u16,
+    flags: u16,
+    typid: u32,
+};
+
+/// a 32-bit guest address the host wrote (env.memory_base is 0 in a module)
+fn guestAddr(a: u32) usize {
+    return env.memory_base + a;
+}
+
+fn guestBytes(ptr: u32, len: u32) []const u8 {
+    if (len == 0) return &.{};
+    const p: [*]const u8 = @ptrFromInt(guestAddr(ptr));
+    return p[0..len];
+}
+
+pub const TriggerError = error{ NoSuchColumn, TypeMismatch, UnexpectedNull, ColumnOutOfRange, OutOfMemory, InvalidJsonb };
+
+/// What a trigger function returns: `.skip` (NULL: skip the operation for
+/// this row), `.new` / `.old` (that row unchanged; PostgreSQL's NEW and
+/// OLD), or a modified row from `Trigger.modify`.  For AFTER and
+/// statement-level triggers PostgreSQL ignores the result (return `.skip`).
+pub const TriggerResult = struct {
+    action: u32,
+    values: []const Value = &.{},
+
+    pub const skip: TriggerResult = .{ .action = 1 };
+    pub const new: TriggerResult = .{ .action = 2 };
+    pub const old: TriggerResult = .{ .action = 3 };
+};
+
+/// A trigger call: PostgreSQL's TG_* data, NEW and OLD.
+pub const Trigger = struct {
+    info: *const TriggerInfo,
+    new_values: ?[]const Value,
+    old_values: ?[]const Value,
+
+    pub const When = enum { before, after, instead_of };
+    pub const Op = enum { insert, update, delete, truncate };
+
+    /// From the three slots the host passes (info, NEW, OLD).
+    pub fn fromSlots(args: [*]const Slot) Trigger {
+        const ti: *const TriggerInfo = @ptrFromInt(@as(usize, @intCast(args[0].val)));
+        return .{ .info = ti, .new_values = rowSlot(args[1]), .old_values = rowSlot(args[2]) };
+    }
+
+    fn rowSlot(slot: Slot) ?[]const Value {
+        if (slot.is_null != 0) return null;
+        if (slot.len == 0) return &.{};
+        const p: [*]const Value = @ptrFromInt(@as(usize, @intCast(slot.val)));
+        return p[0..slot.len];
+    }
+
+    /// TG_WHEN
+    pub fn when(self: Trigger) When {
+        return switch (self.info.event & 3) {
+            0 => .before,
+            1 => .after,
+            else => .instead_of,
+        };
+    }
+    /// TG_LEVEL = 'ROW'
+    pub fn forEachRow(self: Trigger) bool {
+        return self.info.event & 4 != 0;
+    }
+    /// TG_OP
+    pub fn op(self: Trigger) Op {
+        return switch ((self.info.event >> 4) & 15) {
+            1 => .insert,
+            2 => .update,
+            3 => .delete,
+            else => .truncate,
+        };
+    }
+    /// TG_NAME
+    pub fn name(self: Trigger) []const u8 {
+        return guestBytes(self.info.name_ptr, self.info.name_len);
+    }
+    /// TG_TABLE_NAME
+    pub fn tableName(self: Trigger) []const u8 {
+        return guestBytes(self.info.table_ptr, self.info.table_len);
+    }
+    /// TG_TABLE_SCHEMA
+    pub fn tableSchema(self: Trigger) []const u8 {
+        return guestBytes(self.info.schema_ptr, self.info.schema_len);
+    }
+    /// TG_RELID
+    pub fn relid(self: Trigger) Oid {
+        return .{ .value = self.info.relid };
+    }
+    /// TG_NARGS
+    pub fn argCount(self: Trigger) usize {
+        return self.info.nargs;
+    }
+    /// TG_ARGV[i], or null beyond TG_NARGS
+    pub fn arg(self: Trigger, i: usize) ?[]const u8 {
+        if (i >= self.info.nargs) return null;
+        const refs: [*]align(1) const [2]u32 = @ptrFromInt(guestAddr(self.info.args_ptr));
+        return guestBytes(refs[i][0], refs[i][1]);
+    }
+
+    fn column(self: Trigger, i: usize) *align(1) const TriggerColumn {
+        const cols: [*]align(1) const TriggerColumn = @ptrFromInt(guestAddr(self.info.cols_ptr));
+        return &cols[i];
+    }
+    /// Number of columns of the relation, dropped ones included (the
+    /// positions of NEW, OLD and a modified row).
+    pub fn columnCount(self: Trigger) usize {
+        return self.info.natts;
+    }
+    pub fn columnName(self: Trigger, i: usize) error{ColumnOutOfRange}![]const u8 {
+        if (i >= self.info.natts) return error.ColumnOutOfRange;
+        return guestBytes(self.column(i).name_ptr, self.column(i).name_len);
+    }
+    pub fn columnKind(self: Trigger, i: usize) error{ColumnOutOfRange}!Kind {
+        if (i >= self.info.natts) return error.ColumnOutOfRange;
+        return @enumFromInt(self.column(i).kind);
+    }
+    pub fn columnDropped(self: Trigger, i: usize) error{ColumnOutOfRange}!bool {
+        if (i >= self.info.natts) return error.ColumnOutOfRange;
+        return self.column(i).flags & 1 != 0;
+    }
+    pub fn columnGenerated(self: Trigger, i: usize) error{ColumnOutOfRange}!bool {
+        if (i >= self.info.natts) return error.ColumnOutOfRange;
+        return self.column(i).flags & 2 != 0;
+    }
+    /// Position of the column called `col_name` (not dropped), or null.
+    pub fn columnIndex(self: Trigger, col_name: []const u8) ?usize {
+        for (0..self.info.natts) |i| {
+            const c = self.column(i);
+            if (c.flags & 1 == 0 and s.mem.eql(u8, guestBytes(c.name_ptr, c.name_len), col_name)) return i;
+        }
+        return null;
+    }
+
+    /// NEW as a typed row (`Row.get(T, column position)`), null when the
+    /// trigger has no NEW row (DELETE, statement level).
+    pub fn newRow(self: Trigger) ?Row {
+        return if (self.new_values) |v| Row{ .values = v } else null;
+    }
+    /// OLD as a typed row, null when there is none (INSERT, statement level).
+    pub fn oldRow(self: Trigger) ?Row {
+        return if (self.old_values) |v| Row{ .values = v } else null;
+    }
+
+    /// NEW as a struct whose fields are matched to the relation's columns
+    /// by name (any subset, in any order; the column must exist, its kind
+    /// must match the field type as for `Row.get`), or null when there is
+    /// no NEW row.  Binding by name at every call means a table changed
+    /// after the function was compiled is noticed (`error.NoSuchColumn`,
+    /// `error.TypeMismatch`), never misread.
+    pub fn new(self: Trigger, comptime T: type) TriggerError!?T {
+        return if (self.new_values) |v| try self.bind(T, v) else null;
+    }
+    /// OLD as a struct (see `new`).
+    pub fn old(self: Trigger, comptime T: type) TriggerError!?T {
+        return if (self.old_values) |v| try self.bind(T, v) else null;
+    }
+
+    fn bind(self: Trigger, comptime T: type, values: []const Value) TriggerError!T {
+        @setEvalBranchQuota(100_000);
+        const si = @typeInfo(T).@"struct";
+        const r: Row = .{ .values = values };
+        var out: T = undefined;
+        inline for (si.field_names, si.field_types) |fname, FT| {
+            const i = self.columnIndex(fname) orelse return error.NoSuchColumn;
+            @field(out, fname) = try r.get(FT, i);
+        }
+        return out;
+    }
+
+    /// The row PostgreSQL gets: NEW (OLD for DELETE) with the columns named
+    /// by the fields of `row` (a struct, any subset of the columns) set to
+    /// the field values; the other columns keep their values.  The host
+    /// checks every set value against its column (type, typmod, domain)
+    /// and builds the row; generated columns cannot be set.
+    pub fn modify(self: Trigger, row: anytype) TriggerError!TriggerResult {
+        @setEvalBranchQuota(100_000);
+        const T = @TypeOf(row);
+        const si = @typeInfo(T).@"struct";
+        const n = self.info.natts;
+        // every entry is written below: no 0xAA fill
+        const vals: []Value = if (n == 0) &.{} else @as([*]Value, @ptrCast(@alignCast(allocator.rawAlloc(n * @sizeOf(Value), .of(Value), @returnAddress()) orelse return error.OutOfMemory)))[0..n];
+        for (vals) |*v| v.* = .{ .val = 0, .len = 0, .kind = 0, .is_null = 0 }; // keep
+        inline for (si.field_names, si.field_types) |fname, FT| {
+            const i = self.columnIndex(fname) orelse return error.NoSuchColumn;
+            const want = self.column(i).kind;
+            const fv = @field(row, fname);
+            var v: Value = undefined;
+            if (comptime isJsonbField(FT)) {
+                const opt: ?Jsonb = fv;
+                v = if (opt) |j| encodeParam(try j.toJsonText(), undefined) else encodeParam(@as(?JsonText, null), undefined);
+            } else if (comptime isFixed16Param(FT)) {
+                const buf = allocator.rawAlloc(16, .@"8", @returnAddress()) orelse return error.OutOfMemory;
+                v = encodeParam(fv, @ptrCast(buf));
+            } else {
+                v = encodeParam(fv, undefined);
+            }
+            // text, bytea and other carry bytes; the column's type decides
+            const bytes_kind = v.kind == @intFromEnum(Kind.text);
+            const col_bytes = want == @intFromEnum(Kind.text) or want == @intFromEnum(Kind.bytea) or want == @intFromEnum(Kind.other);
+            if (v.kind != want and !(bytes_kind and col_bytes)) return error.TypeMismatch;
+            vals[i] = v;
+        }
+        return .{ .action = 4, .values = vals };
+    }
+};
 
 /// A row struct from the host's values (composite arguments): the values
 /// must match the fields exactly (number, kind; NULL only for optional

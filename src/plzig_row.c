@@ -26,6 +26,7 @@
 #include "access/htup_details.h"
 #include "access/tupdesc.h"
 #include "catalog/pg_type.h"
+#include "commands/trigger.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
@@ -33,6 +34,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
 #include "utils/resowner.h"
 #include "utils/tuplestore.h"
 #include "utils/typcache.h"
@@ -594,3 +596,364 @@ plzig_srf_finish(PlzigSrf *srf)
 	srf->rsinfo->setDesc = CreateTupleDescCopy(srf->rd->tupdesc);
 	MemoryContextSwitchTo(old);
 }
+
+/* ---------------------------------------------------------------------
+ * Triggers (doc/abi.md, "Triggers")
+ * ---------------------------------------------------------------------
+ */
+
+/* event bits of the trigger information (PLZIG_TG_*) */
+#define PLZIG_TG_BEFORE			0
+#define PLZIG_TG_AFTER			1
+#define PLZIG_TG_INSTEAD		2
+#define PLZIG_TG_ROW			4
+#define PLZIG_TG_INSERT			(1 << 4)
+#define PLZIG_TG_UPDATE			(2 << 4)
+#define PLZIG_TG_DELETE			(3 << 4)
+#define PLZIG_TG_TRUNCATE		(4 << 4)
+
+/* column flags */
+#define PLZIG_COL_DROPPED		1
+#define PLZIG_COL_GENERATED		2
+
+/* actions of a trigger result (in the result slot's is_null) */
+#define PLZIG_TG_SKIP			1	/* NULL: skip the operation for this row */
+#define PLZIG_TG_NEW			2	/* the NEW row unchanged */
+#define PLZIG_TG_OLD			3	/* the OLD row unchanged */
+#define PLZIG_TG_MODIFIED		4	/* NEW (or OLD) with changed columns */
+
+/* the fixed part of the information blob: little-endian u32 fields */
+typedef struct PlzigTriggerInfo
+{
+	uint32		event;
+	uint32		relid;
+	uint32		natts;
+	uint32		nargs;
+	uint32		name_ptr;
+	uint32		name_len;
+	uint32		table_ptr;
+	uint32		table_len;
+	uint32		schema_ptr;
+	uint32		schema_len;
+	uint32		args_ptr;		/* nargs x (ptr, len) */
+	uint32		cols_ptr;		/* natts x PlzigTriggerCol */
+} PlzigTriggerInfo;
+
+typedef struct PlzigTriggerCol
+{
+	uint32		name_ptr;
+	uint32		name_len;
+	uint16		kind;			/* PLZIG_KIND_*, as in typed rows */
+	uint16		flags;			/* PLZIG_COL_* */
+	uint32		typid;
+} PlzigTriggerCol;
+
+struct PlzigTriggerArgs
+{
+	TriggerData *td;
+	/*
+	 * Copies taken when the sizes are computed, so that what is written
+	 * matches them even if a relcache rebuild happened in between (guest
+	 * code runs between the two when the arguments need plzig_alloc_args)
+	 */
+	TupleDesc	desc;
+	const char *table;
+	const char *schema;
+	uint32		info_size;
+	PlzigRowBuf *newrow;		/* NULL if there is no NEW row */
+	PlzigRowBuf *oldrow;
+};
+
+static inline uint32
+tg_align8(uint32 n)
+{
+	return (n + 7) & ~(uint32) 7;
+}
+
+/* NEW and OLD of a row-level trigger: NULL where the event has none */
+static HeapTuple
+tg_new(TriggerData *td)
+{
+	if (!TRIGGER_FIRED_FOR_ROW(td->tg_event))
+		return NULL;
+	if (TRIGGER_FIRED_BY_INSERT(td->tg_event))
+		return td->tg_trigtuple;
+	if (TRIGGER_FIRED_BY_UPDATE(td->tg_event))
+		return td->tg_newtuple;
+	return NULL;
+}
+
+static HeapTuple
+tg_old(TriggerData *td)
+{
+	if (!TRIGGER_FIRED_FOR_ROW(td->tg_event))
+		return NULL;
+	if (TRIGGER_FIRED_BY_UPDATE(td->tg_event) || TRIGGER_FIRED_BY_DELETE(td->tg_event))
+		return td->tg_trigtuple;
+	return NULL;
+}
+
+static PlzigRowBuf *
+tg_rowbuf(HeapTuple tup, TupleDesc desc, MemoryContext cxt)
+{
+	PlzigRowBuf *rb;
+
+	if (tup == NULL)
+		return NULL;
+	rb = plzig_rowbuf_create(cxt);
+	plzig_rowbuf_set_desc(rb, desc);
+	plzig_rowbuf_load(rb, tup, desc);
+	return rb;
+}
+
+/*
+ * Convert what a trigger call passes to the guest, in cxt (the call's
+ * context): the information blob (event, relation, trigger name and
+ * arguments, the relation's columns as they are now), the NEW and the OLD
+ * row (typed rows, all attributes, dropped ones NULL).  sizes gets the size
+ * of each of the three blobs (0 for an absent row).
+ */
+PlzigTriggerArgs *
+plzig_trigger_args_load(TriggerData *td, MemoryContext cxt, uint32 *sizes)
+{
+	PlzigTriggerArgs *ta = MemoryContextAllocZero(cxt, sizeof(PlzigTriggerArgs));
+	MemoryContext old = MemoryContextSwitchTo(cxt);
+	TupleDesc	desc = CreateTupleDescCopy(RelationGetDescr(td->tg_relation));
+	uint64		size;
+	int			i;
+
+	ta->td = td;
+	ta->desc = desc;
+	ta->table = pstrdup(RelationGetRelationName(td->tg_relation));
+	ta->schema = get_namespace_name(RelationGetNamespace(td->tg_relation));
+	if (ta->schema == NULL)
+		ta->schema = "";
+	/* the fixed part, the arguments' and columns' entries, then the strings */
+	size = sizeof(PlzigTriggerInfo) +
+		(uint64) td->tg_trigger->tgnargs * 8 +
+		(uint64) desc->natts * sizeof(PlzigTriggerCol);
+	size = TYPEALIGN(8, size);
+	size += TYPEALIGN(8, strlen(td->tg_trigger->tgname));
+	size += TYPEALIGN(8, strlen(ta->table));
+	size += TYPEALIGN(8, strlen(ta->schema));
+	for (i = 0; i < td->tg_trigger->tgnargs; i++)
+		size += TYPEALIGN(8, strlen(td->tg_trigger->tgargs[i]));
+	for (i = 0; i < desc->natts; i++)
+		size += TYPEALIGN(8, strlen(NameStr(TupleDescAttr(desc, i)->attname)));
+	if (size > PLZIG_MAX_ROW_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("PL/Zig: trigger information is too large")));
+	ta->info_size = (uint32) size;
+	sizes[0] = ta->info_size;
+
+	ta->newrow = tg_rowbuf(tg_new(td), desc, cxt);
+	ta->oldrow = tg_rowbuf(tg_old(td), desc, cxt);
+	sizes[1] = ta->newrow ? (uint32) plzig_rowbuf_size(ta->newrow, false) : 0;
+	sizes[2] = ta->oldrow ? (uint32) plzig_rowbuf_size(ta->oldrow, false) : 0;
+	MemoryContextSwitchTo(old);
+	return ta;
+}
+
+/* append a string at *off (never beyond limit), return its guest address */
+static uint32
+tg_put_str(uint8 *base, uint32 guest, uint32 *off, uint32 limit, const char *str, uint32 *len)
+{
+	uint32		at = *off;
+	size_t		n = strlen(str);
+
+	if (n > limit || tg_align8((uint32) n) > limit - at)	/* cannot happen: sized */
+		elog(ERROR, "PL/Zig: trigger information size mismatch");
+	*len = (uint32) n;
+	memcpy(base + at, str, *len);
+	*off += tg_align8(*len);
+	return guest + at;
+}
+
+/*
+ * Encode blob `which` (0 info, 1 NEW, 2 OLD) at native address base, which
+ * is guest address guest; the caller validated [guest, guest + size) for
+ * the size plzig_trigger_args_load reported.  Fills the argument slot.
+ */
+void
+plzig_trigger_args_encode(PlzigTriggerArgs *ta, int which, uint8 *base, uint32 guest,
+						  PlzigSlot *slot)
+{
+	TriggerData *td = ta->td;
+	TupleDesc	desc = ta->desc;
+	uint32		limit = ta->info_size;
+
+	memset(slot, 0, sizeof(*slot));
+	if (which == 0)
+	{
+		PlzigTriggerInfo info;
+		uint32		off;
+		uint32		args_at = sizeof(PlzigTriggerInfo);
+		uint32		cols_at = args_at + (uint32) td->tg_trigger->tgnargs * 8;
+		int			i;
+
+		memset(&info, 0, sizeof(info));
+		if (TRIGGER_FIRED_AFTER(td->tg_event))
+			info.event = PLZIG_TG_AFTER;
+		else if (TRIGGER_FIRED_INSTEAD(td->tg_event))
+			info.event = PLZIG_TG_INSTEAD;
+		else
+			info.event = PLZIG_TG_BEFORE;
+		if (TRIGGER_FIRED_FOR_ROW(td->tg_event))
+			info.event |= PLZIG_TG_ROW;
+		if (TRIGGER_FIRED_BY_INSERT(td->tg_event))
+			info.event |= PLZIG_TG_INSERT;
+		else if (TRIGGER_FIRED_BY_UPDATE(td->tg_event))
+			info.event |= PLZIG_TG_UPDATE;
+		else if (TRIGGER_FIRED_BY_DELETE(td->tg_event))
+			info.event |= PLZIG_TG_DELETE;
+		else if (TRIGGER_FIRED_BY_TRUNCATE(td->tg_event))
+			info.event |= PLZIG_TG_TRUNCATE;
+		info.relid = RelationGetRelid(td->tg_relation);
+		info.natts = (uint32) desc->natts;
+		info.nargs = (uint32) td->tg_trigger->tgnargs;
+		info.args_ptr = guest + args_at;
+		info.cols_ptr = guest + cols_at;
+		off = tg_align8(cols_at + (uint32) desc->natts * sizeof(PlzigTriggerCol));
+		if (off > limit)		/* cannot happen: sized */
+			elog(ERROR, "PL/Zig: trigger information size mismatch");
+		info.name_ptr = tg_put_str(base, guest, &off, limit, td->tg_trigger->tgname, &info.name_len);
+		info.table_ptr = tg_put_str(base, guest, &off, limit, ta->table, &info.table_len);
+		info.schema_ptr = tg_put_str(base, guest, &off, limit, ta->schema, &info.schema_len);
+		for (i = 0; i < td->tg_trigger->tgnargs; i++)
+		{
+			uint32		ref[2];
+
+			ref[0] = tg_put_str(base, guest, &off, limit, td->tg_trigger->tgargs[i], &ref[1]);
+			memcpy(base + args_at + (Size) i * 8, ref, 8);
+		}
+		for (i = 0; i < desc->natts; i++)
+		{
+			Form_pg_attribute att = TupleDescAttr(desc, i);
+			PlzigTriggerCol col;
+
+			memset(&col, 0, sizeof(col));
+			col.name_ptr = tg_put_str(base, guest, &off, limit, NameStr(att->attname), &col.name_len);
+			col.kind = att->attisdropped ? PLZIG_KIND_OTHER : plzig_value_kind(att->atttypid);
+			col.flags = (att->attisdropped ? PLZIG_COL_DROPPED : 0) |
+				(att->attgenerated != '\0' ? PLZIG_COL_GENERATED : 0);
+			col.typid = att->atttypid;
+			memcpy(base + cols_at + (Size) i * sizeof(PlzigTriggerCol), &col, sizeof(col));
+		}
+		if (off != ta->info_size)	/* cannot happen: the size counts the same */
+			elog(ERROR, "PL/Zig: trigger information size mismatch");
+		memcpy(base, &info, sizeof(info));
+		slot->val = guest;
+		slot->len = ta->info_size;
+	}
+	else
+	{
+		PlzigRowBuf *rb = (which == 1) ? ta->newrow : ta->oldrow;
+
+		if (rb == NULL)
+		{
+			slot->is_null = 1;
+			return;
+		}
+		slot->val = guest;
+		slot->len = (uint32) plzig_rowbuf_encode(rb, base, guest, false);
+		plzig_rowbuf_forget_row(rb);
+	}
+}
+
+/*
+ * What a trigger function returns (the result slot; doc/abi.md, "Triggers"):
+ * is_null = the action, and for a modified row val = the guest address of
+ * len values, one per attribute of the relation as it is now (positional by
+ * attribute number).  The row PostgreSQL gets is always built by the host
+ * from the trigger's own NEW (or OLD) tuple with heap_modify_tuple, so it
+ * has the relation's row type by construction; each changed column is
+ * checked like a row field (kind, range, input function with the column's
+ * typmod, domain constraints).  Columns a guest may not set: dropped ones,
+ * generated ones.  NOT NULL and CHECK constraints are checked by the
+ * executor afterwards, as for any trigger.
+ */
+Datum
+plzig_trigger_result(void *mi, TriggerData *td, const PlzigSlot *slot)
+{
+	TupleDesc	desc = RelationGetDescr(td->tg_relation);
+	HeapTuple	newtup = tg_new(td);
+	HeapTuple	oldtup = tg_old(td);
+	HeapTuple	base;
+	PlzigValue *vals;
+	Datum	   *values;
+	bool	   *nulls;
+	bool	   *replace;
+	int			natts = desc->natts;
+	int			i;
+
+	switch (slot->is_null)
+	{
+		case PLZIG_TG_SKIP:
+			return PointerGetDatum(NULL);
+		case PLZIG_TG_NEW:
+			if (newtup == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
+						 errmsg("PL/Zig: the trigger returned NEW, but this trigger has no NEW row")));
+			return PointerGetDatum(newtup);
+		case PLZIG_TG_OLD:
+			if (oldtup == NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
+						 errmsg("PL/Zig: the trigger returned OLD, but this trigger has no OLD row")));
+			return PointerGetDatum(oldtup);
+		case PLZIG_TG_MODIFIED:
+			break;
+		default:
+			ereport(ERROR,
+					(errcode(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
+					 errmsg("PL/Zig: invalid trigger result action %u", slot->is_null)));
+	}
+
+	base = newtup ? newtup : oldtup;
+	if (base == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
+				 errmsg("PL/Zig: the trigger returned a row, but this trigger has none to modify")));
+	if (slot->len != (uint32) natts)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("PL/Zig: the trigger returned a row of %u column(s), but table \"%s\" has %d",
+						slot->len, RelationGetRelationName(td->tg_relation), natts)));
+	if (slot->val > PG_UINT32_MAX && natts > 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+				 errmsg("PL/Zig: invalid pointer to the trigger's row")));
+	if (natts == 0)
+		return PointerGetDatum(base);
+
+	/* copied out first: input functions run below (natts <= 1600) */
+	vals = palloc(sizeof(PlzigValue) * natts);
+	memcpy(vals, plzig_guest_ptr(mi, (uint32) slot->val, (uint32) (natts * sizeof(PlzigValue))),
+		   sizeof(PlzigValue) * natts);
+	values = palloc0(sizeof(Datum) * natts);
+	nulls = palloc0(sizeof(bool) * natts);
+	replace = palloc0(sizeof(bool) * natts);
+	for (i = 0; i < natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(desc, i);
+		PlzigField	f;
+
+		if (vals[i].kind == PLZIG_KIND_NULL && vals[i].is_null == 0)
+			continue;			/* keep */
+		if (att->attisdropped)
+			ereport(ERROR,
+					(errcode(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
+					 errmsg("PL/Zig: the trigger set dropped column %d", i + 1)));
+		if (att->attgenerated != '\0')
+			ereport(ERROR,
+					(errcode(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED),
+					 errmsg("cannot set generated column \"%s\"", NameStr(att->attname))));
+		plzig_field_init(&f, att, true, CurrentMemoryContext);
+		values[i] = plzig_field_from_guest(mi, &f, &vals[i], "the trigger's row", &nulls[i]);
+		replace[i] = true;
+	}
+	return PointerGetDatum(heap_modify_tuple(base, desc, values, nulls, replace));
+}
+

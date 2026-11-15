@@ -394,6 +394,7 @@ struct PlzigCallCtx
 	MemoryContext errcxt;
 	ErrorData  *edata;			/* stashed error from a host import */
 	struct PlzigSrf *srf;		/* set-returning call: where rows go, or NULL */
+	struct TriggerData *trigdata;	/* trigger call (transition tables for SPI) */
 	bool		read_only;
 	bool		spi_connected;
 	void	   *tuptable;		/* SPITupleTable * of the last spi_execute */
@@ -445,6 +446,16 @@ extern PlzigSrf *plzig_srf_begin(struct ReturnSetInfo *rsinfo, PlzigRowDesc *rd,
 								 MemoryContext cxt);
 extern void plzig_srf_push(PlzigSrf *srf, void *module_inst, uint64 ptr, uint32 n);
 extern void plzig_srf_finish(PlzigSrf *srf);
+
+/* triggers (plzig_row.c): the three argument blobs and the result */
+#define PLZIG_TRIGGER_NARGS		3	/* info, NEW row, OLD row */
+typedef struct PlzigTriggerArgs PlzigTriggerArgs;
+extern PlzigTriggerArgs *plzig_trigger_args_load(struct TriggerData *td, MemoryContext cxt,
+												 uint32 *sizes);
+extern void plzig_trigger_args_encode(PlzigTriggerArgs *ta, int which, uint8 *base,
+									  uint32 guest, PlzigSlot *slot);
+extern Datum plzig_trigger_result(void *module_inst, struct TriggerData *td,
+								  const PlzigSlot *slot);
 extern void plzig_host_finish_call(PlzigCallCtx *ctx);
 extern void plzig_host_free_plans(PlzigPlanTable *plans);
 

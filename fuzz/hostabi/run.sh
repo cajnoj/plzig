@@ -6,7 +6,8 @@
 # sequence of host-import calls with forged pointers, lengths, row/column
 # numbers, handles, kinds and values, memory growth and nested calls, and
 # then returns a result forged from the script (an int, or a row), or the
-# rows the script pushed (a set-returning variant).
+# rows the script pushed (a set-returning variant), or a forged trigger
+# result (a trigger variant, the script coming in NEW).
 # Batches of random scripts (from setseed, so a batch can be replayed) run
 # in PL/pgSQL loops, one subtransaction per call, as an unprivileged role.
 # Oracles (fuzz/common/sql-lib.sh, fz_check): no backend crash, no
@@ -33,6 +34,11 @@ DROP DOMAIN IF EXISTS fuzz_hostabi_pos CASCADE;
 CREATE DOMAIN fuzz_hostabi_pos AS int CHECK (VALUE > 0);
 CREATE TYPE fuzz_hostabi_rt AS (a int, b text, n numeric(6,2), d date, j jsonb, u uuid,
     vc varchar(4), arr int[], ts timestamp(0), f float4, p fuzz_hostabi_pos, by bytea, tz timetz);
+DROP TABLE IF EXISTS fuzz_hostabi_tt;
+CREATE TABLE fuzz_hostabi_tt (script bytea, a int NOT NULL DEFAULT 0, b text, gone int, n numeric(6,2),
+    vc varchar(4), p fuzz_hostabi_pos, g int GENERATED ALWAYS AS (a * 2) STORED, u uuid, j jsonb);
+ALTER TABLE fuzz_hostabi_tt DROP COLUMN gone;
+GRANT INSERT, UPDATE, DELETE, SELECT ON fuzz_hostabi_tt TO fuzz_hostabi_user;
 GRANT SELECT, INSERT, UPDATE, DELETE ON fuzz_hostabi_t TO fuzz_hostabi_user;
 REVOKE ALL ON fuzz_hostabi_secret FROM PUBLIC;
 SQL
@@ -57,6 +63,12 @@ fz_reload
     cat "$here/driver.zig"
     echo '$fzdriver$;'
     echo 'GRANT EXECUTE ON FUNCTION fuzz_hostabi_set(bytea) TO fuzz_hostabi_user;'
+    # ... and as a trigger: the script comes in NEW, the trigger result is forged (doc/abi.md, "Triggers")
+    echo 'CREATE OR REPLACE FUNCTION fuzz_hostabi_trg() RETURNS trigger LANGUAGE plzig AS $fzdriver$'
+    cat "$here/driver.zig"
+    echo '$fzdriver$;'
+    echo 'CREATE TRIGGER fuzz_hostabi_tt_b BEFORE INSERT OR UPDATE OR DELETE ON fuzz_hostabi_tt FOR EACH ROW EXECUTE FUNCTION fuzz_hostabi_trg();'
+    echo 'CREATE TRIGGER fuzz_hostabi_tt_a AFTER INSERT ON fuzz_hostabi_tt FOR EACH ROW EXECUTE FUNCTION fuzz_hostabi_trg();'
 } >/tmp/fuzz-hostabi-create.sql
 out=$(fz_psql -f /tmp/fuzz-hostabi-create.sql)
 fz_set_conf compiler_sandbox ""
@@ -101,6 +113,11 @@ BEGIN
                 PERFORM fuzz_hostabi_row(s);
             ELSIF random() < 0.25 THEN
                 PERFORM count(*) FROM fuzz_hostabi_set(s);
+            ELSIF random() < 0.2 THEN
+                -- the triggers: before (forged result used) and after (ignored)
+                INSERT INTO fuzz_hostabi_tt (script, b) VALUES (s, 'x');
+                UPDATE fuzz_hostabi_tt SET b = 'y' WHERE script = s;
+                DELETE FROM fuzz_hostabi_tt WHERE script = s;
             ELSE
                 PERFORM fuzz_hostabi(s);
             END IF;
@@ -160,6 +177,6 @@ if [ -s "$fz_out/messages.jsonl" ]; then
 fi
 summary="$calls calls in $batches batches of 300 random scripts, seeds $fz_seed..$((fz_seed + batches - 1)); outcomes:"
 for k in $(printf '%s\n' "${!states[@]}" | sort); do summary+=" $k=${states[$k]}"; done
-fz_psql -c "DROP FUNCTION fuzz_hostabi(bytea); DROP FUNCTION fuzz_hostabi_row(bytea); DROP FUNCTION fuzz_hostabi_set(bytea); DROP TYPE fuzz_hostabi_rt; DROP DOMAIN fuzz_hostabi_pos; DROP TABLE fuzz_hostabi_t, fuzz_hostabi_secret; DROP ROLE fuzz_hostabi_user;" >/dev/null
+fz_psql -c "DROP FUNCTION fuzz_hostabi(bytea); DROP FUNCTION fuzz_hostabi_row(bytea); DROP FUNCTION fuzz_hostabi_set(bytea); DROP TABLE fuzz_hostabi_tt; DROP FUNCTION fuzz_hostabi_trg(); DROP TYPE fuzz_hostabi_rt; DROP DOMAIN fuzz_hostabi_pos; DROP TABLE fuzz_hostabi_t, fuzz_hostabi_secret; DROP ROLE fuzz_hostabi_user;" >/dev/null
 fz_check "hostabi cleanup"
 fz_result hostabi "$summary"

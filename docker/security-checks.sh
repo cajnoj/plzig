@@ -646,6 +646,101 @@ expect "hostile sets: rows outside a set-returning function" "rows can only be r
 expect "hostile sets: backend still healthy" "4242" "SELECT 4242;"
 if grep -qE "terminated by signal|server process .* was terminated" /tmp/server.log; then fail "hostile sets: no backend crash in the server log"; else pass "hostile sets: no backend crash in the server log"; fi
 psqlq -c "DROP FUNCTION hrow(int); DROP FUNCTION hsrf(int); DROP FUNCTION hsrf_outside(); DROP TYPE hr_t; SELECT plzig_cache_clear();" >/dev/null
+
+# forged trigger results (doc/abi.md, "Triggers"): the action, the column
+# count, pointers, kinds and values of a modified row, columns that cannot
+# be set; hostileCall replaces plzig_call and writes the result itself
+cat > /tmp/plzig-hostile-trig.sql <<'SQL'
+CREATE TABLE ht_t (id int, name text, g int GENERATED ALWAYS AS (id * 2) STORED, v varchar(3), gone int);
+ALTER TABLE ht_t DROP COLUMN gone;
+CREATE OR REPLACE FUNCTION htrig() RETURNS trigger LANGUAGE plzig AS $$
+    return .skip;
+}
+var vals: [8]plzig.Value align(8) = undefined;
+pub fn hostileCall(args: [*]const plzig.Slot, nargs: u32, result: *plzig.Slot, begin: u32) u32 {
+    _ = nargs;
+    if (begin != 0) plzig.resetArena();
+    const tg = plzig.Trigger.fromSlots(args);
+    const what = std.fmt.parseInt(i32, tg.arg(0).?, 10) catch 0;
+    const txt = "abc";
+    const long = "abcd";
+    for (&vals) |*v| v.* = .{ .val = 0, .len = 0, .kind = 0, .is_null = 0 }; // keep
+    var action: u32 = 4;
+    var n: u32 = @intCast(tg.columnCount());
+    var p: u64 = plzig.addrOf(&vals);
+    switch (what) {
+        0 => vals[1] = .{ .val = plzig.addrOf(txt.ptr), .len = txt.len, .kind = 7, .is_null = 0 },
+        1 => action = 0,
+        2 => action = 99,
+        3 => n -= 1,
+        4 => n = 0xffff_ffff,
+        5 => p = 0x7fff_ff00,
+        6 => p = 1 << 33,
+        7 => vals[0] = .{ .val = plzig.addrOf(txt.ptr), .len = txt.len, .kind = 7, .is_null = 0 },
+        8 => vals[2] = .{ .val = 5, .len = 0, .kind = 3, .is_null = 0 },
+        9 => vals[4] = .{ .val = 5, .len = 0, .kind = 3, .is_null = 0 },
+        10 => vals[3] = .{ .val = plzig.addrOf(long.ptr), .len = long.len, .kind = 7, .is_null = 0 },
+        11 => vals[0] = .{ .val = 1 << 40, .len = 0, .kind = 3, .is_null = 0 },
+        12 => vals[1] = .{ .val = plzig.addrOf(txt.ptr), .len = txt.len, .kind = 7, .is_null = 5 },
+        13 => vals[1] = .{ .val = 0x7fff_ff00, .len = 5, .kind = 7, .is_null = 0 },
+        14 => action = 3,
+        15 => vals[0] = .{ .val = 0, .len = 0, .kind = 0, .is_null = 1 },
+        16 => vals[2] = .{ .val = 0, .len = 0, .kind = 0, .is_null = 1 },
+        else => {},
+    }
+    result.* = .{ .val = p, .len = n, .is_null = action };
+    return 0;
+}
+fn unused() void {
+$$;
+CREATE OR REPLACE FUNCTION htry(w int) RETURNS text LANGUAGE plpgsql AS $f$
+DECLARE r text;
+BEGIN
+    EXECUTE format('CREATE TRIGGER ht BEFORE INSERT ON ht_t FOR EACH ROW EXECUTE FUNCTION htrig(%s)', w);
+    BEGIN
+        INSERT INTO ht_t (id, name, v) VALUES (1, 'n', 'v') RETURNING format('row %s,%s,%s,%s', id, name, g, v) INTO r;
+    EXCEPTION WHEN OTHERS THEN
+        r := SQLERRM;
+    END;
+    DROP TRIGGER ht ON ht_t;
+    RETURN r;
+END $f$;
+SQL
+out=$(psqlq -f /tmp/plzig-hostile-trig.sql)
+if grep -q ERROR <<<"$out"; then fail "hostile triggers: module loads"; echo "$out" | sed 's/^/         /'; else pass "hostile triggers: module loads"; fi
+n=0
+while IFS='|' read -r what needle; do
+    [ -z "$what" ] && continue
+    out=$(psqlq -c "SELECT htry($what);")
+    if grep -qF -- "$needle" <<<"$out"; then
+        n=$((n + 1))
+    else
+        fail "hostile triggers case $what: expected \"$needle\""; echo "$out" | sed 's/^/         /'
+    fi
+done <<'CASES'
+0|row 1,abc,2,v
+1|invalid trigger result action 0
+2|invalid trigger result action 99
+3|the trigger returned a row of 4 column(s), but table "ht_t" has 5
+4|the trigger returned a row of 4294967295 column(s)
+5|guest passed an invalid memory range
+6|invalid pointer to the trigger's row
+7|field "id" of the trigger's row is of type integer, but a value of kind text was passed
+8|cannot set generated column "g"
+9|the trigger set dropped column 5
+10|value too long for type character varying(3)
+11|value of field "id" of the trigger's row is out of range for type integer
+12|invalid NULL flag in field "name" of the trigger's row
+13|guest passed an invalid memory range
+14|the trigger returned OLD, but this trigger has no OLD row
+15|row ,n,,v
+16|cannot set generated column "g"
+CASES
+if [ "$n" -eq 17 ]; then pass "hostile triggers: 17 forged trigger results end in a clean ERROR or are accepted as valid"; fi
+expect "hostile triggers: nothing forged was stored" "0" "SELECT count(*) FROM ht_t WHERE name <> 'abc' AND id IS NOT NULL;"
+expect "hostile triggers: backend still healthy" "4242" "SELECT 4242;"
+if grep -qE "terminated by signal|server process .* was terminated" /tmp/server.log; then fail "hostile triggers: no backend crash in the server log"; else pass "hostile triggers: no backend crash in the server log"; fi
+psqlq -c "DROP TABLE ht_t; DROP FUNCTION htry(int); DROP FUNCTION htrig(); SELECT plzig_cache_clear();" >/dev/null
 set_conf compiler_sandbox ""
 set_real
 

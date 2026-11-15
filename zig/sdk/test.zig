@@ -984,6 +984,91 @@ test "returnNext: one host call per row, NULL rows of NULLs" {
     try testing.expectEqual(@as(usize, 5), env.srf_rows);
 }
 
+test "Trigger: the host's blobs, binding by name, modify" {
+    try setup(64);
+    // the information blob as the host lays it out (doc/abi.md, "Triggers"):
+    // 32-bit guest addresses, i.e. offsets into the (simulated) linear memory
+    const Info = extern struct {
+        event: u32, relid: u32, natts: u32, nargs: u32,
+        name_ptr: u32, name_len: u32, table_ptr: u32, table_len: u32,
+        schema_ptr: u32, schema_len: u32, args_ptr: u32, cols_ptr: u32,
+    };
+    const TCol = extern struct { name_ptr: u32, name_len: u32, kind: u16, flags: u16, typid: u32 };
+    const mem = try a.alignedAlloc(u8, .@"8", 1024);
+    const G = struct {
+        fn off(p: anytype) u32 {
+            return @intCast(@intFromPtr(p) - env.memory_base);
+        }
+    };
+    var used: usize = @sizeOf(Info) + 8 + 4 * @sizeOf(TCol);
+    const strs = [_][]const u8{ "trg", "tbl", "public", "arg0", "id", "gone", "name", "g" };
+    var at: [strs.len]u32 = undefined;
+    for (strs, 0..) |str, i| {
+        @memcpy(mem[used..][0..str.len], str);
+        at[i] = G.off(&mem[used]);
+        used += str.len;
+    }
+    const args_at = @sizeOf(Info);
+    const cols_at = args_at + 8;
+    std.mem.bytesAsValue([2]u32, mem[args_at..][0..8]).* = .{ at[3], 4 };
+    const cols = [4]TCol{
+        .{ .name_ptr = at[4], .name_len = 2, .kind = 3, .flags = 0, .typid = 23 },
+        .{ .name_ptr = at[5], .name_len = 4, .kind = 9, .flags = 1, .typid = 23 },
+        .{ .name_ptr = at[6], .name_len = 4, .kind = 7, .flags = 0, .typid = 25 },
+        .{ .name_ptr = at[7], .name_len = 1, .kind = 3, .flags = 2, .typid = 23 },
+    };
+    @memcpy(mem[cols_at..][0 .. 4 * @sizeOf(TCol)], std.mem.sliceAsBytes(&cols));
+    const info: *Info = @ptrCast(@alignCast(mem.ptr));
+    info.* = .{ .event = 0 | 4 | (2 << 4), .relid = 1234, .natts = 4, .nargs = 1,
+        .name_ptr = at[0], .name_len = 3, .table_ptr = at[1], .table_len = 3,
+        .schema_ptr = at[2], .schema_len = 6,
+        .args_ptr = G.off(&mem[args_at]), .cols_ptr = G.off(&mem[cols_at]) };
+    const nm = "abc";
+    const new_vals = [4]Value{
+        .{ .val = 7, .len = 0, .kind = 3, .is_null = 0 },
+        .{ .val = 0, .len = 0, .kind = 9, .is_null = 1 },
+        .{ .val = @intFromPtr(nm.ptr), .len = 3, .kind = 7, .is_null = 0 },
+        .{ .val = 14, .len = 0, .kind = 3, .is_null = 0 },
+    };
+    const slots = [3]Slot{
+        .{ .val = @intFromPtr(info), .len = @sizeOf(Info), .is_null = 0 },
+        .{ .val = @intFromPtr(&new_vals), .len = 4, .is_null = 0 },
+        .{ .val = 0, .len = 0, .is_null = 1 },
+    };
+    const tg = plzig.Trigger.fromSlots(&slots);
+    try testing.expectEqual(plzig.Trigger.When.before, tg.when());
+    try testing.expect(tg.forEachRow());
+    try testing.expectEqual(plzig.Trigger.Op.update, tg.op());
+    try testing.expectEqualStrings("trg", tg.name());
+    try testing.expectEqualStrings("public", tg.tableSchema());
+    try testing.expectEqualStrings("arg0", tg.arg(0).?);
+    try testing.expectEqual(@as(?[]const u8, null), tg.arg(1));
+    try testing.expect(tg.oldRow() == null);
+    // dropped columns are never found by name
+    try testing.expectEqual(@as(?usize, null), tg.columnIndex("gone"));
+    try testing.expectEqual(@as(?usize, 2), tg.columnIndex("name"));
+    const R = struct { name: ?[]const u8, id: i32 };
+    const r = (try tg.new(R)).?;
+    try testing.expectEqual(@as(i32, 7), r.id);
+    try testing.expectEqualStrings("abc", r.name.?);
+    try testing.expectEqual(@as(?R, null), try tg.old(R));
+    try testing.expectError(error.NoSuchColumn, tg.new(struct { nope: ?i32 }));
+    try testing.expectError(error.TypeMismatch, tg.new(struct { id: ?i64 }));
+    // modify: one value per column, untouched ones "keep" (kind 0, not NULL)
+    const m = try tg.modify(.{ .name = "xyz" });
+    try testing.expectEqual(@as(u32, 4), m.action);
+    try testing.expectEqual(@as(usize, 4), m.values.len);
+    try testing.expectEqual(@as(u16, 0), m.values[0].kind);
+    try testing.expectEqual(@as(u16, 0), m.values[0].is_null);
+    try testing.expectEqual(@as(u16, 7), m.values[2].kind);
+    try testing.expectEqual(@as(u32, 3), m.values[2].len);
+    const mn = try tg.modify(.{ .id = @as(?i32, null) });
+    try testing.expectEqual(@as(u16, 1), mn.values[0].is_null);
+    try testing.expectError(error.TypeMismatch, tg.modify(.{ .id = "text" }));
+    try testing.expectError(error.NoSuchColumn, tg.modify(.{ .gone = @as(i32, 1) }));
+    try testing.expectEqual(@as(u32, 1), plzig.TriggerResult.skip.action);
+}
+
 // ---------------------------------------------------------------------------
 // numeric
 

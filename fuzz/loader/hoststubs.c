@@ -314,3 +314,24 @@ plzig_srf_finish(PlzigSrf *srf)
 {
 	stub_value_error();
 }
+
+PlzigTriggerArgs *
+plzig_trigger_args_load(struct TriggerData *td, MemoryContext cxt, uint32 *sizes)
+{
+	stub_value_error();
+	return NULL;
+}
+
+void
+plzig_trigger_args_encode(PlzigTriggerArgs *ta, int which, uint8 *base, uint32 guest,
+						  PlzigSlot *slot)
+{
+	stub_value_error();
+}
+
+Datum
+plzig_trigger_result(void *module_inst, struct TriggerData *td, const PlzigSlot *slot)
+{
+	stub_value_error();
+	return (Datum) 0;
+}

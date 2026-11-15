@@ -671,7 +671,8 @@ v1 is expected to be slower than PL/pgSQL; neither weakens the sandbox.
        through a host import into a tuplestore (as PL/pgSQL's `RETURN NEXT`),
        bounded by `work_mem` as usual. No value-per-call mode: an instance
        never stays suspended between calls.
-    3. *Row and statement triggers.* `NEW`/`OLD` as structs, `TG_*` data
+    3. **Done (2026-11-15), see Deviations from plan, 34.**
+       *Row and statement triggers.* `NEW`/`OLD` as structs, `TG_*` data
        through the SDK; the function returns a modified row, the original,
        or null to skip. The returned row is built by the host from checked
        fields and must match the table's row type; a trigger function keeps
@@ -1816,3 +1817,50 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       `docker/security-checks.sh`, `hostabi` (a third driver function
       returning `SETOF`, an operation pushing forged rows in every driver
       function), `marshal` (`SETOF` in random signatures).
+34. **§12 item 14, step 3: row and statement triggers (2026-11-15).** No new
+    host import (the trigger's data comes with the call), no new GUC, ABI
+    version still 5. Design (`doc/abi.md` *Triggers*):
+    - *Structs bound by name at run time, not generated.* A trigger function
+      is not tied to one table (the same function can serve several, and a
+      table can change), so unlike step 1 no struct is generated from a
+      row type: the host passes the relation's descriptor with every call
+      (names, kinds, dropped/generated flags) next to NEW and OLD as typed
+      rows, and `tg.new(T)` binds a user-declared struct to the columns by
+      name (any subset, any order, kind checked as `Row.get`). A table
+      altered after compilation is therefore noticed
+      (`error.NoSuchColumn`/`error.TypeMismatch`), never misread; added
+      columns are kept; partitions with another column order work.
+      Plain positional access (`tg.newRow()`) is there too.
+    - *The returned row is built by the host from the trigger's own tuple*
+      (`heap_modify_tuple` of NEW, or OLD for `DELETE`): the guest sends,
+      per current attribute, "keep" or a value; each value is checked as a
+      row field of step 1 against the attribute (with its typmod and
+      domain), so the row has the table's row type by construction and no
+      guest-built tuple ever reaches the executor. Generated and dropped
+      columns cannot be set (as PL/Python refuses generated ones; PL/pgSQL
+      silently ignores them -- refusing is the safer choice). `NOT NULL`,
+      `CHECK` and foreign keys are left to the executor, as for every
+      trigger. `.new`/`.old` return the trigger's own tuples (refused when
+      the event has no such row, also at statement level), `.skip` NULL.
+    - *Result encoding*: the action is carried in the result slot's
+      `is_null` field (1 skip, 2 NEW, 3 OLD, 4 modified); 0 (a zeroed
+      slot) and anything else is refused.
+    - Trigger functions must have no declared arguments (as PL/pgSQL);
+      `RETURNS SETOF trigger` and event triggers are refused; the call
+      handler refuses a trigger function called directly and any other
+      function called as a trigger. SPI in a trigger call registers the
+      trigger data, so transition tables can be queried. Privileges are
+      unchanged (the caller's, or the owner's for `SECURITY DEFINER`).
+    - *Changed tests*: `basics.sql` and `signatures.sql` declared `RETURNS
+      trigger` functions to show the rejection; their (wrong-typed) bodies
+      now fail to compile instead (expected output changed, `basics.sql`'s
+      comment updated).
+    - *Tests*: `test/sql/triggers.sql` (new: BEFORE/AFTER/INSTEAD OF, row
+      and statement level, TRUNCATE, `TG_*` and arguments, skip/NEW/OLD/
+      modified, every column check, generated and NOT NULL columns, tables
+      altered after compilation, partitions, transition tables, recursion
+      through SPI, results a trigger cannot give, `SECURITY DEFINER` and
+      RLS), an SDK unit test of the blobs, 17 forged trigger results in
+      `docker/security-checks.sh`, `hostabi` (a trigger variant of the
+      driver whose script comes in NEW and whose result is forged),
+      `marshal` (`RETURNS trigger` in random signatures).

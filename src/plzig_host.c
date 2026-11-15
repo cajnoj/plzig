@@ -33,6 +33,7 @@
 
 #include "access/htup_details.h"
 #include "catalog/pg_type.h"
+#include "commands/trigger.h"
 #include "executor/spi.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
@@ -505,6 +506,10 @@ spi_connect_if_needed(PlzigCallCtx *ctx)
 		if (SPI_connect() != SPI_OK_CONNECT)
 			elog(ERROR, "SPI_connect failed");
 		ctx->spi_connected = true;
+		/* a trigger's transition tables (REFERENCING) become visible to SQL */
+		if (ctx->trigdata &&
+			SPI_register_trigger_data(ctx->trigdata) != SPI_OK_TD_REGISTER)
+			elog(ERROR, "SPI_register_trigger_data failed");
 		MemoryContextSwitchTo(old);
 	}
 }

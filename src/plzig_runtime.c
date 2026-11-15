@@ -1032,8 +1032,10 @@ Datum
 plzig_instance_call(PlzigInstance *pi, const PlzigCallSpec *spec, bool *isnull)
 {
 	PlzigTypeInfo *argtypes = spec->argtypes;
-	int			nargs = spec->nargs;
+	/* a trigger call gets its three argument blobs instead (PLZIG_TRIGGER_NARGS) */
+	int			nargs = spec->trigdata ? PLZIG_TRIGGER_NARGS : spec->nargs;
 	NullableDatum *args = spec->args;
+	PlzigTriggerArgs *volatile trig = NULL;	/* set inside PG_TRY */
 	PlzigCallCtx ctx;
 	MemoryContext oldcxt;
 	const char **bytes;
@@ -1067,6 +1069,7 @@ plzig_instance_call(PlzigInstance *pi, const PlzigCallSpec *spec, bool *isnull)
 	ctx.scratch = pi->scratch_cxt;
 	ctx.errcxt = oldcxt;
 	ctx.read_only = spec->read_only;
+	ctx.trigdata = spec->trigdata;
 	ctx.cached_row = -1;
 	ctx.cached_col = -1;
 	ctx.cached_name_col = -1;
@@ -1085,7 +1088,14 @@ plzig_instance_call(PlzigInstance *pi, const PlzigCallSpec *spec, bool *isnull)
 		lens = palloc0(sizeof(uint32) * (nargs + 1));
 		rows = palloc0(sizeof(PlzigRowBuf *) * (nargs + 1));
 		total = (uint64) (nargs + 1) * sizeof(PlzigSlot);
-		for (i = 0; i < nargs; i++)
+		if (spec->trigdata)
+		{
+			/* the trigger's information, NEW and OLD (doc/abi.md, "Triggers") */
+			trig = plzig_trigger_args_load(spec->trigdata, pi->call_cxt, lens);
+			for (i = 0; i < nargs; i++)
+				total += TYPEALIGN(8, (uint64) lens[i]);
+		}
+		for (i = 0; i < nargs && trig == NULL; i++)
 		{
 			PlzigTypeKind k = argtypes[i].kind;
 
@@ -1173,7 +1183,12 @@ plzig_instance_call(PlzigInstance *pi, const PlzigCallSpec *spec, bool *isnull)
 			PlzigSlot	s;
 
 			memset(&s, 0, sizeof(s));
-			if (args[i].isnull)
+			if (trig)
+			{
+				plzig_trigger_args_encode(trig, i, base + off, guest_base + off, &s);
+				off += TYPEALIGN(8, lens[i]);
+			}
+			else if (args[i].isnull)
 				s.is_null = 1;
 			else
 			{
@@ -1312,6 +1327,12 @@ plzig_instance_call(PlzigInstance *pi, const PlzigCallSpec *spec, bool *isnull)
 			plzig_srf_finish(ctx.srf);
 			*isnull = true;
 			ret = (Datum) 0;
+		}
+		else if (spec->trigdata)
+		{
+			/* NULL, NEW, OLD or a row built by the host; never fcinfo->isnull */
+			ret = plzig_trigger_result(pi->inst, spec->trigdata, &result);
+			*isnull = false;
 		}
 		else if (spec->retrow)
 			ret = plzig_row_result(pi->inst, spec->retrow, &result, isnull);

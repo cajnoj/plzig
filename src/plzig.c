@@ -69,6 +69,7 @@ typedef struct PlzigFunction
 	PlzigTypeInfo rettype;
 	PlzigRowDesc *retrow;		/* row result (struct), the rows of a set, or NULL */
 	bool		retset;			/* set-returning (materialize mode) */
+	bool		is_trigger;		/* RETURNS trigger */
 	bool		read_only;
 	char	   *signature;		/* for error context */
 } PlzigFunction;
@@ -356,6 +357,7 @@ plzig_function_build(Oid fn_oid, HeapTuple proctup)
 		else
 			plzig_type_info_init(&fn->rettype, sig.rettype, true, cxt);
 		fn->retset = sig.retset;
+		fn->is_trigger = sig.is_trigger;
 		fn->read_only = (sig.volatility != PROVOLATILE_VOLATILE);
 		fn->signature = format_procedure(fn_oid);
 		MemoryContextSwitchTo(old);
@@ -544,8 +546,10 @@ plzig_function_execute(PlzigFunction *fn, FunctionCallInfo fcinfo)
 		spec.retrow = fn->retrow;
 		spec.retset = fn->retset;
 		spec.rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+		if (fn->is_trigger)
+			spec.trigdata = (TriggerData *) fcinfo->context;
 		spec.read_only = fn->read_only;
-		if (fcinfo->nargs != fn->nargs)	/* cannot happen */
+		if (fcinfo->nargs != fn->nargs && !fn->is_trigger)	/* cannot happen */
 			elog(ERROR, "PL/Zig: function called with %d arguments, expected %d",
 				 fcinfo->nargs, fn->nargs);
 		result = plzig_instance_call(inst, &spec, &isnull);
@@ -600,12 +604,18 @@ plzig_call_handler(PG_FUNCTION_ARGS)
 {
 	PlzigFunction *fn;
 
-	if (CALLED_AS_TRIGGER(fcinfo) || CALLED_AS_EVENT_TRIGGER(fcinfo))
+	if (CALLED_AS_EVENT_TRIGGER(fcinfo))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("PL/Zig functions cannot be used as triggers")));
+				 errmsg("PL/Zig functions cannot be used as event triggers")));
 
 	fn = plzig_function_lookup(fcinfo->flinfo->fn_oid);
+	/* a trigger function only as a trigger, and only it */
+	if (fn->is_trigger != CALLED_AS_TRIGGER(fcinfo))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 fn->is_trigger ? errmsg("trigger functions can only be called as triggers") :
+				 errmsg("PL/Zig function %s is not a trigger function", fn->signature)));
 	return plzig_function_execute(fn, fcinfo);
 }
 

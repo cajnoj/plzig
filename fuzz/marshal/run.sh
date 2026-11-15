@@ -172,6 +172,8 @@ BEGIN
         -- a function with output parameters gets no RETURNS clause (PostgreSQL derives it);
         -- a set of any good type is fine (materialize mode), SETOF void is not
         IF NOT proc AND nout = 0 AND ret = ANY (badtypes) AND (setof OR ret <> 'void') THEN expect_ok := false; END IF;
+        -- a trigger function: no declared parameters, not a set (then fine)
+        IF NOT proc AND nout = 0 AND ret = 'trigger' AND NOT setof AND n = 0 THEN expect_ok := true; END IF;
         -- a row result (struct) declares Result; a set declares Result and returnNext
         rowres := (proc AND nout > 0) OR (NOT proc AND (nout >= 2 OR (nout = 1 AND outtype = 'fz_pair')
                                                         OR (nout = 0 AND ret = 'fz_pair')));
@@ -193,7 +195,8 @@ BEGIN
             ELSE
                 EXECUTE format('CREATE FUNCTION fz_sig(%s) RETURNS %s%s LANGUAGE plzig AS $b$ %s $b$',
                                sig, CASE WHEN setof THEN 'SETOF ' ELSE '' END, ret,
-                               CASE WHEN ret = 'void' OR setof THEN 'return;' ELSE 'return null;' END);
+                               CASE WHEN ret = 'void' OR setof THEN 'return;' WHEN ret = 'trigger' THEN 'return .skip;'
+                                    ELSE 'return null;' END);
             END IF;
             got_ok := true;
         EXCEPTION WHEN OTHERS THEN
@@ -210,7 +213,8 @@ BEGIN
         IF got_ok THEN
             nacc := nacc + 1;
             -- every 4th accepted signature: compile and call it with NULLs
-            IF nacc % 4 = 1 THEN
+            -- (a trigger function can only be called as a trigger)
+            IF nacc % 4 = 1 AND (proc OR ret <> 'trigger') THEN
                 BEGIN
                     IF proc THEN
                         EXECUTE format('CALL fz_sig(%s)', (SELECT coalesce(string_agg('NULL', ', '), '') FROM generate_series(1, n)));

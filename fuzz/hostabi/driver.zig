@@ -2,6 +2,7 @@
     //   fuzz_hostabi(script bytea) RETURNS int STRICT VOLATILE LANGUAGE plzig
     //   fuzz_hostabi_row(script bytea) RETURNS fuzz_hostabi_rt ...
     //   fuzz_hostabi_set(script bytea) RETURNS SETOF fuzz_hostabi_rt ...
+    //   fuzz_hostabi_trg() RETURNS trigger (the script: NEW's first column)
     // compiled through docker/fake/hostilezig.c (which makes the SDK's host
     // import table public, adds rawPtr/addrOf/memSize helpers and lets
     // hostileCall below replace the SDK's plzig_call), so that it can call
@@ -16,11 +17,13 @@
 
 const Fn = @TypeOf(call);
 const Ret = @typeInfo(@typeInfo(Fn).@"fn".return_type.?).error_union.payload;
+const is_trigger = @typeInfo(Fn).@"fn".param_types.len == 1 and @typeInfo(Fn).@"fn".param_types[0].? == plzig.Trigger;
 
 /// plzig_call, as the hostile wrapper lets a function replace it: run the
 /// script, then write the result slot (doc/abi.md, "Call sequence").
 pub fn hostileCall(args: [*]const Slot, nargs: u32, result: *Slot, begin: u32) u32 {
     if (begin != 0) plzig.resetArena();
+    if (comptime is_trigger) return triggerCall(args, nargs, result);
     if (nargs != 1 or args[0].is_null != 0) plzig.raiseMsg("fuzz: one script argument expected");
     const p = plzig.rawPtr([*]const u8, if (args[0].len == 0) gbase() else @as(usize, @intCast(args[0].val)));
     const script = p[0..args[0].len];
@@ -41,6 +44,81 @@ pub fn hostileCall(args: [*]const Slot, nargs: u32, result: *Slot, begin: u32) u
         }
     }
     return 0;
+}
+
+/// A trigger (fuzz_hostabi_trg on fuzz_hostabi_tt): the script is the first
+/// column of NEW (or OLD); then a trigger result forged from it: the
+/// action, the column count, the pointer, and per column keep / NULL / a
+/// value for the column's kind / a value forged throughout.
+fn triggerCall(args: [*]const Slot, nargs: u32, result: *Slot) u32 {
+    if (nargs != 3) plzig.raiseMsg("fuzz: three trigger slots expected");
+    const tg = plzig.Trigger.fromSlots(args);
+    const row = tg.newRow() orelse tg.oldRow() orelse {
+        result.* = .{ .val = 0, .len = 0, .is_null = 1 };
+        return 0;
+    };
+    const script: []const u8 = (row.get(?[]const u8, 0) catch null) orelse "";
+    _ = run(script);
+    var sc: Script = .{ .s = script };
+    const n = @min(tg.columnCount(), row_vals.len);
+    for (row_vals[0..n], 0..) |*v, k| {
+        const how = sc.byte();
+        if (how < 120) {
+            v.* = .{ .val = 0, .len = 0, .kind = 0, .is_null = 0 }; // keep
+        } else if (how < 160) {
+            v.* = .{ .val = 0, .len = 0, .kind = 0, .is_null = 1 };
+        } else if (how < 230) {
+            v.* = .{ .val = 0, .len = 0, .kind = @intFromEnum(tg.columnKind(k) catch .other), .is_null = 0 };
+            forgeValue(v, k, &sc);
+        } else {
+            forgeThroughout(v, &sc);
+        }
+    }
+    const sel = sc.byte();
+    const action: u32 = if (sel < 180) 4 else if (sel < 245) 1 + sel % 3 else sc.int(u32);
+    const count: u32 = if (sc.byte() < 235) @intCast(tg.columnCount()) else sc.int(u32) % 8;
+    const where: u64 = if (sc.byte() < 240) plzig.addrOf(&row_vals) else ptrArg(&sc);
+    result.* = .{ .val = where, .len = count, .is_null = action };
+    return 0;
+}
+
+/// a plausible value for v.kind (set by the caller), like an SPI parameter
+fn forgeValue(v: *Value, k: usize, sc: *Script) void {
+    v.is_null = 0;
+    v.val = switch (v.kind) {
+        1 => sc.byte() % 2,
+        2, 3, 4 => @bitCast(@as(i64, sc.int(i16))),
+        5, 6 => sc.int(u32),
+        10 => @bitCast(@as(i64, sc.int(i32) >> 8)),
+        11, 13, 14 => @bitCast(@as(i64, sc.int(i32)) * 1000),
+        12 => sc.int(u64) % 86_400_000_000,
+        15, 16 => blk: {
+            for (&row_fixed[k]) |*b| b.* = sc.byte();
+            break :blk plzig.addrOf(&row_fixed[k]);
+        },
+        18 => blk: {
+            const num = numerics[sc.byte() % numerics.len];
+            v.len = @intCast(num.len);
+            break :blk plzig.addrOf(num.ptr);
+        },
+        else => blk: {
+            const strs = [_][]const u8{ "1", "abc", "{1,2}", "[1, {\"a\": null}]", "(1,x)", "", "\u{e9}", "toolongvalue", "\xff", "a\x00b" };
+            const str = strs[sc.byte() % strs.len];
+            v.len = @intCast(str.len);
+            break :blk plzig.addrOf(str.ptr);
+        },
+    };
+    if (v.kind == 15 or v.kind == 16) v.len = 16;
+    if (v.kind == 12) v.len = sc.int(u16) % 50000;
+}
+
+/// kind, value, length and NULL flag forged
+fn forgeThroughout(v: *Value, sc: *Script) void {
+    const how = sc.byte();
+    v.kind = if (how < 230) sc.byte() % 21 else sc.int(u16);
+    v.val = if (sc.byte() < 128) ptrArg(sc) else sc.int(u64);
+    v.len = lenArg(sc);
+    v.is_null = if (sc.byte() < 240) sc.byte() % 2 else sc.int(u16);
 }
 
 /// the row type of a row or set result (the generated Result), if any
@@ -79,40 +157,7 @@ fn forgeRow(comptime R: type, sc: *Script) struct { u64, u32 } {
     for (row_vals[0..n], 0..) |*v, k| {
         const how = sc.byte();
         if (how < 60) continue; // NULL of the right kind
-        if (how < 200) {
-            v.is_null = 0;
-            v.val = switch (v.kind) {
-                1 => sc.byte() % 2,
-                2, 3, 4 => @bitCast(@as(i64, sc.int(i16))),
-                5, 6 => sc.int(u32),
-                10 => @bitCast(@as(i64, sc.int(i32) >> 8)),
-                11, 13, 14 => @bitCast(@as(i64, sc.int(i32)) * 1000),
-                12 => sc.int(u64) % 86_400_000_000,
-                15, 16 => blk: {
-                    for (&row_fixed[k]) |*b| b.* = sc.byte();
-                    break :blk plzig.addrOf(&row_fixed[k]);
-                },
-                18 => blk: {
-                    const num = numerics[sc.byte() % numerics.len];
-                    v.len = @intCast(num.len);
-                    break :blk plzig.addrOf(num.ptr);
-                },
-                else => blk: {
-                    const strs = [_][]const u8{ "1", "abc", "{1,2}", "[1, {\"a\": null}]", "(1,x)", "", "\u{e9}", "toolongvalue", "\xff", "a\x00b" };
-                    const str = strs[sc.byte() % strs.len];
-                    v.len = @intCast(str.len);
-                    break :blk plzig.addrOf(str.ptr);
-                },
-            };
-            if (v.kind == 15 or v.kind == 16) v.len = 16;
-            if (v.kind == 12) v.len = sc.int(u16) % 50000;
-            continue;
-        }
-        // forged throughout
-        v.kind = if (how < 230) sc.byte() % 21 else sc.int(u16);
-        v.val = if (sc.byte() < 128) ptrArg(sc) else sc.int(u64);
-        v.len = lenArg(sc);
-        v.is_null = if (sc.byte() < 240) sc.byte() % 2 else sc.int(u16);
+        if (how < 200) forgeValue(v, k, sc) else forgeThroughout(v, sc);
     }
     const count: u32 = if (sc.byte() < 230) @intCast(n) else switch (sc.byte() % 4) {
         0 => @intCast(n -| 1),

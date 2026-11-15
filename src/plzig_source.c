@@ -153,8 +153,28 @@ plzig_check_signature(HeapTuple proctup, PlzigSignature *sig)
 						 argmodes[i] == PROARGMODE_TABLE))
 			nout++;
 
+	/*
+	 * Trigger functions (doc/abi.md, "Triggers"): no declared arguments, the
+	 * trigger's data comes through plzig.Trigger.  Event triggers stay
+	 * refused (their result type is a pseudo-type, checked below).
+	 */
+	if (proc->prorettype == TRIGGEROID)
+	{
+		if (proc->prokind != PROKIND_FUNCTION || proc->proretset)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+					 errmsg("a PL/Zig trigger function must be a function returning trigger")));
+		if (nall > 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+					 errmsg("trigger functions cannot have declared arguments"),
+					 errhint("The arguments of the trigger can be accessed through plzig.Trigger.arg().")));
+		sig->is_trigger = true;
+	}
+
 	/* the declared result type first (RECORD is checked with the outputs below) */
-	if (proc->prorettype != VOIDOID && !(nout > 0 && proc->prorettype == RECORDOID))
+	if (proc->prorettype != VOIDOID && !sig->is_trigger &&
+		!(nout > 0 && proc->prorettype == RECORDOID))
 		plzig_check_type(proc->prorettype, true);
 
 	sig->argtypes = palloc0(sizeof(Oid) * (nall > 0 ? nall : 1));
@@ -221,7 +241,7 @@ plzig_check_signature(HeapTuple proctup, PlzigSignature *sig)
 			elog(ERROR, "could not build the result row type of function %u", proc->oid);
 		plzig_check_row_fields(sig->rettupdesc, "the output parameters");
 	}
-	else if (proc->prorettype != VOIDOID)
+	else if (proc->prorettype != VOIDOID && !sig->is_trigger)
 	{
 		if (plzig_type_is_row(proc->prorettype))
 		{
@@ -382,6 +402,16 @@ plzig_generate_source(const PlzigSignature *sig, const char *body, size_t *srcle
 	/* a set: rows are pushed (doc/abi.md, "Sets"); NULL is a row of NULLs */
 	if (sig->retset)
 		appendStringInfoString(&buf, "fn returnNext(row: ?Result) void { plzig.returnNext(Result, row); } ");
+
+	/* a trigger: the trigger's data in, what to do with the row out */
+	if (sig->is_trigger)
+	{
+		appendStringInfoString(&buf, "pub fn call(tg: plzig.Trigger) anyerror!plzig.TriggerResult { _ = &tg;\n");
+		appendStringInfoString(&buf, body);
+		appendStringInfoString(&buf, "\n}\n");
+		*srclen = buf.len;
+		return buf.data;
+	}
 
 	appendStringInfoString(&buf, "pub fn call(");
 	for (i = 0; i < sig->nargs; i++)

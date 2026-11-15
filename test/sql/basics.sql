@@ -129,5 +129,5 @@ CREATE FUNCTION fact(n int) RETURNS bigint STRICT LANGUAGE plzig AS $$
 $$;
 SELECT fact(10);
 
--- triggers are not supported
+-- a trigger function returns a plzig.TriggerResult (test/sql/triggers.sql)
 CREATE FUNCTION trg() RETURNS trigger LANGUAGE plzig AS $$ return; $$;

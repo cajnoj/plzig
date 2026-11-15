@@ -186,6 +186,6 @@ SELECT fact(10);
  3628800
 (1 row)
 
--- triggers are not supported
+-- a trigger function returns a plzig.TriggerResult (test/sql/triggers.sql)
 CREATE FUNCTION trg() RETURNS trigger LANGUAGE plzig AS $$ return; $$;
-ERROR:  PL/Zig functions cannot return type trigger
+ERROR:  PL/Zig compilation failed

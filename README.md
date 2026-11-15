@@ -268,20 +268,20 @@ the generated struct `Result`, with one it returns that parameter's type.
 
 ```sql
 CREATE FUNCTION divmod(a int, b int, OUT q int, OUT r int) STRICT LANGUAGE plzig AS $$
-    if (b == 0) return null;                      -- a NULL row
+    if (b == 0) return null;                      // a NULL row
     return .{ .q = @divTrunc(a, b), .r = @rem(a, b) };
 $$;
 SELECT * FROM divmod(17, 5);                      -- 3 | 2
 
 CREATE TYPE pair AS (a int, b text);
 CREATE FUNCTION swap_sign(p pair) RETURNS pair STRICT LANGUAGE plzig AS $$
-    var q = p;                                    -- the same struct type
+    var q = p;                                    // the same struct type
     q.a = if (p.a) |v| -v else null;
     return q;
 $$;
 
 CREATE PROCEDURE bump(INOUT n int) LANGUAGE plzig AS $$
-    return .{ .n = (n orelse 0) + 1 };            -- a procedure returns its row
+    return .{ .n = (n orelse 0) + 1 };            // a procedure returns its row
 $$;
 ```
 
@@ -322,6 +322,48 @@ SELECT * FROM squares(3);
 
 `returnNext` and `Result` are reserved parameter names in set-returning
 functions; pushing rows from any other function is an error.
+
+### Triggers
+
+A trigger function (`RETURNS trigger`, no declared parameters) is
+`pub fn call(tg: plzig.Trigger) anyerror!plzig.TriggerResult`. `tg` has
+PostgreSQL's `TG_*` data — `when()` (`.before`, `.after`, `.instead_of`),
+`forEachRow()`, `op()` (`.insert`, `.update`, `.delete`, `.truncate`),
+`name()`, `tableName()`, `tableSchema()`, `relid()`, `argCount()`/`arg(i)`,
+the table's columns as they are now (`columnCount()`, `columnName(i)`,
+`columnKind(i)`, `columnIndex(name)`) — and NEW and OLD, as typed rows
+(`newRow()`, `oldRow()`: `Row.get(T, position)`) or as structs bound to the
+columns **by name** at every call (`try tg.new(T)`, `try tg.old(T)`: any
+subset of the columns, in any order; null when the trigger has no such
+row). The result is `.skip` (NULL: skip the operation for this row),
+`.new` or `.old` (that row unchanged), or `try tg.modify(.{ .col = value,
+... })`: NEW (OLD for `DELETE`) with those columns changed.
+
+```sql
+CREATE FUNCTION stamp() RETURNS trigger LANGUAGE plzig AS $$
+    const Row = struct { name: ?[]const u8, qty: ?i32 };
+    const new = (try tg.new(Row)) orelse return .skip;
+    if ((new.qty orelse 0) < 0) return .skip;            // refuse silently
+    return try tg.modify(.{ .name = new.name orelse "unnamed" });
+$$;
+CREATE TRIGGER items_stamp BEFORE INSERT OR UPDATE ON items
+    FOR EACH ROW EXECUTE FUNCTION stamp();
+```
+
+* The row PostgreSQL gets is built by the host from the trigger's own NEW
+  (or OLD) tuple: it always has the table's row type. Each changed column
+  is checked like a row field (type, the column's typmod, a domain's
+  constraints); generated and dropped columns cannot be set; `NOT NULL`
+  and `CHECK` constraints are checked by PostgreSQL afterwards, as for any
+  trigger.
+* Because NEW and OLD are bound by name at every call, a table altered after
+  the function was compiled is noticed (`error.NoSuchColumn`,
+  `error.TypeMismatch`), never misread; added columns are simply kept.
+* For `AFTER` and statement-level triggers PostgreSQL ignores the result
+  (return `.skip`). Transition tables (`REFERENCING NEW TABLE AS ...`) can
+  be queried through SPI. A trigger function runs with the privileges of
+  the user who fires it, or of its owner if it is `SECURITY DEFINER`, as in
+  every language. Event triggers are not supported.
 
 You can define helper functions and globals after the body by closing the
 function yourself (the generated wrapper adds the final `}`):
@@ -581,7 +623,7 @@ start over.
 
 ### Not supported (by design, see PLAN.md D10)
 
-Triggers, event triggers, set-returning functions in value-per-call mode,
+Event triggers, set-returning functions in value-per-call mode,
 `VARIADIC` parameters, polymorphic and other pseudo-types (except `void`
 results and `record` described by output parameters), aggregates/window
 functions,

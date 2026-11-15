@@ -173,6 +173,47 @@ number of values; `is_null` = 1 is a NULL row.
   `record` results are described by the function's own `pg_proc` row: a
   change replaces the function.
 
+### Triggers
+
+A trigger function (`RETURNS trigger`, no declared parameters, not a set;
+event triggers are refused) is generated as
+`pub fn call(tg: plzig.Trigger) anyerror!plzig.TriggerResult`, and called
+(only as a trigger; the call handler refuses it otherwise, and refuses any
+other function called as a trigger) with **three slots**:
+
+1. the trigger information, `val` = address, `len` = size; little-endian
+   u32 fields: `event` (bits 0–1: 0 `BEFORE`, 1 `AFTER`, 2 `INSTEAD OF`;
+   bit 2: row level; bits 4–7: 1 `INSERT`, 2 `UPDATE`, 3 `DELETE`, 4
+   `TRUNCATE`), `relid`, `natts`, `nargs`, then (address, length) of the
+   trigger name, the table name and its schema name, the address of
+   `nargs` (address, length) pairs (`TG_ARGV`), and the address of `natts`
+   16-byte column entries (address and length of the name, u16 kind as in
+   *Kinds*, u16 flags: 1 dropped, 2 generated, u32 type OID) — the
+   relation's descriptor **at this call**; the strings follow, 8-byte
+   aligned;
+2. NEW, 3. OLD: a typed row (*Rows* of the SPI interface: one value per
+   attribute, dropped ones NULL of kind 9) of the trigger's tuple, or
+   `is_null` = 1 where the event has none (`INSERT`: no OLD; `DELETE`: no
+   NEW; statement level: neither).
+
+The SDK binds NEW/OLD to structs by column name (`Trigger.new(T)`): nothing
+about the table is compiled in.
+
+The result slot: `is_null` holds the **action**: 1 = skip (the function
+returns a NULL pointer: skip the operation for this row), 2 = NEW unchanged,
+3 = OLD unchanged (2 and 3 are refused, `39P01`, when the trigger has no
+such row), 4 = a modified row: `val` = address of `len` values, `len` = the
+relation's current number of attributes (else `42804`), positional by
+attribute; a value of kind 0 that is not NULL means "keep", anything else
+replaces the column after the checks of a row field (*Rows*: kind, range,
+input function with the column's typmod, domain constraints, also for
+NULL); a dropped or generated column cannot be set (`39P01`). The row is
+`heap_modify_tuple` of the trigger's NEW (OLD for `DELETE`; refused when
+there is neither, e.g. at statement level), so it has the relation's row
+type by construction. Any other action is refused. The result is never
+`fcinfo->isnull`. SPI in a trigger call registers the trigger data
+(`SPI_register_trigger_data`), so transition tables are visible.
+
 ### Range checks
 
 Every fixed-width value a guest hands back -- a function result, a
@@ -253,7 +294,9 @@ trap in `plzig_init` rejects it too. The address need not be aligned.
 
 1. `check_stack_depth()`; set the exec-env user data to the call context.
 2. Compute the argument block size: `(nargs + 1) * 16` plus every byte
-   argument rounded up to 8 (more than 4 GB − 16 → `ERROR`).
+   argument rounded up to 8 (more than 4 GB − 16 → `ERROR`); composite
+   arguments (*Rows*) and a trigger's three blobs (*Triggers*) are
+   converted first and counted like byte arguments.
 3. If the block fits the argument buffer, `base` = the buffer's address and
    `begin` = 1: the call enters the guest once. Otherwise
    `plzig_alloc_args(total)`, `base` = its result (0 → `ERROR`, out of guest
@@ -529,6 +572,11 @@ grows only through the `memory.grow` instruction, bounded by
   — used by the SDK root for composite arguments and results.
 * `plzig.returnNext(T, ?T)`: `srf_return_next` with the row encoded into a
   static buffer per row type (the generated `returnNext` calls it).
+* Triggers (*Triggers*): `plzig.Trigger` (`when`, `forEachRow`, `op`,
+  `name`, `tableName`, `tableSchema`, `relid`, `argCount`/`arg`,
+  `columnCount/Name/Kind/Dropped/Generated/Index`, `newRow`/`oldRow`,
+  `new(T)`/`old(T)` bound by name, `modify(row)`), `plzig.TriggerResult`
+  (`.skip`, `.new`, `.old`), `plzig.TriggerError`.
 * `plzig.std` (also predeclared as `std`): `mem`, `fmt`, `math`, `ascii`,
   `unicode`, `sort`, `hash`, `hash_map`, `meta`, `base64`, `enums`,
   `bit_set`, `ArrayList`, the hash maps, `StaticStringMap`,
@@ -559,6 +607,7 @@ const plzig = @import("plzig"); const std = plzig.std; pub fn call(@"a": i32, @"
   63 bytes) and unique, so they never need escaping; a parameter may not
   be called `Result` then.
 * Input parameters are `IN` and `INOUT`; `argN` counts input parameters.
+* Triggers: `pub fn call(tg: plzig.Trigger) anyerror!plzig.TriggerResult { _ = &tg;`.
 * Sets: `const Result = <element type>;` (a scalar type, or a row struct as
   above), `fn returnNext(row: ?Result) void { plzig.returnNext(Result, row); }`,
   and the return type `anyerror!void`; `Result` and `returnNext` are then

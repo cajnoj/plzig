@@ -170,8 +170,25 @@ fn setError(out: *Slot, err: anyerror) u32 {
 /// slot. `begin` != 0 starts the call by releasing everything allocated by
 /// the previous call (the arguments are in the argument buffer); 0 means
 /// plzig_alloc_args has already done that (the arguments are in the arena).
+/// a trigger function: `call(tg: plzig.Trigger)`, three slots from the host
+const is_trigger = fn_info.param_types.len == 1 and fn_info.param_types[0].? == plzig.Trigger;
+
 export fn plzig_call(args: [*]const Slot, nargs: u32, result: *Slot, begin: u32) u32 {
     if (begin != 0) plzig.resetArena();
+    if (comptime is_trigger) return callTrigger(args, nargs, result) else return callFunction(args, nargs, result);
+}
+
+/// A trigger call: the trigger's information, NEW and OLD (doc/abi.md,
+/// "Triggers"); the result's action goes into is_null, a modified row's
+/// values into val/len.
+fn callTrigger(args: [*]const Slot, nargs: u32, result: *Slot) u32 {
+    if (nargs != 3) plzig.raiseMsg("plzig: trigger argument count mismatch");
+    const r = user.call(plzig.Trigger.fromSlots(args)) catch |err| return setError(result, err);
+    result.* = .{ .val = @intFromPtr(r.values.ptr), .len = @intCast(r.values.len), .is_null = r.action };
+    return STATUS_OK;
+}
+
+fn callFunction(args: [*]const Slot, nargs: u32, result: *Slot) u32 {
     if (nargs != fn_info.param_types.len) plzig.raiseMsg("plzig: argument count mismatch");
     var tuple: s.meta.ArgsTuple(Fn) = undefined;
     inline for (fn_info.param_types, 0..) |PT, i| {
