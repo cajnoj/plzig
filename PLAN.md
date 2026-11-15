@@ -603,6 +603,17 @@ v1 is expected to be slower than PL/pgSQL; neither weakens the sandbox.
    an interpreted byte loop; doc/benchmarks.md tasks 3 and 4). Enlarges the
    interpreter surface slightly. The loader fuzz target must be run on the
    new configuration (and pass) before it is enabled.
+   **Rejected (owner decision, 2026-11-15), do not re-propose without new
+   evidence.** Prototyped and measured on PG 18.7: copy- and fill-heavy
+   tasks got faster (edit distance about 2x, jsonb through text about 5x,
+   string building and CSV about 17 %), pure computation got 3-18 % slower
+   (mandelbrot, primes, timestamp sum, binary jsonb; the guest code was
+   identical, the interpreter's dispatch function compiled differently).
+   It adds `memory.copy`, `memory.fill`, `memory.init`, `data.drop`,
+   passive data segments and the datacount section to the interpreter
+   surface. The matrix and 20 min x 8 of loader fuzzing passed with it.
+   The gains are on text paths that native types (item 12) largely avoid,
+   so the added surface was not judged worth a mixed speed result.
 10. *Optional, not planned.* **WAMR fast interpreter or AOT.** The fast
     interpreter had a heap-overflow CVE fixed in the release we use (2.4.5);
     AOT means running native code generated from guest modules inside the
