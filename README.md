@@ -29,15 +29,61 @@ Each PL/Zig release supports exactly one Zig version (the server refuses
 any other compiler); a new Zig minor release means a new PL/Zig major
 (PLAN.md §14).
 
-| PL/Zig | Zig (exactly) | PostgreSQL |
-|---|---|---|
-| 1.x (not yet released) | 0.17.1 | 14, 15, 16, 17, 18, 19 |
+| PL/Zig | SQL extension version | Zig (exactly) | Host/guest ABI | PostgreSQL |
+|---|---|---|---|---|
+| 1.0.x (not yet released; this tree is `1.0.0-dev`) | 1.0 | 0.17.1 | 5 | 14, 15, 16, 17, 18, 19 |
 
-The pin is `ZIG_VERSION` in the `Makefile`, its single source: it is
-compiled into `plzig.so`, written into the extension's comment (`\dx
-plzig`, generated `plzig.control`) and shown by `plzig_sandbox_status()`.
-Before upgrading to a PL/Zig release with another Zig, check your functions
-with [`plzig_check_all()`](#checking-every-function-plzig_check_all).
+This table is the one place that relates the four version numbers
+(details in [doc/packaging.md](doc/packaging.md#versions)): PL/Zig's own
+semantic version (`PLZIG_VERSION` in the `Makefile`, also the package
+version and `plzig.so`'s module version); the SQL extension version
+(`ALTER EXTENSION plzig UPDATE`), which is the release's `MAJOR.MINOR` and
+changes only when SQL objects do (patch releases never need an upgrade
+script); the host/guest ABI version, independent of both and part of the
+module cache key; and the Zig pin. The pin is `ZIG_VERSION` in the
+`Makefile`, its single source: it is compiled into `plzig.so`, written into
+the extension's comment (`\dx plzig`, generated `plzig.control`), shown by
+`plzig_sandbox_status()` and is the version of the `plzig-zig-toolchain`
+package. Before upgrading to a PL/Zig release with another Zig, check your
+functions with [`plzig_check_all()`](#checking-every-function-plzig_check_all).
+
+## Installing from packages
+
+RPM and Debian packages are built and tested from this repository
+(`packaging/`, `debian/`; [doc/packaging.md](doc/packaging.md)), but none
+are published yet. Built locally, for PGDG's PostgreSQL 14–19 on EL 8
+(14–18), EL 9, EL 10, Fedora 45, Debian 12 and 13, Ubuntu 22.04, 24.04 and
+26.04 (x86_64):
+
+* `plzig_<major>` (RPM) / `postgresql-<major>-plzig` (Debian), plus
+* `plzig-zig-toolchain`: the official Zig 0.17.1 build (SHA-256 pinned,
+  compiler unchanged, `lib/` pruned to what PL/Zig needs) in
+  `/usr/libexec/plzig-zig-toolchain/0.17.1/`, which the extension packages
+  depend on and use as their compiled-in default for `plzig.zig_path`.
+
+```sh
+dnf install plzig_17          # with the packages in a repository next to PGDG's
+apt install postgresql-17-plzig
+```
+
+then `CREATE EXTENSION plzig;` as a superuser and `GRANT USAGE ON LANGUAGE
+plzig TO ...` as below; no `postgresql.conf` change is needed. (On Fedora
+and EL 10, keep the distribution's own `postgresql*` packages out of the
+way as PGDG advises, `excludepkgs=postgresql*`; they use the same names.)
+
+**Kernel requirement.** The default `plzig.compiler_sandbox = require` needs
+Landlock ABI 6 (Linux 6.12 or newer) and seccomp. On older kernels -- the
+stock kernels of EL 8, EL 9, Debian 12, Ubuntu 22.04 and 24.04, for example
+-- every compilation (`CREATE FUNCTION ... LANGUAGE plzig`, `DO`) is refused
+until an administrator explicitly lowers the setting (see
+[Configuration](#configuration-gucs) and the security model below). The
+packages do not change the default. Removing the packages leaves
+`$PGDATA/plzig/` (the module and Zig caches) in place; see
+[doc/packaging.md](doc/packaging.md#removal-and-the-cache-directory).
+
+An evaluation image `plzig/postgres:<major>` (PostgreSQL with PL/Zig and
+no other procedural language) can be built with
+`packaging/image/build-image.sh`; it is not published.
 
 ## Building and installing
 
@@ -86,6 +132,12 @@ sudo make install
   leaves such a directory alone, remove it yourself once nothing points
   at it.)
 * `make WERROR=1` builds the C code with `-Werror`.
+* Fully offline: `make ZIG=... WAMR_TARBALL=/path/WAMR-2.4.5.tar.gz` (the
+  tag's source archive, SHA-256 pinned) together with `make install-zig
+  ZIG_TARBALL=...`; `make dist` makes a reproducible source tarball
+  ([doc/packaging.md](doc/packaging.md)).
+* `make PLZIG_DEFAULT_ZIG_PATH=/abs/path/zig` compiles in a default for
+  `plzig.zig_path` (what the packages do); without it there is none.
 
 The same build can be driven with `zig build`. `build.zig` holds no build
 logic of its own: each step runs one `make` target and passes the running
@@ -211,6 +263,15 @@ architecture; only x86_64 has been run.
 marshalling and the source generator, the SDK's jsonb reader and numeric
 decoders, and the whole compile pipeline, each for a time budget, non-zero
 exit status on a finding.
+
+**Packages** (`packaging/test-matrix.sh`, `packaging/test-packages.sh
+<distro> <major>`, see [doc/packaging.md](doc/packaging.md#package-tests)):
+RPM and Debian packages built offline for every target distribution and
+PostgreSQL major, then installed in fresh containers and checked
+(dependencies, compiled-in compiler path, hardening, upgrade from an earlier
+build, the regression suite against the installed package, extension
+upgrade scripts, removal). CI builds and tests one RPM and one Debian
+package on every push; the full matrix is a manually started workflow.
 
 **Benchmarks** (not tests, not part of the build): `bench/run.sh`, see
 [bench/README.md](bench/README.md) and [doc/benchmarks.md](doc/benchmarks.md).
@@ -769,7 +830,7 @@ SPI: `SELECT now()`).
 
 | Name | Context | Default | Purpose |
 |------|---------|---------|---------|
-| `plzig.zig_path` | `postgresql.conf` only | *(none)* | Absolute path of the Zig 0.17.1 compiler. Required for compiling; `PATH` is never searched. |
+| `plzig.zig_path` | `postgresql.conf` only | *(none)*; packages: their toolchain package's compiler | Absolute path of the Zig 0.17.1 compiler. Required for compiling; `PATH` is never searched. A build can compile in a default (`make PLZIG_DEFAULT_ZIG_PATH=...`); it gets the same checks as a configured value. |
 | `plzig.zig_lib_dir` | `postgresql.conf` only | *(detect)* | Zig's `lib/` directory. Empty: `<compiler dir>/lib` (tarball layout) or `<compiler dir>/../lib/zig` (FHS layout, e.g. `/usr/bin/zig` + `/usr/lib/zig`). |
 | `plzig.zig_sha256` | `postgresql.conf` only | *(empty)* | If set, the SHA-256 the compiler binary must have (hex). Covers the binary only, not `lib/`. |
 | `plzig.compiler_sandbox` | `postgresql.conf` / reload | `require` | Confinement of the compiler (see *Security model*): `require` (refuse to compile unless Landlock ABI 6 or later **and** the seccomp filter are available), `try` (apply whatever is available and log once per backend exactly what is missing), `off` (neither). Set only in `postgresql.conf` (not `SET`, `ALTER SYSTEM`, per role or per database). Any other value, including the former `on`, boolean spellings and other letter case, makes every compilation fail until it is corrected. There is deliberately no setting to lower the required Landlock ABI. |
@@ -950,7 +1011,7 @@ back to a null write when `tkill` towards its own thread id is refused).
 first time in a backend (and again whenever a setting or the identity of
 the binary or lib directory changes), PL/Zig:
 
-* requires `plzig.zig_path` to be set and absolute (`PATH` is never
+* requires `plzig.zig_path` (configured, or the compiled-in default of a package) to be set and absolute (`PATH` is never
   searched), resolves it with `realpath` and requires a regular file;
 * finds the lib directory (`plzig.zig_lib_dir` or the standard layouts;
   it must contain `std/std.zig`);
@@ -1080,7 +1141,11 @@ metadata for a binary build should state
 `PostgreSQL AND Apache-2.0 WITH LLVM-exception AND MIT`.
 
 PL/Zig does not include the Zig compiler; you install Zig 0.17.1 yourself
-under its own license. WebAssembly modules compiled from your functions
+under its own license. The separate `plzig-zig-toolchain` package
+repackages the official build (license `MIT AND Apache-2.0 WITH
+LLVM-exception AND NCSA AND Zlib AND BSD-3-Clause`, see
+`packaging/zig-toolchain/NOTICE`). Source tarballs made by `make dist`
+contain neither Zig nor the benchmark suite (`bench/`). WebAssembly modules compiled from your functions
 contain MIT-licensed code from the Zig standard library and compiler
 runtime, which only matters if you redistribute those modules.
 

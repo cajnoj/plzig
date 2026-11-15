@@ -513,6 +513,8 @@ v1 is expected to be slower than PL/pgSQL; neither weakens the sandbox.
      and the no-libc validator need). Untested; needs a build check on all six
      versions. Fallbacks: ship the tarball complete plus the missing license
      texts, or do not bundle Zig in binary packages.
+     *(2026-11-15: the pruned `lib/` is used by the separate
+     `plzig-zig-toolchain` package, not by the extension; Deviation 46.)*
    - Binary package license metadata: `PostgreSQL AND Apache-2.0 WITH
      LLVM-exception` (plus `MIT` while Zig is bundled).
    - README: license section, "not affiliated with or endorsed by PostgreSQL
@@ -854,6 +856,10 @@ profiled and explained or fixed.
 
 ### E. Packaging
 
+**Done locally (2026-11-15), see Deviations from plan, 42–53 and
+doc/packaging.md.** Not done here: aarch64 (not run), anything that needs a
+repository, a key or the owner (phase F).
+
 Prerequisite decisions:
 
 - **Offline, reproducible builds.** Add `make dist` producing a source tarball
@@ -945,6 +951,10 @@ release needs two PL/Zig lines.
   (PL/Zig 1.x: Zig 0.17.1; ...). *Done 2026-11-15 (Deviation 37) for the
   comment, control file, `plzig_sandbox_status()` and README; release notes
   and packages do not exist yet and take the pin from the same place.*
+  *Packages (2026-11-15, Deviations 42 and 46): the dependency on
+  `plzig-zig-toolchain` of exactly the pinned Zig version and the
+  descriptions take the pin from the Makefile; release notes do not exist
+  yet.*
 - Not decided: semantic-version build metadata (`1.0.0+zig.0.17.1`). Check
   that PGXN, RPM and Debian all accept it before using it.
 
@@ -2179,3 +2189,265 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       calls*): one million calls of a small helper, PostgreSQL 18.7:
       compiled in ~5 ns per call (the same as the inline baseline: the
       call was inlined), through a prepared `plzig.spi` statement ~1.4 µs.
+42. **Phase E: versions (2026-11-15).** One source per number, related in
+    the README's compatibility table (now with columns for the SQL
+    extension version and the host/guest ABI) and explained in
+    doc/packaging.md *Versions*:
+    - `PLZIG_VERSION := 1.0.0-dev` in the `Makefile` is PL/Zig's semantic
+      version; a pre-release suffix marks a tree that is not a release (the
+      first release sets `1.0.0` and tags `v1.0.0`). It replaces the
+      hard-coded `PLZIG_VERSION_STR "1.0"` in `src/plzig.h` as the module
+      version of `PG_MODULE_MAGIC_EXT` (PostgreSQL 18+); builds outside the
+      Makefile (fuzz harness, static analysis) get `"unknown"`.
+    - The SQL extension version is `MAJOR.MINOR` of it (`EXT_VERSION`):
+      `default_version` in the generated `plzig.control` (the template
+      `plzig.control.in` has `@EXT_VERSION@`), and the build fails if
+      `sql/plzig--<EXT_VERSION>.sql` is missing. `DATA` is every
+      `sql/plzig--*.sql`, so upgrade scripts are installed when they exist.
+      Rule: patch releases never change SQL objects; a release that does is
+      at least a minor and ships `plzig--<old>--<new>.sql`. No upgrade
+      script was written: no release exists, and none was invented.
+    - New `test/upgrade/check-upgrade-scripts.sh`: against an installed
+      server, every upgrade path to the default version must end in the
+      objects of a fresh install (signatures, strictness, volatility,
+      security, source, ACLs, language handlers/trust/ACL, comments). Its
+      `--selftest` installs two temporary scripts (`0.0selftest` and an
+      upgrade from it) and requires the correct upgrade to pass and a
+      divergent one (an extra `GRANT EXECUTE ... TO PUBLIC` on
+      `plzig_cache_clear()`) to be reported -- the first version of the
+      catalog query failed on `text || "char"` and compared two identical
+      error messages, which the self-test caught; the checker now also fails
+      when its query fails. Run by every package test.
+    - Package versions: the source tarball's version with the pre-release
+      `-` turned into `~` (sorts before the release in RPM and dpkg);
+      release/revision from the build script. Semver build metadata is not
+      used (§14's open point stays open).
+    - `packaging/versions.sh` prints all versions and pins of a tree for the
+      scripts (no `make` target: it must work on a bare tarball).
+43. **Phase E: `make dist` (2026-11-15).** `packaging/make-dist.sh`: `git
+    archive HEAD`, re-packed with GNU tar deterministically (sorted, owner 0,
+    modes 0644/0755, mtimes = commit time, pax headers without
+    atime/ctime, `gzip -n -9`); the version is read from the archived
+    tree's own Makefile. A release version needs `HEAD` tagged
+    `v<version>`; a pre-release version gets `.<commit date>.g<commit>`.
+    `make dist DIST_WORKTREE=1` packs the working tree instead and appends
+    `.dirty.<digest of the files>` when it differs from `HEAD` (used for
+    every test here, since nothing may be committed; never for a release).
+    `.gitattributes` (new) excludes `.github/` and `bench/` (the benchmark
+    image installs PL/Python and PL/Perl, which must not be shipped). The
+    tarball records its version in `.dist-version`. Verified: identical
+    bytes from the Fedora host and a Debian 13 container. Found after the
+    package matrix: the worktree mode asks `git check-attr`, which does not
+    apply a directory's `export-ignore` to the files below it, so the
+    tested tarballs still contained `bench/` and `.github/` (in the source
+    tarball and the source packages only: nothing of `bench/` is installed
+    or in any binary package). `.gitattributes` now also has `/bench/**`
+    and `/.github/**`, and `make-dist.sh` refuses to pack a tree that
+    contains either directory.
+44. **Phase E: offline build (2026-11-15).** New `WAMR_TARBALL=` (the tag's
+    GitHub source archive, SHA-256 pinned in the Makefile as
+    `WAMR_TARBALL_SHA256`; its contents were compared with the pinned
+    commit's tree -- identical -- and its embedded commit id is the pinned
+    commit); `third_party/prepare-wamr.sh` verifies and unpacks it (and now
+    refuses a relative destination before its `rm -rf`). With `make
+    install-zig ZIG_TARBALL=` the build needs no network.
+    `packaging/test-offline-build.sh` proves it in a `--network none`
+    container (only the loopback interface, no name resolution); every package
+    build also runs with `--network none`. `vendor/WAMR-2.4.5.tar.gz` (git-
+    ignored) holds the verified archive locally.
+45. **Phase E: `plzig.zig_path` default at packaging time (2026-11-15).**
+    `make PLZIG_DEFAULT_ZIG_PATH=/abs/path` compiles in a boot value
+    (`[A-Za-z0-9._+/-]` only, checked by the Makefile); without it the
+    default is empty as before (Deviation 19). The value gets exactly the
+    checks of a configured one before every compile. The GUC's short
+    description lost "(no default; ...)". Tests: `setup.sql` printed
+    `boot_val` of the toolchain settings, which a package's default would
+    change; for those three settings it now prints `''` when the boot value
+    is empty or equals the setting (the expected output is unchanged except
+    for the query text), and the exact values moved to two stricter checks:
+    `docker/security-checks.sh` requires all three boot values of a source
+    build to be empty, the package test requires the package's boot value to
+    be the toolchain package's compiler. No other product code changed.
+46. **Phase E: the Zig toolchain package (2026-11-15).**
+    `plzig-zig-toolchain`, version = the Zig pin, PostgreSQL-independent;
+    the extension packages require exactly that upstream version (RPM
+    `= 0.17.1`, Debian `>= 0.17.1, << 0.17.2~`) and build with it.
+    - It repackages the official ziglang.org build (both architectures'
+      tarballs SHA-256 checked; RPM `%prep`, Debian component tarballs
+      `orig-amd64`/`orig-arm64` plus a checksum file of the binaries): the
+      compiler binary byte for byte (no strip, no debuginfo, no build-id
+      links, no `brp` scripts; its SHA-256 stays upstream's, usable for
+      `plzig.zig_sha256`), and `lib/` pruned by
+      `packaging/zig-toolchain/install-pruned.sh` to `std`, `compiler_rt`,
+      `compiler`, `c` and the top-level files (§12 item 4's pruned install,
+      revived for this package only: everything kept is MIT, ported musl
+      code included; `lib/libc`, `include`, `libcxx`, `libcxxabi`,
+      `libunwind`, `libtsan` with their LGPL/GPL/APSL files are left out;
+      empty upstream test directories are dropped). Deviation 19 still
+      holds: the extension neither contains nor installs Zig.
+    - Path `/usr/libexec/plzig-zig-toolchain/<version>/` in both formats
+      (not on `PATH`); it is the extension packages' compiled-in
+      `plzig.zig_path`.
+    - License `MIT AND Apache-2.0 WITH LLVM-exception AND NCSA AND Zlib AND
+      BSD-3-Clause`: Zig plus what the static binary embeds (LLVM/Clang/LLD
+      22.1.8 with libc++/libunwind, zlib 1.3.1, zstd, musl; from strings in
+      the binary and the zig-bootstrap component list). `NOTICE` and the
+      license texts (fetched from the projects) are in
+      `packaging/zig-toolchain/`.
+    - The pruned tree passes `make check-zig` (every package build) and the
+      full regression suite (every package test).
+47. **Phase E: RPM (2026-11-15).** `packaging/rpm/plzig.spec.in` (PGDG
+    naming `plzig_<major>`, `--define 'pgmajorversion N'`, layout
+    `/usr/pgsql-N/`) and `plzig-zig-toolchain.spec.in`, rendered by
+    `gen-specs.sh` with the Makefile's versions and pins (no second copy of
+    a pin). `License: PostgreSQL AND Apache-2.0 WITH LLVM-exception AND
+    MIT`, `Provides: bundled(wamr) = 2.4.5`, `%license` files (the copies
+    `make install` puts under `doc/extension` are removed), `%check` = the
+    validator/SDK unit tests. Hardening: PGXS keeps PostgreSQL's CFLAGS
+    (PGDG's are the distribution's), plus `%set_build_flags` as `COPT` and
+    `PG_LDFLAGS`; WAMR's cmake gets them from the environment (GNU make
+    exports a variable that came from the environment with its overridden
+    value, so WAMR is compiled with PostgreSQL's CFLAGS in package builds).
+    `rpath=`: PGXS's RUNPATH to `/usr/pgsql-N/lib` is useless for
+    `plzig.so` and fails Fedora's `check-rpaths`. rpm 6 (Fedora 45)
+    refuses unsigned packages: the builder and the tests install our own
+    unsigned builds with `--nosignature`/`--nogpgcheck` for those local
+    files only. PGDG repositories configured from the committed key
+    (Deviation 53). PostgreSQL 19 comes from PGDG's `testing` tree; PGDG
+    has no 19 for EL 8, so el8 builds 14–18. The SRPM of each major
+    carries the spec rendered for it (`plzig_<major>.spec`, with a default
+    `pgmajorversion`), so `rpmbuild --rebuild` needs no `--define`; the
+    repository keeps one template. rpmlint 2 filters (`plzig.rpmlintrc`)
+    are justified one by one (no SONAME for a module, the static validator,
+    technical terms, the unchanged upstream toolchain files);
+    `no-url-tag` is left visible.
+48. **Phase E: Debian (2026-11-15).** `debian/` builds
+    `postgresql-<major>-plzig` for every major with `pg_buildext` and `dh
+    --with pgxs_loop` (in-tree, majors one after the other: the Makefile's
+    `build/` is not VPATH-safe, and WAMR and the validator are reused).
+    Source format 3.0 (quilt); orig = the `make dist` tarball, component
+    `orig-wamr` = the WAMR tag tarball, used as `WAMR_SRC`. Hardening
+    `hardening=+all`; `LDFLAGS` passed as `PG_LDFLAGS` (`pg_buildext`
+    passes `CFLAGS` as `COPT` itself). The regression suite is not run at
+    build time (`override_dh_pgxs_test` runs `check-zig`): it needs a server
+    with Landlock ABI ≥ 6, and the package test runs it against the
+    installed package. No autopkgtest (`debian/tests`) yet. `debian/copyright`
+    is DEP-5 and reproduces `LICENSE` (with the copyright holder's name, as
+    `LICENSE` has it). Lintian findings fixed: DEP-5 exception syntax
+    (`Apache-2.0 with LLVM exception`), full BSD-3-Clause text, duplicated
+    paragraphs, `dh_fixperms` making every file below `usr/libexec`
+    executable (888 `.zig` files; now excluded for the toolchain, whose
+    modes `install-pruned.sh` sets), `dpkg-parsechangelog` in rules,
+    Standards-Version, changelog line length. Justified overrides: prebuilt
+    `.wasm` fuzz corpora in the source; the static-PIE `plzig-validate`
+    taken for a shared library (`debian/postgresql-plzig.lintian-overrides.in`,
+    copied per major by `debian/rules`); the toolchain's static binary and
+    embedded zlib; a FreeBSD header in upstream's (not installed)
+    `lib/libc`; a false Apache-NOTICE finding. Left unfixed on purpose:
+    `bogus-mail-host` (the placeholder maintainer address, for the owner),
+    `no-homepage-field`/`debian-watch-file-is-missing` (no public URL
+    yet), `initial-upload-closes-no-bugs`, informational and experimental
+    tags (doc/packaging.md lists them).
+49. **Phase E: installed-package tests (2026-11-15).**
+    `packaging/test-packages.sh <distro> <major>` (fresh container of the
+    distribution; only the built packages, PGDG's PostgreSQL of that major
+    and test tooling: `pg_regress` from `postgresql<major>-test` or
+    `postgresql-client-<major>`, binutils, and on EL/Fedora util-linux and
+    diffutils, which the minimal Fedora 45 and AlmaLinux 10 images lack)
+    and `packaging/test-matrix.sh`.
+    Steps: dependency metadata of every built package (no PL/Python/PL/Perl
+    in any dependency field; plzig depends on PostgreSQL and the toolchain),
+    install, upgrade, compiled-in path and hardening (RELRO, BIND_NOW, NX
+    stack, SSP, FORTIFY, no RUNPATH, static-PIE validator, no test helper
+    exports), sandbox status, the full pg_regress suite of the source
+    tarball, the upgrade-script check, removal. Decisions:
+    - *Upgrade*: from release 0 to release 1 of the same source (there is no
+      earlier release); it covers the package manager's upgrade path, not
+      changes between PL/Zig versions.
+    - *Clusters*: EL/Fedora `initdb -A trust --no-locale -E UTF8`;
+      Debian/Ubuntu `pg_createcluster --locale=C -e UTF8 -- -A trust`
+      (the package's auto-created cluster has the container's SQL_ASCII
+      locale) with the socket in `/tmp`.
+    - *Removal*: the toolchain cannot be removed while plzig is installed;
+      removing both leaves no file; PostgreSQL stays installed and running;
+      a PL/Zig call then fails cleanly (EL/Fedora `could not access file
+      "$libdir/plzig"`, Debian/Ubuntu `could not load library "plzig"`);
+      `DROP EXTENSION plzig CASCADE` works; `$PGDATA/plzig` is kept
+      (documented: it belongs to the cluster; delete it by hand after `DROP
+      EXTENSION`).
+    - *Kernel*: containers share the host's Linux 7.2 (Landlock ABI 10), so
+      `require` is satisfied in every cell regardless of the distribution's
+      own kernel; the documentation and package descriptions state which
+      stock kernels cannot satisfy it. No package changes the default.
+    - *Test-harness bugs found and fixed on the way* (none in the
+      packages): `grep -q` on a pipe under `pipefail` (SIGPIPE made `nm`
+      fail: a false "no stack protector"); GUCs of a library that the
+      session has not loaded are absent from `pg_settings` (also the first
+      version of the new `security-checks.sh` check; it now runs `LOAD
+      'plzig'` first); psql 15+ printing command tags for `-c` with several
+      statements; `nm` before binutils 2.35 printing no symbol versions;
+      the minimal Fedora 45 and AlmaLinux 10 images having no `su` and no
+      `diff`; Debian's configuration living in `/etc/postgresql`.
+    - *Result*: all 53 cells (EL 8 × 14–18; EL 9, EL 10, Fedora 45, Debian
+      12 and 13, Ubuntu 22.04, 24.04 and 26.04 × 14–19; x86_64) build
+      (release 0 and 1, offline) and pass every step; logs in
+      `build/package-tests/` (not committed). aarch64 was not run. The
+      tested source tarball differs from the final tree only in
+      documentation, `.gitattributes` and the guard in `make-dist.sh`
+      (Deviation 43), the test harness fixes above
+      (`pkgtest-in-container.sh`, `security-checks.sh`, `test-image.sh`),
+      the dnf5 repository override in `rpm/setup-pgdg.sh` and a comment in
+      `rpm/build.sh`. Rebuilt from the final tree and tested again: Fedora
+      45 with PostgreSQL 18 and 19, Debian 13 with PostgreSQL 18.
+      `docker/run-all.sh` passes on the final tree (all 17 jobs; line
+      coverage 91.1 %).
+50. **Phase E: evaluation image (2026-11-15).** `packaging/image/`:
+    `plzig/postgres:<major>` = official `postgres:<version>-bookworm` plus
+    the Debian 12 packages (`postgresql-<major>-plzig`,
+    `plzig-zig-toolchain`); built locally, never pushed. Its test starts the
+    official entrypoint, compiles and calls a function with the packaged
+    defaults, checks `plzig.compiler_sandbox = require` and the sandbox
+    status, and that there is no PL/Python, PL/Perl, PL/Tcl or other PL
+    package, library or extension file and no language but PL/pgSQL and
+    PL/Zig. Built and passed for 14–19 (about 700 MB each).
+51. **Phase E: release artefacts (2026-11-15).** `packaging/release/`:
+    `checksums.sh` (`SHA256SUMS`), `sbom.py` (SPDX 2.3 JSON, standard
+    library only, deterministic: source tarball, every package with checksum
+    and license, WAMR and the official Zig builds with their pins,
+    `GENERATED_FROM`/`STATIC_LINK`/`DEPENDS_ON`/`BUILD_TOOL_OF`
+    relationships; checked for consistency, not with the SPDX project's
+    validators), `sign.sh` (detached ASCII-armoured OpenPGP signature of
+    `SHA256SUMS` with the key named by `PLZIG_SIGNING_KEY` from the caller's
+    keyring; without it: "signing skipped" and exit 0; a named but missing
+    key is an error; it never creates or imports keys). Nothing was signed.
+    `make-release.sh` assembles a directory from the source tarball and the
+    built packages (debug packages left out) and runs the three. Exercised
+    on the EL 9 and Debian 13 builds: `sha256sum -c` passes, the SBOM's
+    relationships all name packages of the document, `sign.sh` skips
+    without a key and fails for a named key that is not in the keyring.
+    (`checksums.sh` first listed its own temporary output; fixed.)
+52. **Phase E: CI (2026-11-15).** `ci.yml` job `packages`: EL 9 /
+    PostgreSQL 17 and Debian 13 / PostgreSQL 18, each built offline
+    (`PLZIG_MAJORS` restricts a build to some majors) and put through the
+    package test (without the upgrade step), on every push and pull request.
+    New `packaging.yml`: the full matrix, `workflow_dispatch` only, one job
+    per distribution. GitHub-hosted runners only, actions pinned as in the
+    existing workflows; actionlint 1.7.12 with shellcheck passes; not run on
+    GitHub.
+53. **Phase E: trusting PGDG (2026-11-15).** The repository keys are
+    committed (`packaging/keys/`) and their fingerprints pinned in the setup
+    scripts, which check them with gpg before use: yum
+    `D4BF08AE67A0B4C7A1DBCCD240BCA2B408B40D20` (the same key for EL and
+    Fedora), apt `B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8` (the same as the
+    official postgres images). yum: `gpgcheck=1`, `repo_gpgcheck=1`,
+    repository file written by the script instead of PGDG's repository RPM;
+    apt: `signed-by`. No `curl | sh`; every other download (Zig, WAMR) is
+    checked against its pinned SHA-256. Fedora (and EL 10's AppStream) ship
+    PostgreSQL packages under PGDG's names (`postgresql19-server`) with
+    another layout (`/usr/bin`); the first Fedora 45 package test installed
+    Fedora's instead of PGDG's. The setup script now adds
+    `excludepkgs=postgresql*` to every distribution repository, as PGDG's
+    instructions say (dnf5 on Fedora keeps those files in
+    `/usr/share/dnf5/repos.d`, so there through
+    `/etc/dnf/repos.override.d`); on EL 8/9 the `postgresql` module is
+    disabled as well.
