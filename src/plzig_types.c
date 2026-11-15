@@ -1,18 +1,25 @@
 /*-------------------------------------------------------------------------
  *
  * plzig_types.c
- *	  SQL type -> PL/Zig marshalling class.
+ *	  SQL type -> PL/Zig marshalling class, and the checks of fixed-width
+ *	  values that come back from a guest.
  *
  * The actual copying into and out of guest memory lives in plzig_runtime.c
- * (it needs the runtime's pointer validation); this file only classifies
- * types and prepares their I/O functions.
+ * and plzig_host.c (they need the runtime's pointer validation); this file
+ * classifies types, prepares their I/O functions and turns raw guest values
+ * of the natively mapped fixed-width types into Datums after range-checking
+ * them with PostgreSQL's own macros (doc/abi.md, "Range checks").
  *
  *-------------------------------------------------------------------------
  */
 #include "plzig.h"
 
 #include "catalog/pg_type.h"
+#include "datatype/timestamp.h"
+#include "utils/date.h"
 #include "utils/lsyscache.h"
+#include "utils/timestamp.h"
+#include "utils/uuid.h"
 
 PlzigTypeKind
 plzig_type_kind(Oid typid)
@@ -40,13 +47,34 @@ plzig_type_kind(Oid typid)
 			return PLZIG_T_TEXTIO;
 		case BYTEAOID:
 			return PLZIG_T_BYTEA;
+		case DATEOID:
+			return PLZIG_T_DATE;
+		case TIMEOID:
+			return PLZIG_T_TIME;
+		case TIMETZOID:
+			return PLZIG_T_TIMETZ;
+		case TIMESTAMPOID:
+			return PLZIG_T_TIMESTAMP;
+		case TIMESTAMPTZOID:
+			return PLZIG_T_TIMESTAMPTZ;
+		case INTERVALOID:
+			return PLZIG_T_INTERVAL;
+		case UUIDOID:
+			return PLZIG_T_UUID;
+		case OIDOID:
+			return PLZIG_T_OID;
 		default:
 			return PLZIG_T_IO;
 	}
 }
 
+/*
+ * The Zig type of a parameter (for_result = false) or of the result.  The
+ * fixed-width types get distinct SDK types, so a body that mixes them up
+ * does not compile.
+ */
 const char *
-plzig_zig_type_name(PlzigTypeKind kind)
+plzig_zig_type_name(PlzigTypeKind kind, bool for_result)
 {
 	switch (kind)
 	{
@@ -64,12 +92,29 @@ plzig_zig_type_name(PlzigTypeKind kind)
 			return "f32";
 		case PLZIG_T_FLOAT8:
 			return "f64";
+		case PLZIG_T_DATE:
+			return "plzig.Date";
+		case PLZIG_T_TIME:
+			return "plzig.Time";
+		case PLZIG_T_TIMETZ:
+			return "plzig.TimeTz";
+		case PLZIG_T_TIMESTAMP:
+			return "plzig.Timestamp";
+		case PLZIG_T_TIMESTAMPTZ:
+			return "plzig.TimestampTz";
+		case PLZIG_T_INTERVAL:
+			return "plzig.Interval";
+		case PLZIG_T_UUID:
+			return "plzig.Uuid";
+		case PLZIG_T_OID:
+			return "plzig.Oid";
 		case PLZIG_T_TEXT:
 		case PLZIG_T_TEXTIO:
 		case PLZIG_T_BYTEA:
 		case PLZIG_T_IO:
 			return "[]const u8";
 	}
+	(void) for_result;
 	return NULL;				/* keep compiler quiet */
 }
 
@@ -129,11 +174,189 @@ plzig_value_kind(Oid typid)
 			return PLZIG_KIND_TEXT;
 		case PLZIG_T_BYTEA:
 			return PLZIG_KIND_BYTEA;
+		case PLZIG_T_DATE:
+			return PLZIG_KIND_DATE;
+		case PLZIG_T_TIME:
+			return PLZIG_KIND_TIME;
+		case PLZIG_T_TIMETZ:
+			return PLZIG_KIND_TIMETZ;
+		case PLZIG_T_TIMESTAMP:
+			return PLZIG_KIND_TIMESTAMP;
+		case PLZIG_T_TIMESTAMPTZ:
+			return PLZIG_KIND_TIMESTAMPTZ;
+		case PLZIG_T_INTERVAL:
+			return PLZIG_KIND_INTERVAL;
+		case PLZIG_T_UUID:
+			return PLZIG_KIND_UUID;
+		case PLZIG_T_OID:
+			return PLZIG_KIND_OID;
 		case PLZIG_T_VOID:
 		case PLZIG_T_IO:
 			break;
 	}
 	return PLZIG_KIND_OTHER;
+}
+
+/*
+ * Is a value of this kind passed as bytes after the values of a row (val =
+ * guest address, len = byte length), rather than in val/len themselves?
+ */
+bool
+plzig_kind_is_bytes(uint16 kind)
+{
+	switch (kind)
+	{
+		case PLZIG_KIND_TEXT:
+		case PLZIG_KIND_BYTEA:
+		case PLZIG_KIND_OTHER:
+		case PLZIG_KIND_INTERVAL:
+		case PLZIG_KIND_UUID:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/* The marshalling class of a parameter/column kind (PLZIG_T_IO if none). */
+PlzigTypeKind
+plzig_kind_type(uint16 kind)
+{
+	Oid			typid = plzig_param_kind_oid(kind);
+
+	return OidIsValid(typid) ? plzig_type_kind(typid) : PLZIG_T_IO;
+}
+
+/*
+ * Range errors for values a guest returns or passes as an SPI parameter:
+ * PostgreSQL's own message and SQLSTATE (those of the type's receive
+ * function), plus where the value came from and its raw bits.
+ */
+static void
+plzig_range_error(int sqlerrcode, const char *msg, const char *where, int64 raw)
+{
+	ereport(ERROR,
+			(errcode(sqlerrcode),
+			 errmsg("%s", msg),
+			 errdetail("The PL/Zig function passed the raw value " INT64_FORMAT " as %s.",
+					   raw, where)));
+}
+
+/*
+ * Datum of a fixed-width value held in val (and len, for timetz) of a guest
+ * slot or SPI parameter, after checking it exactly as the type's receive
+ * function would (date_recv, time_recv, timetz_recv, timestamp_recv,
+ * timestamptz_recv): infinities where PostgreSQL has them, every finite
+ * value inside the range the input function accepts.  No typmod is applied:
+ * function results have none in PostgreSQL (pg_proc keeps none), and
+ * prepared-statement parameters are declared without one.  The guest's
+ * value is never trusted: unused high bits must be the sign extension.
+ */
+Datum
+plzig_scalar_from_guest(PlzigTypeKind k, uint64 val, uint32 len, const char *where)
+{
+	int64		v = (int64) val;
+
+	switch (k)
+	{
+		case PLZIG_T_DATE:
+			{
+				DateADT		d;
+
+				if (v < PG_INT32_MIN || v > PG_INT32_MAX)
+					plzig_range_error(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+									  "date out of range", where, v);
+				d = (DateADT) v;
+				if (!DATE_NOT_FINITE(d) && !IS_VALID_DATE(d))
+					plzig_range_error(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+									  "date out of range", where, v);
+				return DateADTGetDatum(d);
+			}
+		case PLZIG_T_TIME:
+			if (v < INT64CONST(0) || v > USECS_PER_DAY)
+				plzig_range_error(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+								  "time out of range", where, v);
+			return TimeADTGetDatum((TimeADT) v);
+		case PLZIG_T_TIMETZ:
+			{
+				TimeTzADT  *t;
+				int32		zone = (int32) len;
+
+				if (v < INT64CONST(0) || v > USECS_PER_DAY)
+					plzig_range_error(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+									  "time out of range", where, v);
+				if (zone <= -TZDISP_LIMIT || zone >= TZDISP_LIMIT)
+					plzig_range_error(ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE,
+									  "time zone displacement out of range", where, zone);
+				t = (TimeTzADT *) palloc(sizeof(TimeTzADT));
+				t->time = (TimeADT) v;
+				t->zone = zone;
+				return TimeTzADTPGetDatum(t);
+			}
+		case PLZIG_T_TIMESTAMP:
+			if (!TIMESTAMP_NOT_FINITE(v) && !IS_VALID_TIMESTAMP(v))
+				plzig_range_error(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+								  "timestamp out of range", where, v);
+			return TimestampGetDatum((Timestamp) v);
+		case PLZIG_T_TIMESTAMPTZ:
+			if (!TIMESTAMP_NOT_FINITE(v) && !IS_VALID_TIMESTAMP(v))
+				plzig_range_error(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+								  "timestamp out of range", where, v);
+			return TimestampTzGetDatum((TimestampTz) v);
+		case PLZIG_T_OID:
+			if (val > PG_UINT32_MAX)
+				plzig_range_error(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+								  "OID out of range", where, v);
+			return ObjectIdGetDatum((Oid) val);
+		default:
+			elog(ERROR, "PL/Zig: not a fixed-width scalar type (%d)", (int) k);
+	}
+	return (Datum) 0;			/* keep compiler quiet */
+}
+
+/*
+ * The length a guest gave for a 16-byte fixed-width value (interval, uuid):
+ * checked before anything is copied.
+ */
+void
+plzig_fixed16_check_len(PlzigTypeKind k, uint32 len, const char *where)
+{
+	if (len != PLZIG_FIXED16)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+				 errmsg("PL/Zig: invalid length %u of %s value", len,
+						k == PLZIG_T_INTERVAL ? "interval" : "uuid"),
+				 errdetail("The PL/Zig function passed it as %s; the length must be %d.",
+						   where, PLZIG_FIXED16)));
+}
+
+/*
+ * Datum of a 16-byte fixed-width value (interval, uuid) a guest passed out
+ * of line: exactly PLZIG_FIXED16 bytes, already copied out of guest memory.
+ * Every bit pattern is a value PostgreSQL's receive function accepts
+ * (interval_recv, uuid_recv check nothing), so only the length is checked.
+ */
+Datum
+plzig_fixed16_from_guest(PlzigTypeKind k, const char *bytes, uint32 len, const char *where)
+{
+	plzig_fixed16_check_len(k, len, where);
+	if (k == PLZIG_T_INTERVAL)
+	{
+		Interval   *iv = (Interval *) palloc(sizeof(Interval));
+
+		StaticAssertStmt(sizeof(Interval) == PLZIG_FIXED16, "Interval is 16 bytes");
+		memcpy(iv, bytes, sizeof(Interval));
+		return IntervalPGetDatum(iv);
+	}
+	else if (k == PLZIG_T_UUID)
+	{
+		pg_uuid_t  *u = (pg_uuid_t *) palloc(sizeof(pg_uuid_t));
+
+		StaticAssertStmt(sizeof(pg_uuid_t) == PLZIG_FIXED16, "uuid is 16 bytes");
+		memcpy(u, bytes, sizeof(pg_uuid_t));
+		return UUIDPGetDatum(u);
+	}
+	elog(ERROR, "PL/Zig: not a 16-byte type (%d)", (int) k);
+	return (Datum) 0;			/* keep compiler quiet */
 }
 
 /*
@@ -162,6 +385,22 @@ plzig_param_kind_oid(uint32 kind)
 			return TEXTOID;
 		case PLZIG_KIND_BYTEA:
 			return BYTEAOID;
+		case PLZIG_KIND_DATE:
+			return DATEOID;
+		case PLZIG_KIND_TIME:
+			return TIMEOID;
+		case PLZIG_KIND_TIMETZ:
+			return TIMETZOID;
+		case PLZIG_KIND_TIMESTAMP:
+			return TIMESTAMPOID;
+		case PLZIG_KIND_TIMESTAMPTZ:
+			return TIMESTAMPTZOID;
+		case PLZIG_KIND_INTERVAL:
+			return INTERVALOID;
+		case PLZIG_KIND_UUID:
+			return UUIDOID;
+		case PLZIG_KIND_OID:
+			return OIDOID;
 		default:
 			return InvalidOid;
 	}
@@ -189,6 +428,22 @@ plzig_param_oid_kind(Oid typid)
 			return PLZIG_KIND_TEXT;
 		case BYTEAOID:
 			return PLZIG_KIND_BYTEA;
+		case DATEOID:
+			return PLZIG_KIND_DATE;
+		case TIMEOID:
+			return PLZIG_KIND_TIME;
+		case TIMETZOID:
+			return PLZIG_KIND_TIMETZ;
+		case TIMESTAMPOID:
+			return PLZIG_KIND_TIMESTAMP;
+		case TIMESTAMPTZOID:
+			return PLZIG_KIND_TIMESTAMPTZ;
+		case INTERVALOID:
+			return PLZIG_KIND_INTERVAL;
+		case UUIDOID:
+			return PLZIG_KIND_UUID;
+		case OIDOID:
+			return PLZIG_KIND_OID;
 		default:
 			return PLZIG_KIND_NULL;
 	}
@@ -209,7 +464,7 @@ plzig_test_type_map(PG_FUNCTION_ARGS)
 	Oid			t = PG_GETARG_OID(0);
 
 	PG_RETURN_TEXT_P(cstring_to_text(psprintf("%s %u %u",
-											  plzig_zig_type_name(plzig_type_kind(t)),
+											  plzig_zig_type_name(plzig_type_kind(t), false),
 											  (unsigned) plzig_value_kind(t),
 											  (unsigned) plzig_param_oid_kind(t))));
 }

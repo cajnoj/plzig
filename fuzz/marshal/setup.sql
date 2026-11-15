@@ -12,7 +12,8 @@ INSERT INTO fz_types VALUES
   ('text'), ('varchar'), ('character(7)'), ('bytea'), ('numeric'), ('date'),
   ('timestamp'), ('timestamptz'), ('interval'), ('uuid'), ('inet'), ('json'),
   ('jsonb'), ('integer[]'), ('text[]'), ('int4range'), ('fz_mood'), ('fz_posint'),
-  ('fz_shorttext'), ('fz_pair'), ('point'), ('"char"'), ('bit varying'), ('time');
+  ('fz_shorttext'), ('fz_pair'), ('point'), ('"char"'), ('bit varying'), ('time'),
+  ('time with time zone'), ('oid');
 
 DO $$
 DECLARE r record;
@@ -85,14 +86,27 @@ BEGIN
         RETURN (ARRAY['NaN', 'Infinity', '-Infinity', '0', '-0.000000000000000000000000000001',
                       (random() * 10 ^ floor(random() * 200)::int)::numeric(400, 100)::text])[1 + floor(random() * 6)::int];
     WHEN 'date'::regtype THEN
-        RETURN (ARRAY['infinity', '-infinity', '4713-01-01 BC',
-                      ('2000-01-01'::date + floor((random() - 0.5) * 2000000)::int)::text])[1 + floor(random() * 4)::int];
+        RETURN (ARRAY['infinity', '-infinity', '4713-01-01 BC', '4714-11-24 BC', '5874897-12-31',
+                      ('2000-01-01'::date + floor((random() - 0.5) * 2000000)::int)::text,
+                      ('2000-01-01'::date + floor((random() - 0.5) * 4290000000)::bigint::int)::text])[1 + floor(random() * 7)::int];
     WHEN 'timestamp'::regtype, 'timestamptz'::regtype THEN
-        RETURN (ARRAY['infinity', '-infinity',
-                      ('2000-01-01'::timestamp + (random() - 0.5) * interval '500 years')::text])[1 + floor(random() * 3)::int];
-    WHEN 'time'::regtype THEN RETURN ('00:00'::time + random() * interval '24 hours')::text;
-    WHEN 'interval'::regtype THEN RETURN ((random() - 0.5) * interval '7000 days 3 hours')::text;
+        RETURN (ARRAY['infinity', '-infinity', '4714-11-24 00:00:00 BC', '294276-12-31 23:59:59.999999',
+                      '2016-12-31 23:59:60', ('2000-01-01'::timestamp + (random() - 0.5) * interval '500 years')::text,
+                      ('2000-01-01'::timestamp + (random() - 0.5) * interval '580000 years')::text])[1 + floor(random() * 7)::int];
+    WHEN 'time'::regtype THEN
+        RETURN (ARRAY['24:00:00', '00:00', ('00:00'::time + random() * interval '24 hours')::text])[1 + floor(random() * 3)::int];
+    WHEN 'time with time zone'::regtype THEN
+        RETURN (ARRAY['24:00:00+15:59', '00:00-15:59:59',
+                      ('00:00'::time + random() * interval '24 hours')::text ||
+                      (ARRAY['+', '-'])[1 + floor(random() * 2)::int] ||
+                      to_char(make_interval(secs => floor(random() * 57599)), 'HH24:MI:SS')])[1 + floor(random() * 3)::int];
+    WHEN 'interval'::regtype THEN
+        RETURN (ARRAY['178956970 years 7 months 2147483647 days 596523 hours',
+                      '-178956970 years -8 months -2147483648 days -596523 hours',
+                      ((random() - 0.5) * interval '7000 days 3 hours')::text])[1 + floor(random() * 3)::int];
     WHEN 'uuid'::regtype THEN RETURN md5(random()::text)::uuid::text;
+    WHEN 'oid'::regtype THEN
+        RETURN (ARRAY['0', '4294967295', floor(random() * 4294967296)::bigint::text])[1 + floor(random() * 3)::int];
     WHEN 'inet'::regtype THEN
         RETURN CASE WHEN random() < 0.5
                THEN format('%s.%s.%s.%s/%s', floor(random() * 256), floor(random() * 256), floor(random() * 256), floor(random() * 256), 8 + floor(random() * 25))

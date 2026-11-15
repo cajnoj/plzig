@@ -234,11 +234,12 @@ CREATE FUNCTION tm_badjson() RETURNS jsonb LANGUAGE plzig AS $$
 $$;
 SELECT tm_badjson();
 ERROR:  invalid input syntax for type json
--- uuid
+-- uuid (native: plzig.Uuid; more in types_fixed)
 CREATE FUNCTION tm_uuid(u uuid) RETURNS uuid STRICT LANGUAGE plzig AS $$
-    const out = try plzig.allocator.dupe(u8, u);
-    for (out) |*c| c.* = std.ascii.toUpper(c.*);
-    return out;
+    var buf: [36]u8 = undefined;
+    _ = u.format(&buf);
+    for (&buf) |*c| c.* = std.ascii.toUpper(c.*);
+    return try plzig.Uuid.parse(&buf);
 $$;
 SELECT tm_uuid('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11');
                tm_uuid                
@@ -247,10 +248,10 @@ SELECT tm_uuid('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11');
 (1 row)
 
 CREATE FUNCTION tm_baduuid() RETURNS uuid LANGUAGE plzig AS $$
-    return "not-a-uuid";
+    return try plzig.Uuid.parse("not-a-uuid");
 $$;
 SELECT tm_baduuid();
-ERROR:  invalid input syntax for type uuid: "not-a-uuid"
+ERROR:  plzig function failed: InvalidUuid
 -- NaN and infinities in both directions, signed zero
 CREATE FUNCTION tm_f8(x float8, y float4) RETURNS float8 STRICT LANGUAGE plzig AS $$
     return x + y;

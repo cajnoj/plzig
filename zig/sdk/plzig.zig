@@ -9,7 +9,7 @@
 const s = @import("std");
 
 /// ABI version implemented by this SDK. Checked by the host at load time.
-pub const abi_version: u32 = 3;
+pub const abi_version: u32 = 4;
 
 /// Size of the argument buffer (root.zig, plzig_init): argument blocks up to
 /// this size need no allocation and no extra guest entry.
@@ -103,6 +103,136 @@ pub const Value = extern struct {
     kind: u16,
     is_null: u16,
 };
+
+// ---------------------------------------------------------------------------
+// Natively mapped fixed-width SQL types (doc/abi.md, "Kinds").
+//
+// Each is a distinct type, so a function signature maps to exactly one SQL
+// type and a body that mixes them up does not compile.  The fields hold
+// PostgreSQL's own representation; the host range-checks every value that
+// comes back (a function result or an SPI parameter) exactly as the type's
+// binary input function would, and raises an SQL error for an invalid one.
+
+/// SQL `date`: days since 2000-01-01 (PostgreSQL's DateADT).  `infinity` and
+/// `neg_infinity` are the SQL values 'infinity' and '-infinity'.
+pub const Date = extern struct {
+    days: i32,
+
+    pub const infinity: Date = .{ .days = s.math.maxInt(i32) };
+    pub const neg_infinity: Date = .{ .days = s.math.minInt(i32) };
+
+    pub fn isFinite(self: Date) bool {
+        return self.days != infinity.days and self.days != neg_infinity.days;
+    }
+};
+
+/// SQL `time` (without time zone): microseconds since midnight,
+/// 0 ..= 86_400_000_000 ('24:00:00' is a valid time).
+pub const Time = extern struct {
+    usecs: i64,
+};
+
+/// SQL `time with time zone`: microseconds since midnight and the zone
+/// offset in seconds **west** of UTC, as PostgreSQL stores it ('12:00+02'
+/// has `zone = -7200`); |zone| < 16 hours.
+pub const TimeTz = extern struct {
+    usecs: i64,
+    zone: i32,
+};
+
+/// SQL `timestamp` (without time zone): microseconds since
+/// 2000-01-01 00:00:00.
+pub const Timestamp = extern struct {
+    usecs: i64,
+
+    pub const infinity: Timestamp = .{ .usecs = s.math.maxInt(i64) };
+    pub const neg_infinity: Timestamp = .{ .usecs = s.math.minInt(i64) };
+
+    pub fn isFinite(self: Timestamp) bool {
+        return self.usecs != infinity.usecs and self.usecs != neg_infinity.usecs;
+    }
+};
+
+/// SQL `timestamp with time zone`: microseconds since 2000-01-01 00:00:00 UTC.
+pub const TimestampTz = extern struct {
+    usecs: i64,
+
+    pub const infinity: TimestampTz = .{ .usecs = s.math.maxInt(i64) };
+    pub const neg_infinity: TimestampTz = .{ .usecs = s.math.minInt(i64) };
+
+    pub fn isFinite(self: TimestampTz) bool {
+        return self.usecs != infinity.usecs and self.usecs != neg_infinity.usecs;
+    }
+};
+
+/// SQL `interval`: PostgreSQL's three independent fields (an interval of
+/// 1 month is not 30 days).  Same layout as PostgreSQL's Interval.
+pub const Interval = extern struct {
+    usecs: i64,
+    days: i32,
+    months: i32,
+};
+
+/// SQL `uuid`: the 16 bytes in network order.
+pub const Uuid = extern struct {
+    bytes: [16]u8,
+
+    /// The canonical text form (lower case, as uuid_out writes it).
+    pub fn format(self: Uuid, buf: *[36]u8) []const u8 {
+        const hex = "0123456789abcdef";
+        var o: usize = 0;
+        for (self.bytes, 0..) |b, i| {
+            if (i == 4 or i == 6 or i == 8 or i == 10) {
+                buf[o] = '-';
+                o += 1;
+            }
+            buf[o] = hex[b >> 4];
+            buf[o + 1] = hex[b & 15];
+            o += 2;
+        }
+        return buf[0..36];
+    }
+
+    /// Parse the forms uuid_in accepts: 32 hex digits (either case), a
+    /// hyphen allowed after any group of four digits, optionally in braces.
+    pub fn parse(text: []const u8) error{InvalidUuid}!Uuid {
+        var t = text;
+        if (t.len >= 2 and t[0] == '{' and t[t.len - 1] == '}') t = t[1 .. t.len - 1];
+        var out: Uuid = .{ .bytes = undefined };
+        var n: usize = 0; // hex digits seen
+        var i: usize = 0;
+        while (i < t.len) : (i += 1) {
+            const c = t[i];
+            if (c == '-' and n > 0 and n < 32 and n % 4 == 0 and i + 1 < t.len and t[i + 1] != '-') continue;
+            const d: u8 = switch (c) {
+                '0'...'9' => c - '0',
+                'a'...'f' => c - 'a' + 10,
+                'A'...'F' => c - 'A' + 10,
+                else => return error.InvalidUuid,
+            };
+            if (n >= 32) return error.InvalidUuid;
+            if (n % 2 == 0) out.bytes[n / 2] = d << 4 else out.bytes[n / 2] |= d;
+            n += 1;
+        }
+        if (n != 32) return error.InvalidUuid;
+        return out;
+    }
+};
+
+/// SQL `oid`.
+pub const Oid = extern struct {
+    value: u32,
+};
+
+fn isFixed16(comptime T: type) bool {
+    return T == Interval or T == Uuid;
+}
+
+/// Read a 16-byte value the host placed at `addr` (no alignment assumed).
+fn readFixed16(comptime T: type, addr: u64) T {
+    const p: *align(1) const T = @ptrFromInt(@as(usize, @intCast(addr)));
+    return p.*;
+}
 
 // ---------------------------------------------------------------------------
 // Allocator: one per-call bump arena over the guest linear memory.
@@ -316,6 +446,14 @@ pub const Kind = enum(u16) {
     bytea = 8,
     /// any other type: its text representation
     other = 9,
+    date = 10,
+    time = 11,
+    timetz = 12,
+    timestamp = 13,
+    timestamptz = 14,
+    interval = 15,
+    uuid = 16,
+    oid = 17,
     _,
 };
 
@@ -329,6 +467,14 @@ pub const Type = enum(u32) {
     float8 = 6,
     text = 7,
     bytea = 8,
+    date = 10,
+    time = 11,
+    timetz = 12,
+    timestamp = 13,
+    timestamptz = 14,
+    interval = 15,
+    uuid = 16,
+    oid = 17,
     /// other values are rejected by the host
     _,
 };
@@ -366,8 +512,11 @@ pub const Row = struct {
 
     /// Value of column `col` (0-based) as `T`: `bool`, `i16`, `i32`, `i64`,
     /// `f32`, `f64` (the column must be exactly boolean, smallint, integer,
-    /// bigint, real, double precision) or `[]const u8` (text-like, bytea, or
-    /// the text representation of any other type); `?T` accepts SQL NULL.
+    /// bigint, real, double precision), `plzig.Date`, `Time`, `TimeTz`,
+    /// `Timestamp`, `TimestampTz`, `Interval`, `Uuid`, `Oid` (exactly that
+    /// SQL type), or `[]const u8` (text-like, bytea, or the text
+    /// representation of any type without a native mapping); `?T` accepts
+    /// SQL NULL.
     /// Never converts: a kind mismatch is `error.TypeMismatch`, NULL into a
     /// non-optional `error.UnexpectedNull`.
     pub fn get(self: Row, comptime T: type, col: usize) GetError!T {
@@ -398,8 +547,16 @@ fn checkKind(comptime T: type, k: u16) error{TypeMismatch}!void {
         f64 => k == @intFromEnum(Kind.float8),
         []const u8 => k == @intFromEnum(Kind.text) or k == @intFromEnum(Kind.bytea) or
             k == @intFromEnum(Kind.other),
+        Date => k == @intFromEnum(Kind.date),
+        Time => k == @intFromEnum(Kind.time),
+        TimeTz => k == @intFromEnum(Kind.timetz),
+        Timestamp => k == @intFromEnum(Kind.timestamp),
+        TimestampTz => k == @intFromEnum(Kind.timestamptz),
+        Interval => k == @intFromEnum(Kind.interval),
+        Uuid => k == @intFromEnum(Kind.uuid),
+        Oid => k == @intFromEnum(Kind.oid),
         else => @compileError("plzig: unsupported column type " ++ @typeName(T) ++
-            " (use bool, i16, i32, i64, f32, f64 or []const u8, or an optional of one)"),
+            " (use bool, i16, i32, i64, f32, f64, []const u8 or a plzig type such as plzig.Date, or an optional of one)"),
     };
     if (!ok) return error.TypeMismatch;
 }
@@ -415,6 +572,16 @@ fn decodeValue(comptime T: type, v: Value) T {
         if (v.len == 0) return &.{};
         const p: [*]const u8 = @ptrFromInt(@as(usize, @intCast(v.val)));
         return p[0..v.len];
+    }
+    if (T == Date) return .{ .days = @truncate(@as(i64, @bitCast(v.val))) };
+    if (T == Time) return .{ .usecs = @bitCast(v.val) };
+    if (T == TimeTz) return .{ .usecs = @bitCast(v.val), .zone = @bitCast(v.len) };
+    if (T == Timestamp) return .{ .usecs = @bitCast(v.val) };
+    if (T == TimestampTz) return .{ .usecs = @bitCast(v.val) };
+    if (T == Oid) return .{ .value = @truncate(v.val) };
+    if (comptime isFixed16(T)) {
+        if (v.len != 16) raiseMsg("plzig: invalid fixed-width column value");
+        return readFixed16(T, v.val);
     }
     unreachable;
 }
@@ -550,10 +717,12 @@ pub const Plan = struct {
     /// Execute with parameters `args`, a tuple whose element types must
     /// match the declared parameter types: bool, i16, i32, i64, f32, f64,
     /// a byte slice or string literal (text), `plzig.bytea(...)` (bytea),
-    /// an optional of one of these, or `null`.
+    /// `plzig.Date`, `Time`, `TimeTz`, `Timestamp`, `TimestampTz`,
+    /// `Interval`, `Uuid`, `Oid`, an optional of one of these, or `null`.
     pub fn execute(self: Plan, args: anytype) error{OutOfMemory}!Result {
         var vals: [paramCount(@TypeOf(args))]Value = undefined;
-        encodeParams(args, &vals);
+        var fixed: [paramCount(@TypeOf(args))][16]u8 align(8) = undefined;
+        encodeParams(args, &vals, &fixed);
         const n = host.spi_execute_plan(self.handle, &vals, vals.len);
         return .{ .rows = @intCast(n), .columns = host.spi_ncols() };
     }
@@ -561,7 +730,8 @@ pub const Plan = struct {
     /// Open a cursor over the prepared statement (see `execute` for `args`).
     pub fn open(self: Plan, args: anytype) error{OutOfMemory}!Cursor {
         var vals: [paramCount(@TypeOf(args))]Value = undefined;
-        encodeParams(args, &vals);
+        var fixed: [paramCount(@TypeOf(args))][16]u8 align(8) = undefined;
+        encodeParams(args, &vals, &fixed);
         return .{ .handle = host.spi_cursor_open_plan(self.handle, &vals, vals.len) };
     }
 
@@ -579,9 +749,11 @@ fn paramCount(comptime Args: type) usize {
     return ti.@"struct".field_names.len;
 }
 
-fn encodeParams(args: anytype, out: []Value) void {
+/// 16-byte values (interval, uuid) are copied to `fixed[i]` and passed by
+/// that address: the caller keeps `fixed` until the host has read them.
+fn encodeParams(args: anytype, out: []Value, fixed: [][16]u8) void {
     inline for (0..comptime paramCount(@TypeOf(args))) |i| {
-        out[i] = encodeParam(args[i]);
+        out[i] = encodeParam(args[i], &fixed[i]);
     }
 }
 
@@ -607,23 +779,40 @@ fn paramKind(comptime T: type) u16 {
     if (T == f32) return @intFromEnum(Type.float4);
     if (T == f64) return @intFromEnum(Type.float8);
     if (T == Bytea) return @intFromEnum(Type.bytea);
+    if (T == Date) return @intFromEnum(Type.date);
+    if (T == Time) return @intFromEnum(Type.time);
+    if (T == TimeTz) return @intFromEnum(Type.timetz);
+    if (T == Timestamp) return @intFromEnum(Type.timestamp);
+    if (T == TimestampTz) return @intFromEnum(Type.timestamptz);
+    if (T == Interval) return @intFromEnum(Type.interval);
+    if (T == Uuid) return @intFromEnum(Type.uuid);
+    if (T == Oid) return @intFromEnum(Type.oid);
     if (comptime isBytes(T)) return @intFromEnum(Type.text);
     if (T == comptime_int or T == comptime_float)
         @compileError("plzig: give numeric parameter literals a type, e.g. @as(i32, 5)");
     @compileError("plzig: unsupported parameter type " ++ @typeName(T));
 }
 
-fn encodeParam(v: anytype) Value {
+fn encodeParam(v: anytype, fixed: *[16]u8) Value {
     const T = @TypeOf(v);
     switch (@typeInfo(T)) {
         .null => return .{ .val = 0, .len = 0, .kind = 0, .is_null = 1 },
         .optional => |o| {
-            if (v) |x| return encodeParam(@as(o.child, x));
+            if (v) |x| return encodeParam(@as(o.child, x), fixed);
             return .{ .val = 0, .len = 0, .kind = paramKind(o.child), .is_null = 1 };
         },
         else => {},
     }
     const k = paramKind(T);
+    if (T == Date) return .{ .val = @bitCast(@as(i64, v.days)), .len = 0, .kind = k, .is_null = 0 };
+    if (T == Time or T == Timestamp or T == TimestampTz)
+        return .{ .val = @bitCast(v.usecs), .len = 0, .kind = k, .is_null = 0 };
+    if (T == TimeTz) return .{ .val = @bitCast(v.usecs), .len = @bitCast(v.zone), .kind = k, .is_null = 0 };
+    if (T == Oid) return .{ .val = v.value, .len = 0, .kind = k, .is_null = 0 };
+    if (comptime isFixed16(T)) {
+        @memcpy(fixed, s.mem.asBytes(&v));
+        return .{ .val = @intFromPtr(fixed), .len = 16, .kind = k, .is_null = 0 };
+    }
     if (T == bool) return .{ .val = @intFromBool(v), .len = 0, .kind = k, .is_null = 0 };
     if (T == i16 or T == i32 or T == i64)
         return .{ .val = @bitCast(@as(i64, v)), .len = 0, .kind = k, .is_null = 0 };

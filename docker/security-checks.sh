@@ -294,6 +294,23 @@ CREATE OR REPLACE FUNCTION hostile(what int) RETURNS int STRICT LANGUAGE plzig A
         47 => h.raise_error("XX000", 5, P([*]const u8, bad), 0xffff_ffff, sql.ptr, 0, sql.ptr, 0),
         48 => { const s = "a\x00b"; h.raise_error("23514", 5, s, 3, sql.ptr, 0, sql.ptr, 0); },
         49 => { const s = "23514"; h.raise_error(s, 5, sql.ptr, sql.len, sql.ptr, 0, sql.ptr, 0); },
+        // fixed-width parameters (doc/abi.md, "Range checks"): forged values, lengths, pointers
+        50, 51, 52, 53, 54, 55, 56, 57 => {
+            const t: plzig.Type = switch (what) { 50, 55 => .interval, 51 => .uuid, 52 => .date, 53 => .oid,
+                                                  54 => .timetz, 56 => .time, else => .timestamptz };
+            const pf = try plzig.spi.prepare("SELECT $1::text", &.{t});
+            vals[0] = switch (what) {
+                50 => .{ .val = bad, .len = 16, .kind = 15, .is_null = 0 },
+                51 => .{ .val = plzig.addrOf(&buf), .len = 15, .kind = 16, .is_null = 0 },
+                52 => .{ .val = 1 << 40, .len = 0, .kind = 10, .is_null = 0 },
+                53 => .{ .val = 1 << 33, .len = 0, .kind = 17, .is_null = 0 },
+                54 => .{ .val = 0, .len = 0x8000_0000, .kind = 12, .is_null = 0 },
+                55 => .{ .val = 1 << 40, .len = 16, .kind = 15, .is_null = 0 },
+                56 => .{ .val = 86_400_000_001, .len = 0, .kind = 11, .is_null = 0 },
+                else => .{ .val = 9223371331200000000, .len = 0, .kind = 14, .is_null = 0 },
+            };
+            _ = h.spi_execute_plan(pf.handle, &vals, 1);
+        },
         else => return 0,
     }
     return 1;
@@ -360,9 +377,17 @@ done <<'CASES'
 47|SQLSTATE XX000 cannot be raised by a PL/Zig function
 48|invalid byte sequence for encoding "UTF8": 0x00
 49|ERROR:  SELECT $1::text
+50|guest passed an invalid memory range
+51|invalid length 15 of uuid value
+52|date out of range
+53|OID out of range
+54|time zone displacement out of range
+55|invalid SPI parameter pointer
+56|time out of range
+57|timestamp out of range
 0|0
 CASES
-if [ "$n" -eq 50 ]; then pass "hostile guest: all 49 forged calls end in a clean ERROR"; fi
+if [ "$n" -eq 58 ]; then pass "hostile guest: all 57 forged calls end in a clean ERROR"; fi
 expect "hostile guest: backend still healthy" "4242" "SELECT 4242;"
 if grep -qE "terminated by signal|server process .* was terminated" /tmp/server.log; then fail "hostile guest: no backend crash in the server log"; else pass "hostile guest: no backend crash in the server log"; fi
 psqlq -c "DROP FUNCTION hostile(int); SELECT plzig_cache_clear();" >/dev/null

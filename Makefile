@@ -25,7 +25,7 @@ OBJS = src/plzig.o src/plzig_source.o src/plzig_build.o src/plzig_spawn.o \
 DATA = sql/plzig--1.0.sql
 PGFILEDESC = "PL/Zig - procedural language"
 
-REGRESS = setup basics types types_more signatures usage encoding errors spi spi_prepared spi_cursor \
+REGRESS = setup basics types types_more types_fixed signatures usage encoding errors spi spi_prepared spi_cursor \
           sandbox adversarial resources leaks lifecycle
 REGRESS_OPTS = --inputdir=test --load-extension=plzig
 # only against a PLZIG_TESTING=1 build: make installcheck-testing

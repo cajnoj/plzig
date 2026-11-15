@@ -39,6 +39,8 @@ SELECT generate_source('{}', '{}', 'void', false, 'plzig.notice("x", .{});');
 SELECT generate_source('{int4,int4}', '{a,b}', 'int4', true, 'return a + b;');
 SELECT generate_source('{bool,int2,int4,int8,float4,float8,text,varchar,bpchar,bytea,numeric,jsonb,int4[]}',
                        '{a,b,c,d,e,f,g,h,i,j,k,l,m}', 'text', false, 'return null;');
+SELECT generate_source('{date,time,timetz,timestamp,timestamptz,interval,uuid,oid}',
+                       '{a,b,c,d,e,f,g,h}', 'timestamptz', false, 'return null;');
 SELECT generate_source('{int4,int4,int4}', ARRAY[NULL, 'return', NULL], 'bytea', true, '');
 SELECT generate_source('{text}', '{x}', 'numeric', false, E'line 1\n}\nfn helper() void {\n// line 3');
 -- a body with a NUL-free but hostile text is still only the function body
@@ -61,10 +63,11 @@ RESET plzig.max_source_size;
 SELECT t, type_map(t)
   FROM unnest(ARRAY['void', 'bool', 'int2', 'int4', 'int8', 'float4', 'float8', 'text',
                     'varchar', 'bpchar', 'bytea', 'name', '"char"', 'numeric', 'json',
-                    'int4[]', 'text[]', 'oid', 'regclass', 'uuid', 'date']::regtype[]) AS t;
+                    'int4[]', 'text[]', 'oid', 'regclass', 'uuid', 'date', 'time', 'timetz',
+                    'timestamp', 'timestamptz', 'interval', 'jsonb']::regtype[]) AS t;
 CREATE DOMAIN plzig_testing.d_int AS int;
 SELECT type_map('plzig_testing.d_int');
-SELECT k, param_kind_oid(k) FROM generate_series(0, 10) k;
+SELECT k, param_kind_oid(k) FROM generate_series(0, 21) k;
 
 --
 -- cache key: deterministic, 64 hex digits, sensitive to every byte, and
@@ -76,7 +79,7 @@ SELECT cache_key('abc') = cache_key('abc') AS deterministic,
        cache_key('abc') <> cache_key('abc ') AS length_sensitive,
        cache_key('') <> cache_key('\x00') AS empty_vs_nul;
 -- independent computation: SHA-256 over length-prefixed parts (8-byte little
--- endian length, the bytes, a 0 byte): "abi3", the Zig version, the compiler
+-- endian length, the bytes, a 0 byte): "abi4", the Zig version, the compiler
 -- flags, the SDK digest (same construction over plzig.zig and root.zig), the source
 -- (the length is the host's uint64, little endian on x86_64 and aarch64)
 CREATE FUNCTION plzig_testing.le8(n int8) RETURNS bytea LANGUAGE sql AS $$
@@ -89,7 +92,7 @@ SELECT setting AS sharedir FROM pg_config WHERE name = 'SHAREDIR' \gset
 SELECT encode(sha256(plzig_testing.part(pg_read_binary_file(:'sharedir' || '/plzig/sdk/plzig.zig')) ||
                      plzig_testing.part(pg_read_binary_file(:'sharedir' || '/plzig/sdk/root.zig'))), 'hex') AS sdk \gset
 SELECT cache_key('pub fn call() anyerror!void {}') =
-       encode(sha256(plzig_testing.part('abi3') ||
+       encode(sha256(plzig_testing.part('abi4') ||
                      plzig_testing.part('0.17.1') ||
                      plzig_testing.part(convert_to(zig_flags(), 'UTF8')) ||
                      plzig_testing.part(convert_to(:'sdk', 'UTF8')) ||

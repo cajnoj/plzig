@@ -72,6 +72,9 @@ pub const Col = union(enum) {
     text: []const u8,
     bytea: []const u8,
     other: []const u8,
+    /// any other kind, as the host would write it: `bytes` (if not null)
+    /// after the values, else `val`/`len` in the Value itself
+    raw: struct { kind: plzig.Kind, val: u64 = 0, len: u32 = 0, bytes: ?[]const u8 = null },
 
     fn kind(c: Col) u16 {
         return switch (c) {
@@ -85,12 +88,14 @@ pub const Col = union(enum) {
             .text => 7,
             .bytea => 8,
             .other => 9,
+            .raw => |r| @intFromEnum(r.kind),
         };
     }
 
     fn bytes(c: Col) ?[]const u8 {
         return switch (c) {
             .text, .bytea, .other => |b| b,
+            .raw => |r| r.bytes,
             else => null,
         };
     }
@@ -169,6 +174,15 @@ fn writeRow(row: []const Col, buf: [*]u8, buf_len: u32) i32 {
                 @memcpy(buf[off..][0..b.len], b);
                 off += align8(b.len);
             },
+            .raw => |r| if (r.bytes) |b| {
+                val.len = @intCast(b.len);
+                val.val = base + off;
+                @memcpy(buf[off..][0..b.len], b);
+                off += align8(b.len);
+            } else {
+                val.val = r.val;
+                val.len = r.len;
+            },
         }
         @memcpy(buf[i * @sizeOf(Value) ..][0..@sizeOf(Value)], std.mem.asBytes(&val));
     }
@@ -185,6 +199,7 @@ fn textOf(c: Col, out: []u8) ?[]const u8 {
         .float4 => |x| std.fmt.bufPrint(out, "{d}", .{x}) catch unreachable,
         .float8 => |x| std.fmt.bufPrint(out, "{d}", .{x}) catch unreachable,
         .text, .bytea, .other => |b| b,
+        .raw => "raw",
     };
 }
 

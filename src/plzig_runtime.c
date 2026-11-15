@@ -30,7 +30,9 @@
 #include "miscadmin.h"
 #include "storage/fd.h"
 #include "utils/builtins.h"
+#include "utils/date.h"
 #include "utils/memutils.h"
+#include "utils/timestamp.h"
 
 #include "wasm_export.h"
 
@@ -980,6 +982,23 @@ plzig_decode_result(PlzigInstance *pi, PlzigSlot *slot, PlzigTypeInfo *rt,
 				(void) pg_verifymbstr(s, (int) slot->len, false);
 				return InputFunctionCall(&rt->in_func, s, rt->ioparam, -1);
 			}
+		case PLZIG_T_DATE:
+		case PLZIG_T_TIME:
+		case PLZIG_T_TIMETZ:
+		case PLZIG_T_TIMESTAMP:
+		case PLZIG_T_TIMESTAMPTZ:
+		case PLZIG_T_OID:
+			/* range-checked like the type's receive function would */
+			return plzig_scalar_from_guest(rt->kind, slot->val, slot->len, "its result");
+		case PLZIG_T_INTERVAL:
+		case PLZIG_T_UUID:
+			{
+				char	   *b;
+
+				plzig_fixed16_check_len(rt->kind, slot->len, "its result");	/* before copying */
+				b = plzig_copy_out(pi, slot->val, PLZIG_FIXED16);
+				return plzig_fixed16_from_guest(rt->kind, b, PLZIG_FIXED16, "its result");
+			}
 		case PLZIG_T_VOID:
 			break;
 	}
@@ -1068,6 +1087,12 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 				bytes[i] = s;
 				lens[i] = (uint32) strlen(s);
 			}
+			else if (k == PLZIG_T_INTERVAL || k == PLZIG_T_UUID)
+			{
+				/* fixed-length by-reference types: the 16 bytes as they are */
+				bytes[i] = DatumGetPointer(args[i].value);
+				lens[i] = PLZIG_FIXED16;
+			}
 			total += TYPEALIGN(8, (uint64) lens[i]);
 		}
 		if (total > PG_UINT32_MAX - 16)
@@ -1143,10 +1168,35 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 							memcpy(&s.val, &f, sizeof(f));
 							break;
 						}
+					case PLZIG_T_DATE:
+						s.val = (uint64) (int64) DatumGetDateADT(args[i].value);
+						break;
+					case PLZIG_T_TIME:
+						s.val = (uint64) DatumGetTimeADT(args[i].value);
+						break;
+					case PLZIG_T_TIMETZ:
+						{
+							TimeTzADT  *t = DatumGetTimeTzADTP(args[i].value);
+
+							s.val = (uint64) t->time;
+							s.len = (uint32) t->zone;
+							break;
+						}
+					case PLZIG_T_TIMESTAMP:
+						s.val = (uint64) DatumGetTimestamp(args[i].value);
+						break;
+					case PLZIG_T_TIMESTAMPTZ:
+						s.val = (uint64) DatumGetTimestampTz(args[i].value);
+						break;
+					case PLZIG_T_OID:
+						s.val = (uint64) DatumGetObjectId(args[i].value);
+						break;
 					case PLZIG_T_TEXT:
 					case PLZIG_T_TEXTIO:
 					case PLZIG_T_BYTEA:
 					case PLZIG_T_IO:
+					case PLZIG_T_INTERVAL:
+					case PLZIG_T_UUID:
 						plzig_put_bytes(base, &off, &s, guest_base, bytes[i], lens[i]);
 						break;
 					case PLZIG_T_VOID:

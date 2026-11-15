@@ -92,6 +92,16 @@ SELECT generate_source('{bool,int2,int4,int8,float4,float8,text,varchar,bpchar,b
  
 (1 row)
 
+SELECT generate_source('{date,time,timetz,timestamp,timestamptz,interval,uuid,oid}',
+                       '{a,b,c,d,e,f,g,h}', 'timestamptz', false, 'return null;');
+                                                                                                                                                                          generate_source                                                                                                                                                                          
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ const plzig = @import("plzig"); const std = plzig.std; pub fn call(@"a": ?plzig.Date, @"b": ?plzig.Time, @"c": ?plzig.TimeTz, @"d": ?plzig.Timestamp, @"e": ?plzig.TimestampTz, @"f": ?plzig.Interval, @"g": ?plzig.Uuid, @"h": ?plzig.Oid) anyerror!?plzig.TimestampTz { _ = &@"a"; _ = &@"b"; _ = &@"c"; _ = &@"d"; _ = &@"e"; _ = &@"f"; _ = &@"g"; _ = &@"h";+
+ return null;                                                                                                                                                                                                                                                                                                                                                     +
+ }                                                                                                                                                                                                                                                                                                                                                                +
+ 
+(1 row)
+
 SELECT generate_source('{int4,int4,int4}', ARRAY[NULL, 'return', NULL], 'bytea', true, '');
                                                                                   generate_source                                                                                  
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -169,31 +179,38 @@ RESET plzig.max_source_size;
 SELECT t, type_map(t)
   FROM unnest(ARRAY['void', 'bool', 'int2', 'int4', 'int8', 'float4', 'float8', 'text',
                     'varchar', 'bpchar', 'bytea', 'name', '"char"', 'numeric', 'json',
-                    'int4[]', 'text[]', 'oid', 'regclass', 'uuid', 'date']::regtype[]) AS t;
-         t         |    type_map    
--------------------+----------------
- void              | void 9 0
- boolean           | bool 1 1
- smallint          | i16 2 2
- integer           | i32 3 3
- bigint            | i64 4 4
- real              | f32 5 5
- double precision  | f64 6 6
- text              | []const u8 7 7
- character varying | []const u8 7 0
- character         | []const u8 7 0
- bytea             | []const u8 8 8
- name              | []const u8 9 0
- "char"            | []const u8 9 0
- numeric           | []const u8 9 0
- json              | []const u8 9 0
- integer[]         | []const u8 9 0
- text[]            | []const u8 9 0
- oid               | []const u8 9 0
- regclass          | []const u8 9 0
- uuid              | []const u8 9 0
- date              | []const u8 9 0
-(21 rows)
+                    'int4[]', 'text[]', 'oid', 'regclass', 'uuid', 'date', 'time', 'timetz',
+                    'timestamp', 'timestamptz', 'interval', 'jsonb']::regtype[]) AS t;
+              t              |        type_map         
+-----------------------------+-------------------------
+ void                        | void 9 0
+ boolean                     | bool 1 1
+ smallint                    | i16 2 2
+ integer                     | i32 3 3
+ bigint                      | i64 4 4
+ real                        | f32 5 5
+ double precision            | f64 6 6
+ text                        | []const u8 7 7
+ character varying           | []const u8 7 0
+ character                   | []const u8 7 0
+ bytea                       | []const u8 8 8
+ name                        | []const u8 9 0
+ "char"                      | []const u8 9 0
+ numeric                     | []const u8 9 0
+ json                        | []const u8 9 0
+ integer[]                   | []const u8 9 0
+ text[]                      | []const u8 9 0
+ oid                         | plzig.Oid 17 17
+ regclass                    | []const u8 9 0
+ uuid                        | plzig.Uuid 16 16
+ date                        | plzig.Date 10 10
+ time without time zone      | plzig.Time 11 11
+ time with time zone         | plzig.TimeTz 12 12
+ timestamp without time zone | plzig.Timestamp 13 13
+ timestamp with time zone    | plzig.TimestampTz 14 14
+ interval                    | plzig.Interval 15 15
+ jsonb                       | []const u8 9 0
+(27 rows)
 
 CREATE DOMAIN plzig_testing.d_int AS int;
 SELECT type_map('plzig_testing.d_int');
@@ -202,9 +219,9 @@ SELECT type_map('plzig_testing.d_int');
  []const u8 9 0
 (1 row)
 
-SELECT k, param_kind_oid(k) FROM generate_series(0, 10) k;
- k  |  param_kind_oid  
-----+------------------
+SELECT k, param_kind_oid(k) FROM generate_series(0, 21) k;
+ k  |       param_kind_oid        
+----+-----------------------------
   0 | -
   1 | boolean
   2 | smallint
@@ -215,8 +232,19 @@ SELECT k, param_kind_oid(k) FROM generate_series(0, 10) k;
   7 | text
   8 | bytea
   9 | -
- 10 | -
-(11 rows)
+ 10 | date
+ 11 | time without time zone
+ 12 | time with time zone
+ 13 | timestamp without time zone
+ 14 | timestamp with time zone
+ 15 | interval
+ 16 | uuid
+ 17 | oid
+ 18 | -
+ 19 | -
+ 20 | -
+ 21 | -
+(22 rows)
 
 --
 -- cache key: deterministic, 64 hex digits, sensitive to every byte, and
@@ -233,7 +261,7 @@ SELECT cache_key('abc') = cache_key('abc') AS deterministic,
 (1 row)
 
 -- independent computation: SHA-256 over length-prefixed parts (8-byte little
--- endian length, the bytes, a 0 byte): "abi3", the Zig version, the compiler
+-- endian length, the bytes, a 0 byte): "abi4", the Zig version, the compiler
 -- flags, the SDK digest (same construction over plzig.zig and root.zig), the source
 -- (the length is the host's uint64, little endian on x86_64 and aarch64)
 CREATE FUNCTION plzig_testing.le8(n int8) RETURNS bytea LANGUAGE sql AS $$
@@ -246,7 +274,7 @@ SELECT setting AS sharedir FROM pg_config WHERE name = 'SHAREDIR' \gset
 SELECT encode(sha256(plzig_testing.part(pg_read_binary_file(:'sharedir' || '/plzig/sdk/plzig.zig')) ||
                      plzig_testing.part(pg_read_binary_file(:'sharedir' || '/plzig/sdk/root.zig'))), 'hex') AS sdk \gset
 SELECT cache_key('pub fn call() anyerror!void {}') =
-       encode(sha256(plzig_testing.part('abi3') ||
+       encode(sha256(plzig_testing.part('abi4') ||
                      plzig_testing.part('0.17.1') ||
                      plzig_testing.part(convert_to(zig_flags(), 'UTF8')) ||
                      plzig_testing.part(convert_to(:'sdk', 'UTF8')) ||

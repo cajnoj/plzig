@@ -181,3 +181,38 @@ plzig_host_free_plans(PlzigPlanTable *plans)
 	plans->size = 0;
 	plans->nlive = 0;
 }
+
+/*
+ * The value checks of src/plzig_types.c that plzig_runtime.c calls for the
+ * natively mapped types (dates, numeric, ...).  The harness only declares
+ * int, text, bytea and void results (fuzz/loader/harness.c), so these are
+ * never reached; if they were, they fail like a rejected value.
+ */
+static void
+stub_value_error(void)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+			 errmsg("PL/Zig: native value types are not used by the loader harness")));
+}
+
+Datum
+plzig_scalar_from_guest(PlzigTypeKind k, uint64 val, uint32 len, const char *where)
+{
+	stub_value_error();
+	return (Datum) 0;
+}
+
+void
+plzig_fixed16_check_len(PlzigTypeKind k, uint32 len, const char *where)
+{
+	stub_value_error();
+}
+
+Datum
+plzig_fixed16_from_guest(PlzigTypeKind k, const char *bytes, uint32 len, const char *where)
+{
+	stub_value_error();
+	return (Datum) 0;
+}
+

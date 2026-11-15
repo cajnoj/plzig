@@ -188,13 +188,13 @@ plzig_generate_source(const PlzigSignature *sig, const char *body, size_t *srcle
 						 i > 0 ? ", " : "",
 						 sig->argnames[i],
 						 sig->strict ? "" : "?",
-						 plzig_zig_type_name(k));
+						 plzig_zig_type_name(k, false));
 	}
 	if (sig->rettype == VOIDOID)
 		appendStringInfoString(&buf, ") anyerror!void {");
 	else
 		appendStringInfo(&buf, ") anyerror!?%s {",
-						 plzig_zig_type_name(plzig_type_kind(sig->rettype)));
+						 plzig_zig_type_name(plzig_type_kind(sig->rettype), true));
 	/* parameters may legitimately go unused */
 	for (i = 0; i < sig->nargs; i++)
 		appendStringInfo(&buf, " _ = &@\"%s\";", sig->argnames[i]);

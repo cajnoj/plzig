@@ -52,7 +52,7 @@ fn top() usize {
 // Arena allocator
 
 test "abi version" {
-    try testing.expectEqual(@as(u32, 3), plzig_abi_version());
+    try testing.expectEqual(@as(u32, 4), plzig_abi_version());
     try testing.expectEqual(plzig.abi_version, plzig_abi_version());
 }
 
@@ -299,6 +299,37 @@ test "Row.get never converts: every (type, kind) combination" {
     const Types = .{ bool, i16, i32, i64, f32, f64, []const u8 };
     // which kinds (1..9) each type accepts
     const ok = [_][]const u16{ &.{1}, &.{2}, &.{3}, &.{4}, &.{5}, &.{6}, &.{ 7, 8, 9 } };
+    try everyCombination(r, &samples, Types, &ok);
+    // a NULL of a mismatching kind is a mismatch, not null
+    const n = try row(&.{.{ .null_of = .text }});
+    try testing.expectError(error.TypeMismatch, n.get(?i32, 0));
+    try testing.expectEqual(@as(?[]const u8, null), try n.get(?[]const u8, 0));
+}
+
+test "Row.get never converts: the fixed-width SDK types against every kind" {
+    try setup(64);
+    const sixteen = "0123456789abcdef";
+    const samples = [_]Col{
+        .{ .boolean = true },                         .{ .int2 = 1 },
+        .{ .int4 = 1 },                               .{ .int8 = 1 },
+        .{ .float4 = 1 },                             .{ .float8 = 1 },
+        .{ .text = "1" },                             .{ .bytea = "1" },
+        .{ .other = "1" },                            .{ .raw = .{ .kind = .date, .val = 1 } },
+        .{ .raw = .{ .kind = .time, .val = 1 } },     .{ .raw = .{ .kind = .timetz, .val = 1, .len = 3600 } },
+        .{ .raw = .{ .kind = .timestamp, .val = 1 } }, .{ .raw = .{ .kind = .timestamptz, .val = 1 } },
+        .{ .raw = .{ .kind = .interval, .bytes = sixteen } }, .{ .raw = .{ .kind = .uuid, .bytes = sixteen } },
+        .{ .raw = .{ .kind = .oid, .val = 1 } },
+    };
+    const r = try row(&samples);
+    const Types = .{ bool, i64, []const u8, plzig.Date, plzig.Time, plzig.TimeTz, plzig.Timestamp, plzig.TimestampTz, plzig.Interval, plzig.Uuid, plzig.Oid };
+    const ok = [_][]const u16{ &.{1}, &.{4}, &.{ 7, 8, 9 }, &.{10}, &.{11}, &.{12}, &.{13}, &.{14}, &.{15}, &.{16}, &.{17} };
+    try everyCombination(r, &samples, Types, &ok);
+}
+
+/// Every (type, column) pair of a row whose column i has kind i + 1: a type
+/// gets a value exactly for the kinds listed for it, error.TypeMismatch
+/// otherwise; the optional variant agrees.
+fn everyCombination(r: plzig.Row, samples: []const Col, comptime Types: anytype, ok: []const []const u16) !void {
     inline for (Types, 0..) |T, ti| {
         for (samples, 0..) |_, col| {
             const kind: u16 = @intCast(col + 1);
@@ -313,10 +344,97 @@ test "Row.get never converts: every (type, kind) combination" {
             if (r.get(?T, col)) |_| try testing.expect(want) else |_| try testing.expect(!want);
         }
     }
-    // a NULL of a mismatching kind is a mismatch, not null
-    const n = try row(&.{.{ .null_of = .text }});
-    try testing.expectError(error.TypeMismatch, n.get(?i32, 0));
-    try testing.expectEqual(@as(?[]const u8, null), try n.get(?[]const u8, 0));
+}
+
+test "Row.get: the fixed-width types decode PostgreSQL's representation" {
+    try setup(64);
+    // an interval of 1 month 2 days 3 us, as PostgreSQL lays it out
+    const iv_bytes = [16]u8{ 3, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0 };
+    const uuid_bytes = [16]u8{ 0xa0, 0xee, 0xbc, 0x99, 0x9c, 0x0b, 0x4e, 0xf8, 0xbb, 0x6d, 0x6b, 0xb9, 0xbd, 0x38, 0x0a, 0x11 };
+    const cols = [_]Col{
+        .{ .raw = .{ .kind = .date, .val = @bitCast(@as(i64, -1)) } },
+        .{ .raw = .{ .kind = .date, .val = @bitCast(@as(i64, std.math.minInt(i32))) } },
+        .{ .raw = .{ .kind = .time, .val = 86_400_000_000 } },
+        .{ .raw = .{ .kind = .timetz, .val = 5, .len = @bitCast(@as(i32, -7200)) } },
+        .{ .raw = .{ .kind = .timestamp, .val = @bitCast(@as(i64, std.math.maxInt(i64))) } },
+        .{ .raw = .{ .kind = .timestamptz, .val = @bitCast(@as(i64, -123)) } },
+        .{ .raw = .{ .kind = .interval, .bytes = &iv_bytes } },
+        .{ .raw = .{ .kind = .uuid, .bytes = &uuid_bytes } },
+        .{ .raw = .{ .kind = .oid, .val = 0xffff_ffff } },
+        .{ .null_of = .timestamptz },
+    };
+    const r = try row(&cols);
+    try testing.expectEqual(@as(i32, -1), (try r.get(plzig.Date, 0)).days);
+    try testing.expect(!(try r.get(plzig.Date, 1)).isFinite());
+    try testing.expectEqual(plzig.Date.neg_infinity, try r.get(plzig.Date, 1));
+    try testing.expectEqual(@as(i64, 86_400_000_000), (try r.get(plzig.Time, 2)).usecs);
+    try testing.expectEqual(plzig.TimeTz{ .usecs = 5, .zone = -7200 }, try r.get(plzig.TimeTz, 3));
+    try testing.expectEqual(plzig.Timestamp.infinity, try r.get(plzig.Timestamp, 4));
+    try testing.expectEqual(@as(i64, -123), (try r.get(plzig.TimestampTz, 5)).usecs);
+    try testing.expectEqual(plzig.Interval{ .usecs = 3, .days = 2, .months = 1 }, try r.get(plzig.Interval, 6));
+    var buf: [36]u8 = undefined;
+    try testing.expectEqualStrings("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", (try r.get(plzig.Uuid, 7)).format(&buf));
+    try testing.expectEqual(@as(u32, 0xffff_ffff), (try r.get(plzig.Oid, 8)).value);
+    try testing.expectEqual(@as(?plzig.TimestampTz, null), try r.get(?plzig.TimestampTz, 9));
+    try testing.expectError(error.UnexpectedNull, r.get(plzig.TimestampTz, 9));
+}
+
+test "Uuid: parse the forms uuid_in accepts, refuse the others" {
+    var buf: [36]u8 = undefined;
+    const canon = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11";
+    for ([_][]const u8{
+        canon,
+        "A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11",
+        "{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}",
+        "a0eebc999c0b4ef8bb6d6bb9bd380a11",
+        "a0ee-bc99-9c0b-4ef8-bb6d-6bb9-bd38-0a11",
+        "{a0eebc999c0b4ef8bb6d6bb9bd380a11}",
+    }) |t| {
+        try testing.expectEqualStrings(canon, (try plzig.Uuid.parse(t)).format(&buf));
+    }
+    for ([_][]const u8{
+        "",                                      "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a1",
+        "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a111", "a0eebc99--9c0b-4ef8-bb6d-6bb9bd380a11",
+        "-a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11-",
+        "a0eeb-c99-9c0b-4ef8-bb6d-6bb9bd380a11", "{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+        "g0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",  "a0eebc99 9c0b-4ef8-bb6d-6bb9bd380a11",
+    }) |t| {
+        try testing.expectError(error.InvalidUuid, plzig.Uuid.parse(t));
+    }
+}
+
+test "prepared statements: fixed-width parameters, 16-byte values by address" {
+    try setup(64);
+    var plan = try plzig.spi.prepare("SELECT $1", &.{ .date, .time, .timetz, .timestamp, .timestamptz, .interval, .uuid, .oid });
+    for (0..8) |i| try testing.expectEqual(@as(u32, @intCast(i + 10)), env.last_kinds[i]);
+    const iv: plzig.Interval = .{ .usecs = -1, .days = 2, .months = -3 };
+    const u = try plzig.Uuid.parse("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11");
+    const t0 = top();
+    _ = try plan.execute(.{
+        plzig.Date{ .days = -5 },                plzig.Time{ .usecs = 86_400_000_000 },
+        plzig.TimeTz{ .usecs = 7, .zone = -3600 }, plzig.Timestamp.neg_infinity,
+        plzig.TimestampTz{ .usecs = 42 },        iv,
+        u,                                       plzig.Oid{ .value = 0xffff_fffe },
+        @as(?plzig.Interval, iv),                @as(?plzig.Date, null),
+    });
+    try testing.expectEqual(t0, top());
+    const vs = env.last_values[0..env.last_nvalues];
+    try testing.expectEqual(@as(usize, 10), vs.len);
+    try testing.expectEqual(Value{ .val = @bitCast(@as(i64, -5)), .len = 0, .kind = 10, .is_null = 0 }, vs[0]);
+    try testing.expectEqual(Value{ .val = 86_400_000_000, .len = 0, .kind = 11, .is_null = 0 }, vs[1]);
+    try testing.expectEqual(Value{ .val = 7, .len = @bitCast(@as(i32, -3600)), .kind = 12, .is_null = 0 }, vs[2]);
+    try testing.expectEqual(Value{ .val = @bitCast(@as(i64, std.math.minInt(i64))), .len = 0, .kind = 13, .is_null = 0 }, vs[3]);
+    try testing.expectEqual(Value{ .val = 42, .len = 0, .kind = 14, .is_null = 0 }, vs[4]);
+    try testing.expectEqual(Value{ .val = 0xffff_fffe, .len = 0, .kind = 17, .is_null = 0 }, vs[7]);
+    // 16-byte values: address and length of the bytes in PostgreSQL's layout
+    // (the host reads them during the call)
+    for ([_]usize{ 5, 8 }) |i| {
+        try testing.expectEqual(@as(u16, 15), vs[i].kind);
+        try testing.expectEqual(@as(u32, 16), vs[i].len);
+    }
+    try testing.expectEqual(@as(u16, 16), vs[6].kind);
+    try testing.expectEqual(@as(u32, 16), vs[6].len);
+    try testing.expectEqual(Value{ .val = 0, .len = 0, .kind = 10, .is_null = 1 }, vs[9]);
 }
 
 test "rows without columns, and an unknown kind" {
@@ -604,6 +722,17 @@ test "root.decode: every parameter type, NULL and empty slices" {
     try testing.expectEqual(@as(?i32, 7), sdk_root.decode(?i32, &s.slot(7, 0, 0)));
     try testing.expectEqual(@as(?[]const u8, null), sdk_root.decode(?[]const u8, &s.slot(0, 0, 1)));
     try testing.expectEqual(@as(?bool, null), sdk_root.decode(?bool, &s.slot(1, 0, 1)));
+    // fixed-width types
+    try testing.expectEqual(plzig.Date{ .days = -730 }, sdk_root.decode(plzig.Date, &s.slot(@bitCast(@as(i64, -730)), 0, 0)));
+    try testing.expectEqual(plzig.Time{ .usecs = 1 }, sdk_root.decode(plzig.Time, &s.slot(1, 0, 0)));
+    try testing.expectEqual(plzig.TimeTz{ .usecs = 2, .zone = -50400 }, sdk_root.decode(plzig.TimeTz, &s.slot(2, @bitCast(@as(i32, -50400)), 0)));
+    try testing.expectEqual(plzig.Timestamp.neg_infinity, sdk_root.decode(plzig.Timestamp, &s.slot(@bitCast(@as(i64, std.math.minInt(i64))), 0, 0)));
+    try testing.expectEqual(plzig.TimestampTz{ .usecs = 9 }, sdk_root.decode(plzig.TimestampTz, &s.slot(9, 0, 0)));
+    try testing.expectEqual(plzig.Oid{ .value = 4294967295 }, sdk_root.decode(plzig.Oid, &s.slot(4294967295, 0, 0)));
+    const iv = [16]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 1, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff };
+    try testing.expectEqual(plzig.Interval{ .usecs = -1, .days = 1, .months = -2 }, sdk_root.decode(plzig.Interval, &s.slot(@intFromPtr(&iv), 16, 0)));
+    try testing.expectEqualSlices(u8, &iv, &sdk_root.decode(plzig.Uuid, &s.slot(@intFromPtr(&iv), 16, 0)).bytes);
+    try testing.expectEqual(@as(?plzig.Uuid, null), sdk_root.decode(?plzig.Uuid, &s.slot(0, 0, 1)));
 }
 
 test "root.encode: every result type" {
@@ -628,6 +757,22 @@ test "root.encode: every result type" {
     var m = [_]u8{ 1, 2 };
     sdk_root.encode([]u8, &m, &out);
     try testing.expectEqual(@as(u32, 2), out.len);
+    // fixed-width types
+    sdk_root.encode(plzig.Date, plzig.Date.infinity, &out);
+    try testing.expectEqual(Slot{ .val = std.math.maxInt(i32), .len = 0, .is_null = 0 }, out);
+    sdk_root.encode(plzig.Date, .{ .days = -1 }, &out);
+    try testing.expectEqual(@as(u64, @bitCast(@as(i64, -1))), out.val);
+    sdk_root.encode(plzig.TimeTz, .{ .usecs = 3, .zone = -1 }, &out);
+    try testing.expectEqual(Slot{ .val = 3, .len = 0xffff_ffff, .is_null = 0 }, out);
+    sdk_root.encode(plzig.TimestampTz, .{ .usecs = -2 }, &out);
+    try testing.expectEqual(@as(u64, @bitCast(@as(i64, -2))), out.val);
+    sdk_root.encode(plzig.Oid, .{ .value = 7 }, &out);
+    try testing.expectEqual(Slot{ .val = 7, .len = 0, .is_null = 0 }, out);
+    // 16-byte values: copied out of the stack frame, PostgreSQL's layout
+    sdk_root.encode(plzig.Interval, .{ .usecs = 1, .days = 2, .months = 3 }, &out);
+    try testing.expectEqual(@as(u32, 16), out.len);
+    const p: *const [16]u8 = @ptrFromInt(@as(usize, @intCast(out.val)));
+    try testing.expectEqualSlices(u8, &[16]u8{ 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0 }, p);
 }
 
 const Arg = ?union(enum) { int: u64, bytes: []const u8 };

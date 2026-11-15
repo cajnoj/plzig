@@ -1,0 +1,432 @@
+--
+-- types_fixed: the natively mapped fixed-width types date, time, timetz,
+-- timestamp, timestamptz, interval, uuid and oid (doc/abi.md, "Kinds"):
+-- arguments, results, NULL, boundary values, the range checks of values a
+-- function returns or passes as SPI parameter, SPI parameters and result
+-- columns (execute, prepared statements, cursors).  Everything is compared
+-- with the same computation in SQL.
+--
+\set VERBOSITY terse
+SET datestyle = 'ISO, YMD';
+SET IntervalStyle = 'postgres';
+SET TimeZone = 'UTC';
+-- the SQLSTATE and message of a statement, or 'ok'
+CREATE FUNCTION fx_err(q text) RETURNS text LANGUAGE plpgsql AS $$
+BEGIN
+    EXECUTE q;
+    RETURN 'ok';
+EXCEPTION WHEN OTHERS THEN
+    RETURN SQLSTATE || ': ' || SQLERRM;
+END $$;
+CREATE TABLE fx_vals (id int PRIMARY KEY, d date, t time, tz timetz, ts timestamp,
+                      tstz timestamptz, iv interval, u uuid, o oid);
+INSERT INTO fx_vals VALUES
+  (1, '2024-02-29', '13:45:56.789012', '13:45:56.789012+05:30', '2024-02-29 13:45:56.789012',
+      '2024-02-29 13:45:56.789012+00', '1 year 2 mons 3 days 04:05:06.000007',
+      'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 12345),
+  -- the smallest finite values
+  (2, '4714-11-24 BC', '00:00', '00:00:00-15:59', '4714-11-24 00:00:00 BC',
+      '4714-11-24 00:00:00+00 BC', '-178956970 years -8 months -2147483648 days -596523 hours',
+      '00000000-0000-0000-0000-000000000000', 0),
+  -- the largest finite values
+  (3, '5874897-12-31', '24:00:00', '24:00:00+15:59', '294276-12-31 23:59:59.999999',
+      '294276-12-31 23:59:59.999999+00', '178956970 years 7 months 2147483647 days 596523 hours',
+      'ffffffff-ffff-ffff-ffff-ffffffffffff', 4294967295),
+  (4, 'infinity', '00:00:00.000001', '12:00-00:00:01', 'infinity', 'infinity',
+      '-178956970 years -8 months', 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11', 1),
+  (5, '-infinity', '23:59:59.999999', '23:59:59.999999+00', '-infinity', '-infinity',
+      '-1 days +00:00:00.000001', '{a0eebc99-9c0b4ef8-bb6d6bb9-bd380a11}', 4294967294),
+  -- year boundaries, BC dates, year 1 and 1 BC
+  (6, '0001-01-01', '00:00:00.5', '00:00:00.5+14', '0001-12-31 23:59:59.999999 BC',
+      '0001-01-01 00:00:00+00', '-1 mons', '12345678-1234-5678-1234-567812345678', 2147483648),
+  (7, '0001-12-31 BC', '12:00', '12:00-14', '1999-12-31 23:59:59.999999',
+      '1999-12-31 23:59:59.999999+00', '00:00:00.000001', 'ffffffff-0000-0000-0000-000000000000', 2147483647),
+  -- leap second input: PostgreSQL normalises 23:59:60 to the next minute
+  (8, '2000-01-01', '23:59:60', '23:59:60+01', '2016-12-31 23:59:60', '2016-12-31 23:59:60+00',
+      '0', '00000000-0000-0000-0000-000000000001', 16384),
+  (9, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+-- identity functions (non-strict: NULL arrives as null)
+CREATE FUNCTION fx_d(x date) RETURNS date LANGUAGE plzig AS $$ return x; $$;
+CREATE FUNCTION fx_t(x time) RETURNS time LANGUAGE plzig AS $$ return x; $$;
+CREATE FUNCTION fx_tz(x timetz) RETURNS timetz LANGUAGE plzig AS $$ return x; $$;
+CREATE FUNCTION fx_ts(x timestamp) RETURNS timestamp LANGUAGE plzig AS $$ return x; $$;
+CREATE FUNCTION fx_tstz(x timestamptz) RETURNS timestamptz LANGUAGE plzig AS $$ return x; $$;
+CREATE FUNCTION fx_iv(x interval) RETURNS interval LANGUAGE plzig AS $$ return x; $$;
+CREATE FUNCTION fx_u(x uuid) RETURNS uuid LANGUAGE plzig AS $$ return x; $$;
+CREATE FUNCTION fx_o(x oid) RETURNS oid LANGUAGE plzig AS $$ return x; $$;
+SELECT id,
+       fx_d(d) IS NOT DISTINCT FROM d AS d, fx_t(t) IS NOT DISTINCT FROM t AS t,
+       fx_tz(tz)::text IS NOT DISTINCT FROM tz::text AS tz, fx_ts(ts) IS NOT DISTINCT FROM ts AS ts,
+       fx_tstz(tstz) IS NOT DISTINCT FROM tstz AS tstz,
+       fx_iv(iv)::text IS NOT DISTINCT FROM iv::text AS iv,
+       fx_u(u) IS NOT DISTINCT FROM u AS u, fx_o(o) IS NOT DISTINCT FROM o AS o
+FROM fx_vals ORDER BY id;
+ id | d | t | tz | ts | tstz | iv | u | o 
+----+---+---+----+----+------+----+---+---
+  1 | t | t | t  | t  | t    | t  | t | t
+  2 | t | t | t  | t  | t    | t  | t | t
+  3 | t | t | t  | t  | t    | t  | t | t
+  4 | t | t | t  | t  | t    | t  | t | t
+  5 | t | t | t  | t  | t    | t  | t | t
+  6 | t | t | t  | t  | t    | t  | t | t
+  7 | t | t | t  | t  | t    | t  | t | t
+  8 | t | t | t  | t  | t    | t  | t | t
+  9 | t | t | t  | t  | t    | t  | t | t
+(9 rows)
+
+SELECT fx_d(NULL) IS NULL AND fx_t(NULL) IS NULL AND fx_tz(NULL) IS NULL AND fx_ts(NULL) IS NULL
+       AND fx_tstz(NULL) IS NULL AND fx_iv(NULL) IS NULL AND fx_u(NULL) IS NULL AND fx_o(NULL) IS NULL
+       AS all_null;
+ all_null 
+----------
+ t
+(1 row)
+
+SELECT fx_d(d), fx_t(t), fx_tz(tz), fx_ts(ts), fx_tstz(tstz), fx_iv(iv), fx_u(u), fx_o(o)
+FROM fx_vals ORDER BY id;
+     fx_d      |      fx_t       |         fx_tz         |             fx_ts             |             fx_tstz             |                          fx_iv                          |                 fx_u                 |    fx_o    
+---------------+-----------------+-----------------------+-------------------------------+---------------------------------+---------------------------------------------------------+--------------------------------------+------------
+ 2024-02-29    | 13:45:56.789012 | 13:45:56.789012+05:30 | 2024-02-29 13:45:56.789012    | 2024-02-29 13:45:56.789012+00   | 1 year 2 mons 3 days 04:05:06.000007                    | a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11 |      12345
+ 4714-11-24 BC | 00:00:00        | 00:00:00-15:59        | 4714-11-24 00:00:00 BC        | 4714-11-24 00:00:00+00 BC       | -178956970 years -8 mons -2147483648 days -596523:00:00 | 00000000-0000-0000-0000-000000000000 |          0
+ 5874897-12-31 | 24:00:00        | 24:00:00+15:59        | 294276-12-31 23:59:59.999999  | 294276-12-31 23:59:59.999999+00 | 178956970 years 7 mons 2147483647 days 596523:00:00     | ffffffff-ffff-ffff-ffff-ffffffffffff | 4294967295
+ infinity      | 00:00:00.000001 | 12:00:00-00:00:01     | infinity                      | infinity                        | -178956970 years -8 mons                                | a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11 |          1
+ -infinity     | 23:59:59.999999 | 23:59:59.999999+00    | -infinity                     | -infinity                       | -1 days +00:00:00.000001                                | a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11 | 4294967294
+ 0001-01-01    | 00:00:00.5      | 00:00:00.5+14         | 0001-12-31 23:59:59.999999 BC | 0001-01-01 00:00:00+00          | -1 mons                                                 | 12345678-1234-5678-1234-567812345678 | 2147483648
+ 0001-12-31 BC | 12:00:00        | 12:00:00-14           | 1999-12-31 23:59:59.999999    | 1999-12-31 23:59:59.999999+00   | 00:00:00.000001                                         | ffffffff-0000-0000-0000-000000000000 | 2147483647
+ 2000-01-01    | 24:00:00        | 24:00:00+01           | 2017-01-01 00:00:00           | 2017-01-01 00:00:00+00          | 00:00:00                                                | 00000000-0000-0000-0000-000000000001 |      16384
+               |                 |                       |                               |                                 |                                                         |                                      |           
+(9 rows)
+
+-- what the function sees: PostgreSQL's representation, raw
+CREATE FUNCTION fx_raw(d date, t time, tz timetz, ts timestamp, tstz timestamptz,
+                       iv interval, u uuid, o oid) RETURNS text LANGUAGE plzig AS $$
+    const a = plzig.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    if (d) |x| try out.print(a, "{d}", .{x.days}) else try out.appendSlice(a, "-");
+    if (t) |x| try out.print(a, " {d}", .{x.usecs}) else try out.appendSlice(a, " -");
+    if (tz) |x| try out.print(a, " {d}/{d}", .{ x.usecs, x.zone }) else try out.appendSlice(a, " -");
+    if (ts) |x| try out.print(a, " {d}", .{x.usecs}) else try out.appendSlice(a, " -");
+    if (tstz) |x| try out.print(a, " {d}", .{x.usecs}) else try out.appendSlice(a, " -");
+    if (iv) |x| try out.print(a, " {d}/{d}/{d}", .{ x.months, x.days, x.usecs }) else try out.appendSlice(a, " -");
+    var buf: [36]u8 = undefined;
+    if (u) |x| try out.print(a, " {s}", .{x.format(&buf)}) else try out.appendSlice(a, " -");
+    if (o) |x| try out.print(a, " {d}", .{x.value}) else try out.appendSlice(a, " -");
+    return out.items;
+$$;
+-- the same, computed in SQL (finite values only: infinities are their own encoding)
+CREATE FUNCTION fx_raw_sql(r fx_vals) RETURNS text LANGUAGE sql AS $$
+    SELECT concat_ws(' ',
+        CASE WHEN r.d IS NULL THEN '-' WHEN r.d = 'infinity' THEN '2147483647'
+             WHEN r.d = '-infinity' THEN '-2147483648' ELSE (r.d - date '2000-01-01')::text END,
+        coalesce((extract(epoch FROM r.t) * 1000000)::int8::text, '-'),
+        coalesce((extract(epoch FROM r.tz::time) * 1000000)::int8 || '/' || (-extract(timezone FROM r.tz))::int, '-'),
+        CASE WHEN r.ts IS NULL THEN '-' WHEN r.ts = 'infinity' THEN '9223372036854775807'
+             WHEN r.ts = '-infinity' THEN '-9223372036854775808'
+             ELSE (extract(epoch FROM r.ts - timestamp '2000-01-01') * 1000000)::int8::text END,
+        CASE WHEN r.tstz IS NULL THEN '-' WHEN r.tstz = 'infinity' THEN '9223372036854775807'
+             WHEN r.tstz = '-infinity' THEN '-9223372036854775808'
+             ELSE (extract(epoch FROM r.tstz - timestamptz '2000-01-01 00:00+00') * 1000000)::int8::text END,
+        coalesce((extract(year FROM r.iv) * 12 + extract(month FROM r.iv))::int || '/' ||
+                 extract(day FROM r.iv)::int || '/' ||
+                 (extract(hour FROM r.iv) * 3600000000 + extract(minute FROM r.iv) * 60000000 +
+                  extract(microseconds FROM r.iv))::int8, '-'),
+        coalesce(r.u::text, '-'),
+        coalesce(r.o::text, '-'))
+$$;
+SELECT id, fx_raw(d, t, tz, ts, tstz, iv, u, o) AS raw,
+       fx_raw(d, t, tz, ts, tstz, iv, u, o) = fx_raw_sql(fx_vals) AS same_as_sql
+FROM fx_vals ORDER BY id;
+ id |                                                                                   raw                                                                                    | same_as_sql 
+----+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------
+  1 | 8825 49556789012 49556789012/-19800 762529556789012 762529556789012 14/3/14706000007 a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11 12345                                          | t
+  2 | -2451545 0 0/57540 -211813488000000000 -211813488000000000 -2147483648/-2147483648/-2147482800000000 00000000-0000-0000-0000-000000000000 0                              | t
+  3 | 2145031948 86400000000 86400000000/-57540 9223371331199999999 9223371331199999999 2147483647/2147483647/2147482800000000 ffffffff-ffff-ffff-ffff-ffffffffffff 4294967295 | t
+  4 | 2147483647 1 43200000000/1 9223372036854775807 9223372036854775807 -2147483648/0/0 a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11 1                                                | t
+  5 | -2147483648 86399999999 86399999999/0 -9223372036854775808 -9223372036854775808 0/-1/1 a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11 4294967294                                   | t
+  6 | -730119 500000 500000/-50400 -63082281600000001 -63082281600000000 -1/0/0 12345678-1234-5678-1234-567812345678 2147483648                                                | t
+  7 | -730120 43200000000 43200000000/50400 -1 -1 0/0/1 ffffffff-0000-0000-0000-000000000000 2147483647                                                                        | t
+  8 | 0 86400000000 86400000000/-3600 536544000000000 536544000000000 0/0/0 00000000-0000-0000-0000-000000000001 16384                                                         | t
+  9 | - - - - - - - -                                                                                                                                                          | t
+(9 rows)
+
+-- values built by the function, checked against SQL
+CREATE FUNCTION fx_mk(days int, usecs int8, zone int, months int) RETURNS text STRICT LANGUAGE plzig AS $$
+    const r = try plzig.spi.prepare(
+        "SELECT $1 = date '2000-01-01' + $5, extract(epoch FROM $2) * 1000000 = $6, " ++
+        "$3 = timestamp '2000-01-01' + $6 * interval '1 microsecond', " ++
+        "$4 = timestamptz '2000-01-01 00:00+00' + $6 * interval '1 microsecond', " ++
+        "extract(epoch FROM $7::time) * 1000000 = $6 AND -extract(timezone FROM $7) = $8, " ++
+        "$9::text = (make_interval(months => $10, days => $5) + $6 * interval '1 microsecond')::text",
+        &.{ .date, .time, .timestamp, .timestamptz, .int4, .int8, .timetz, .int4, .interval, .int4 });
+    const res = try r.execute(.{
+        plzig.Date{ .days = days }, plzig.Time{ .usecs = usecs }, plzig.Timestamp{ .usecs = usecs },
+        plzig.TimestampTz{ .usecs = usecs }, days, usecs, plzig.TimeTz{ .usecs = usecs, .zone = zone }, zone,
+        plzig.Interval{ .usecs = usecs, .days = days, .months = months }, months,
+    });
+    const row = try res.row(0);
+    var out: [6]u8 = undefined;
+    for (0..6) |i| out[i] = if (try row.get(bool, i)) 't' else 'f';
+    return try plzig.allocator.dupe(u8, &out);
+$$;
+SELECT fx_mk(0, 0, 0, 0), fx_mk(-1, 86400000000, 57599, -1), fx_mk(8766, 43200000001, -57599, 2147483647),
+       fx_mk(-2451545, 1, 3600, -2147483648);
+ fx_mk  | fx_mk  | fx_mk  | fx_mk  
+--------+--------+--------+--------
+ tttttt | tttttt | tttttt | tttttt
+(1 row)
+
+-- range checks on results: PostgreSQL's limits and messages, no typmod
+CREATE FUNCTION fx_ret_d(n int) RETURNS date STRICT LANGUAGE plzig AS $$ return plzig.Date{ .days = n }; $$;
+CREATE FUNCTION fx_ret_t(n int8) RETURNS time STRICT LANGUAGE plzig AS $$ return plzig.Time{ .usecs = n }; $$;
+CREATE FUNCTION fx_ret_tz(n int8, z int) RETURNS timetz STRICT LANGUAGE plzig AS $$
+    return plzig.TimeTz{ .usecs = n, .zone = z };
+$$;
+CREATE FUNCTION fx_ret_ts(n int8) RETURNS timestamp STRICT LANGUAGE plzig AS $$ return plzig.Timestamp{ .usecs = n }; $$;
+CREATE FUNCTION fx_ret_tstz(n int8) RETURNS timestamptz STRICT LANGUAGE plzig AS $$ return plzig.TimestampTz{ .usecs = n }; $$;
+SELECT q, fx_err(q) FROM unnest(ARRAY[
+  -- dates: [-2451545, 2145031948] and the two infinities
+  'SELECT fx_ret_d(-2451545)', 'SELECT fx_ret_d(-2451546)', 'SELECT fx_ret_d(2145031948)',
+  'SELECT fx_ret_d(2145031949)', 'SELECT fx_ret_d(2147483646)', 'SELECT fx_ret_d(-2147483647)',
+  'SELECT fx_ret_d(2147483647)', 'SELECT fx_ret_d(-2147483648)',
+  -- times: [0, 24:00:00]
+  'SELECT fx_ret_t(0)', 'SELECT fx_ret_t(-1)', 'SELECT fx_ret_t(86400000000)', 'SELECT fx_ret_t(86400000001)',
+  'SELECT fx_ret_t(-9223372036854775808)',
+  'SELECT fx_ret_tz(86400000001, 0)', 'SELECT fx_ret_tz(0, 57599)', 'SELECT fx_ret_tz(0, 57600)',
+  'SELECT fx_ret_tz(0, -57599)', 'SELECT fx_ret_tz(0, -57600)', 'SELECT fx_ret_tz(-1, 0)',
+  -- timestamps: [MIN_TIMESTAMP, END_TIMESTAMP) and the two infinities
+  'SELECT fx_ret_ts(-211813488000000000)', 'SELECT fx_ret_ts(-211813488000000001)',
+  'SELECT fx_ret_ts(9223371331199999999)', 'SELECT fx_ret_ts(9223371331200000000)',
+  'SELECT fx_ret_ts(9223372036854775806)', 'SELECT fx_ret_ts(-9223372036854775807)',
+  'SELECT fx_ret_ts(9223372036854775807)', 'SELECT fx_ret_ts(-9223372036854775808)',
+  'SELECT fx_ret_tstz(-211813488000000001)', 'SELECT fx_ret_tstz(9223371331200000000)',
+  'SELECT fx_ret_tstz(-211813488000000000)', 'SELECT fx_ret_tstz(9223372036854775807)'
+]) AS q;
+                    q                    |                   fx_err                   
+-----------------------------------------+--------------------------------------------
+ SELECT fx_ret_d(-2451545)               | ok
+ SELECT fx_ret_d(-2451546)               | 22008: date out of range
+ SELECT fx_ret_d(2145031948)             | ok
+ SELECT fx_ret_d(2145031949)             | 22008: date out of range
+ SELECT fx_ret_d(2147483646)             | 22008: date out of range
+ SELECT fx_ret_d(-2147483647)            | 22008: date out of range
+ SELECT fx_ret_d(2147483647)             | ok
+ SELECT fx_ret_d(-2147483648)            | ok
+ SELECT fx_ret_t(0)                      | ok
+ SELECT fx_ret_t(-1)                     | 22008: time out of range
+ SELECT fx_ret_t(86400000000)            | ok
+ SELECT fx_ret_t(86400000001)            | 22008: time out of range
+ SELECT fx_ret_t(-9223372036854775808)   | 22008: time out of range
+ SELECT fx_ret_tz(86400000001, 0)        | 22008: time out of range
+ SELECT fx_ret_tz(0, 57599)              | ok
+ SELECT fx_ret_tz(0, 57600)              | 22009: time zone displacement out of range
+ SELECT fx_ret_tz(0, -57599)             | ok
+ SELECT fx_ret_tz(0, -57600)             | 22009: time zone displacement out of range
+ SELECT fx_ret_tz(-1, 0)                 | 22008: time out of range
+ SELECT fx_ret_ts(-211813488000000000)   | ok
+ SELECT fx_ret_ts(-211813488000000001)   | 22008: timestamp out of range
+ SELECT fx_ret_ts(9223371331199999999)   | ok
+ SELECT fx_ret_ts(9223371331200000000)   | 22008: timestamp out of range
+ SELECT fx_ret_ts(9223372036854775806)   | 22008: timestamp out of range
+ SELECT fx_ret_ts(-9223372036854775807)  | 22008: timestamp out of range
+ SELECT fx_ret_ts(9223372036854775807)   | ok
+ SELECT fx_ret_ts(-9223372036854775808)  | ok
+ SELECT fx_ret_tstz(-211813488000000001) | 22008: timestamp out of range
+ SELECT fx_ret_tstz(9223371331200000000) | 22008: timestamp out of range
+ SELECT fx_ret_tstz(-211813488000000000) | ok
+ SELECT fx_ret_tstz(9223372036854775807) | ok
+(31 rows)
+
+-- interval extremes no version's interval_in parses: built by the function,
+-- checked field by field, and passed through SQL and back
+CREATE FUNCTION fx_ret_iv(m int, d int, us int8) RETURNS interval STRICT LANGUAGE plzig AS $$
+    return plzig.Interval{ .months = m, .days = d, .usecs = us };
+$$;
+SELECT m, d, us, fx_raw(NULL, NULL, NULL, NULL, NULL, fx_iv(fx_ret_iv(m, d, us)), NULL, NULL) AS raw
+FROM (VALUES (2147483647, 2147483646, 9223372036854775807), (-2147483647, -2147483648, -9223372036854775807),
+             (2147483646, 2147483647, 9223372036854775807), (-2147483648, 0, 1)) v(m, d, us);
+      m      |      d      |          us          |                            raw                             
+-------------+-------------+----------------------+------------------------------------------------------------
+  2147483647 |  2147483646 |  9223372036854775807 | - - - - - 2147483647/2147483646/9223372036854775807 - -
+ -2147483647 | -2147483648 | -9223372036854775807 | - - - - - -2147483647/-2147483648/-9223372036854775807 - -
+  2147483646 |  2147483647 |  9223372036854775807 | - - - - - 2147483646/2147483647/9223372036854775807 - -
+ -2147483648 |           0 |                    1 | - - - - - -2147483648/0/1 - -
+(4 rows)
+
+SELECT fx_ret_d(-2451545), fx_ret_d(2145031948), fx_ret_t(86400000000), fx_ret_tz(0, -57599),
+       fx_ret_ts(-211813488000000000), fx_ret_ts(9223371331199999999), fx_ret_tstz(9223371331199999999);
+   fx_ret_d    |   fx_ret_d    | fx_ret_t |     fx_ret_tz     |       fx_ret_ts        |          fx_ret_ts           |           fx_ret_tstz           
+---------------+---------------+----------+-------------------+------------------------+------------------------------+---------------------------------
+ 4714-11-24 BC | 5874897-12-31 | 24:00:00 | 00:00:00+15:59:59 | 4714-11-24 00:00:00 BC | 294276-12-31 23:59:59.999999 | 294276-12-31 23:59:59.999999+00
+(1 row)
+
+-- the typmod of a result is not kept by PostgreSQL (pg_proc has none): as
+-- for every other language, also PL/pgSQL
+CREATE FUNCTION fx_ts0(x timestamp) RETURNS timestamp(0) STRICT LANGUAGE plzig AS $$ return x; $$;
+CREATE FUNCTION fx_ts0_plpgsql(x timestamp) RETURNS timestamp(0) STRICT LANGUAGE plpgsql AS $$ BEGIN RETURN x; END $$;
+CREATE FUNCTION fx_ivd(x interval) RETURNS interval day STRICT LANGUAGE plzig AS $$ return x; $$;
+CREATE FUNCTION fx_ivd_plpgsql(x interval) RETURNS interval day STRICT LANGUAGE plpgsql AS $$ BEGIN RETURN x; END $$;
+SELECT fx_ts0('2024-01-01 12:34:56.789'), fx_ts0_plpgsql('2024-01-01 12:34:56.789'),
+       fx_ivd('1 day 02:03:04.5'), fx_ivd_plpgsql('1 day 02:03:04.5');
+         fx_ts0          |     fx_ts0_plpgsql      |      fx_ivd      |  fx_ivd_plpgsql  
+-------------------------+-------------------------+------------------+------------------
+ 2024-01-01 12:34:56.789 | 2024-01-01 12:34:56.789 | 1 day 02:03:04.5 | 1 day 02:03:04.5
+(1 row)
+
+-- a domain is passed as text, and its typmod and constraints are enforced
+-- by its input function, as for every domain
+CREATE DOMAIN fx_ts0_dom AS timestamp(0) CHECK (VALUE > '2000-01-01');
+CREATE FUNCTION fx_dom(x fx_ts0_dom) RETURNS fx_ts0_dom STRICT LANGUAGE plzig AS $$
+    return try std.fmt.allocPrint(plzig.allocator, "{s}.6", .{x});
+$$;
+SELECT fx_dom('2024-01-01 12:34:56'), fx_err('SELECT fx_dom(''2000-01-01'')');
+       fx_dom        |                                     fx_err                                      
+---------------------+---------------------------------------------------------------------------------
+ 2024-01-01 12:34:57 | 23514: value for domain fx_ts0_dom violates check constraint "fx_ts0_dom_check"
+(1 row)
+
+CREATE FUNCTION fx_dom_null() RETURNS fx_ts0_dom LANGUAGE plzig AS $$ return "1999-01-01"; $$;
+SELECT fx_err('SELECT fx_dom_null()');
+                                     fx_err                                      
+---------------------------------------------------------------------------------
+ 23514: value for domain fx_ts0_dom violates check constraint "fx_ts0_dom_check"
+(1 row)
+
+-- distinct types: mixing them up does not compile
+CREATE FUNCTION fx_mixup(x date) RETURNS timestamp STRICT LANGUAGE plzig AS $$ return x; $$;
+ERROR:  PL/Zig compilation failed
+CREATE FUNCTION fx_mixup2(x timestamp) RETURNS timestamptz STRICT LANGUAGE plzig AS $$ return x; $$;
+ERROR:  PL/Zig compilation failed
+CREATE FUNCTION fx_mixup3(x oid) RETURNS int8 STRICT LANGUAGE plzig AS $$ return x; $$;
+ERROR:  PL/Zig compilation failed
+-- SPI: every fixed-width column as a typed result (Result.row and cursor
+-- rows), passed straight back as a prepared-statement parameter, compared
+-- with the stored value in SQL
+CREATE FUNCTION fx_spi_roundtrip(use_cursor bool) RETURNS text STRICT LANGUAGE plzig AS $$
+    const q = "SELECT id, d, t, tz, ts, tstz, iv, u, o FROM fx_vals ORDER BY id";
+    var check = try plzig.spi.prepare(
+        "SELECT d IS NOT DISTINCT FROM $2 AND t IS NOT DISTINCT FROM $3 AND " ++
+        "tz::text IS NOT DISTINCT FROM $4::text AND ts IS NOT DISTINCT FROM $5 AND " ++
+        "tstz IS NOT DISTINCT FROM $6 AND iv::text IS NOT DISTINCT FROM $7::text AND " ++
+        "u IS NOT DISTINCT FROM $8 AND o IS NOT DISTINCT FROM $9 FROM fx_vals WHERE id = $1",
+        &.{ .int4, .date, .time, .timetz, .timestamp, .timestamptz, .interval, .uuid, .oid });
+    defer check.free();
+    const Row = struct {
+        id: i32, d: ?plzig.Date, t: ?plzig.Time, tz: ?plzig.TimeTz, ts: ?plzig.Timestamp,
+        tstz: ?plzig.TimestampTz, iv: ?plzig.Interval, u: ?plzig.Uuid, o: ?plzig.Oid,
+        fn of(r: plzig.Row) !@This() {
+            return .{ .id = try r.get(i32, 0), .d = try r.get(?plzig.Date, 1), .t = try r.get(?plzig.Time, 2),
+                .tz = try r.get(?plzig.TimeTz, 3), .ts = try r.get(?plzig.Timestamp, 4),
+                .tstz = try r.get(?plzig.TimestampTz, 5), .iv = try r.get(?plzig.Interval, 6),
+                .u = try r.get(?plzig.Uuid, 7), .o = try r.get(?plzig.Oid, 8) };
+        }
+    };
+    var rows: [16]Row = undefined;
+    var n: usize = 0;
+    if (use_cursor) {
+        var p = try plzig.spi.prepare(q, &.{});
+        var c = try p.open(.{});
+        while (try c.next()) |r| : (n += 1) rows[n] = try Row.of(r);
+    } else {
+        const res = try plzig.spi.execute(q, &.{});
+        while (n < res.rows) : (n += 1) rows[n] = try Row.of(try res.row(n));
+    }
+    var same: usize = 0;
+    for (rows[0..n]) |x| {
+        const r = try check.execute(.{ x.id, x.d, x.t, x.tz, x.ts, x.tstz, x.iv, x.u, x.o });
+        if (try (try r.row(0)).get(bool, 0)) same += 1;
+    }
+    return try std.fmt.allocPrint(plzig.allocator, "{d} rows, {d} identical", .{ n, same });
+$$;
+SELECT fx_spi_roundtrip(false), fx_spi_roundtrip(true);
+  fx_spi_roundtrip   |  fx_spi_roundtrip   
+---------------------+---------------------
+ 9 rows, 9 identical | 9 rows, 9 identical
+(1 row)
+
+-- the kinds of the result columns, and the types the parameters get
+CREATE FUNCTION fx_kinds() RETURNS text LANGUAGE plzig AS $$
+    const a = plzig.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    const r = try plzig.spi.execute("SELECT d, t, tz, ts, tstz, iv, u, o, o::regclass AS rc, d::text AS dt FROM fx_vals WHERE id = 1", &.{});
+    const row = try r.row(0);
+    for (0..row.len()) |i| try out.print(a, "{s} ", .{@tagName(try row.kind(i))});
+    var p = try plzig.spi.prepare(
+        "SELECT pg_typeof($1)::text || ' ' || pg_typeof($2) || ' ' || pg_typeof($3) || ' ' || pg_typeof($4) || ' ' || " ++
+        "pg_typeof($5) || ' ' || pg_typeof($6) || ' ' || pg_typeof($7) || ' ' || pg_typeof($8)",
+        &.{ .date, .time, .timetz, .timestamp, .timestamptz, .interval, .uuid, .oid });
+    const r2 = try p.execute(.{ null, null, null, null, null, null, null, null });
+    try out.print(a, "| {s}", .{try (try r2.row(0)).get([]const u8, 0)});
+    return out.items;
+$$;
+SELECT fx_kinds();
+                                                                                           fx_kinds                                                                                           
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ date time timetz timestamp timestamptz interval uuid oid other text | date time without time zone time with time zone timestamp without time zone timestamp with time zone interval uuid oid
+(1 row)
+
+-- SPI parameters are range-checked like results
+CREATE FUNCTION fx_bad_param(which int) RETURNS text STRICT LANGUAGE plzig AS $$
+    var p = try plzig.spi.prepare("SELECT $1::text, $2::text, $3::text, $4::text, $5::text",
+        &.{ .date, .time, .timetz, .timestamp, .timestamptz });
+    const r = try p.execute(.{
+        plzig.Date{ .days = if (which == 1) 2145031949 else 0 },
+        plzig.Time{ .usecs = if (which == 2) -1 else 0 },
+        plzig.TimeTz{ .usecs = 0, .zone = if (which == 3) 57600 else 0 },
+        plzig.Timestamp{ .usecs = if (which == 4) 9223371331200000000 else 0 },
+        plzig.TimestampTz{ .usecs = if (which == 5) -211813488000000001 else 0 },
+    });
+    return try (try r.row(0)).get([]const u8, 0);
+$$;
+SELECT w, fx_err(format('SELECT fx_bad_param(%s)', w)) FROM generate_series(0, 5) w;
+ w |                   fx_err                   
+---+--------------------------------------------
+ 0 | ok
+ 1 | 22008: date out of range
+ 2 | 22008: time out of range
+ 3 | 22009: time zone displacement out of range
+ 4 | 22008: timestamp out of range
+ 5 | 22008: timestamp out of range
+(6 rows)
+
+-- a mismatching parameter kind is an error, never a conversion
+CREATE FUNCTION fx_kind_mismatch() RETURNS text LANGUAGE plzig AS $$
+    var p = try plzig.spi.prepare("SELECT $1", &.{.timestamptz});
+    _ = try p.execute(.{plzig.Timestamp{ .usecs = 0 }});
+    return "converted";
+$$;
+SELECT fx_err('SELECT fx_kind_mismatch()');
+                                                               fx_err                                                                
+-------------------------------------------------------------------------------------------------------------------------------------
+ 42804: PL/Zig: parameter $1 of the prepared statement is of type timestamp with time zone, but a value of kind timestamp was passed
+(1 row)
+
+CREATE FUNCTION fx_get_mismatch() RETURNS text LANGUAGE plzig AS $$
+    const r = try plzig.spi.execute("SELECT now()", &.{});
+    _ = try (try r.row(0)).get(plzig.Timestamp, 0);
+    return "converted";
+$$;
+SELECT fx_err('SELECT fx_get_mismatch()');
+                   fx_err                   
+--------------------------------------------
+ 38000: plzig function failed: TypeMismatch
+(1 row)
+
+-- many rows: the sum of the raw values equals SQL's
+CREATE FUNCTION fx_sum() RETURNS int8 LANGUAGE plzig AS $$
+    var p = try plzig.spi.prepare("SELECT d, ts FROM generate_series(1, 20000) g, " ++
+        "LATERAL (SELECT date '1900-01-01' + g * 3 AS d, timestamp '1900-01-01' + g * interval '3 days 1 second' AS ts) x", &.{});
+    var c = try p.open(.{});
+    var sum: i64 = 0;
+    while (try c.next()) |r| sum += (try r.get(plzig.Date, 0)).days + @divTrunc((try r.get(plzig.Timestamp, 1)).usecs, 1000000);
+    return sum;
+$$;
+SELECT fx_sum() = (SELECT sum((date '1900-01-01' + g * 3) - date '2000-01-01' +
+                              (extract(epoch FROM timestamp '1900-01-01' + g * interval '3 days 1 second') - 946684800)::int8)
+                   FROM generate_series(1, 20000) g) AS sum_matches;
+ sum_matches 
+-------------
+ t
+(1 row)
+
+DROP TABLE fx_vals CASCADE;
+NOTICE:  drop cascades to function fx_raw_sql(fx_vals)

@@ -67,8 +67,21 @@ pub fn decode(comptime T: type, slot: *const Slot) T {
         const p: [*]const u8 = @ptrFromInt(@as(usize, @intCast(slot.val)));
         return p[0..slot.len];
     }
+    if (T == plzig.Date) return .{ .days = @truncate(@as(i64, @bitCast(slot.val))) };
+    if (T == plzig.Time or T == plzig.Timestamp or T == plzig.TimestampTz) return .{ .usecs = @bitCast(slot.val) };
+    if (T == plzig.TimeTz) return .{ .usecs = @bitCast(slot.val), .zone = @bitCast(slot.len) };
+    if (T == plzig.Oid) return .{ .value = @truncate(slot.val) };
+    if (T == plzig.Interval or T == plzig.Uuid) {
+        if (slot.len != 16) plzig.raiseMsg("plzig: invalid fixed-width argument");
+        const p: *align(1) const T = @ptrFromInt(@as(usize, @intCast(slot.val)));
+        return p.*;
+    }
     @compileError("plzig: unsupported parameter type " ++ @typeName(T));
 }
+
+/// Where a 16-byte result (interval, uuid) is placed for the host to copy
+/// after plzig_call has returned: outside the stack and the arena.
+var fixed_result: [16]u8 align(8) = undefined;
 
 pub fn encode(comptime T: type, v: T, out: *Slot) void {
     out.* = .{ .val = 0, .len = 0, .is_null = 0 };
@@ -83,6 +96,19 @@ pub fn encode(comptime T: type, v: T, out: *Slot) void {
     } else if (T == []const u8 or T == []u8) {
         out.val = @intFromPtr(v.ptr);
         out.len = @intCast(v.len);
+    } else if (T == plzig.Date) {
+        out.val = @bitCast(@as(i64, v.days));
+    } else if (T == plzig.Time or T == plzig.Timestamp or T == plzig.TimestampTz) {
+        out.val = @bitCast(v.usecs);
+    } else if (T == plzig.TimeTz) {
+        out.val = @bitCast(v.usecs);
+        out.len = @bitCast(v.zone);
+    } else if (T == plzig.Oid) {
+        out.val = v.value;
+    } else if (T == plzig.Interval or T == plzig.Uuid) {
+        @memcpy(&fixed_result, s.mem.asBytes(&v));
+        out.val = @intFromPtr(&fixed_result);
+        out.len = 16;
     } else {
         @compileError("plzig: unsupported return type " ++ @typeName(T));
     }

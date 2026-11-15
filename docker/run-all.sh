@@ -148,7 +148,7 @@ job_hardened() {
 # Valgrind: the regress suite minus the tests that loop tens of thousands of
 # times through the interpreter (leaks: 60k+ calls; usage: deep recursion and
 # parallel workers) -- impractically slow under Valgrind
-vg_regress=${PLZIG_VALGRIND_REGRESS:-setup basics types types_more signatures encoding errors spi spi_prepared spi_cursor sandbox adversarial resources lifecycle}
+vg_regress=${PLZIG_VALGRIND_REGRESS:-setup basics types types_more types_fixed signatures encoding errors spi spi_prepared spi_cursor sandbox adversarial resources lifecycle}
 job_valgrind() {
     local v=$1
     build_hardened plzig-valgrind "$v" 1 || { echo "LAYER build: FAIL"; return 1; }

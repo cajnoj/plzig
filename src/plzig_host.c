@@ -39,9 +39,11 @@
 #include "nodes/parsenodes.h"
 #include "parser/parser.h"
 #include "utils/builtins.h"
+#include "utils/date.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/portal.h"
+#include "utils/timestamp.h"
 
 #include "wasm_export.h"
 
@@ -396,6 +398,7 @@ typedef struct PlzigRowCol
 	uint64		val;			/* scalar kinds */
 	const char *data;			/* byte kinds (in the row context or tuple) */
 	uint32		len;
+	int32		zone;			/* timetz: the zone, written to len */
 	uint16		kind;
 	bool		isnull;
 } PlzigRowCol;
@@ -640,6 +643,22 @@ kind_name(uint32 kind)
 			return "bytea";
 		case PLZIG_KIND_OTHER:
 			return "other";
+		case PLZIG_KIND_DATE:
+			return "date";
+		case PLZIG_KIND_TIME:
+			return "time";
+		case PLZIG_KIND_TIMETZ:
+			return "timetz";
+		case PLZIG_KIND_TIMESTAMP:
+			return "timestamp";
+		case PLZIG_KIND_TIMESTAMPTZ:
+			return "timestamptz";
+		case PLZIG_KIND_INTERVAL:
+			return "interval";
+		case PLZIG_KIND_UUID:
+			return "uuid";
+		case PLZIG_KIND_OID:
+			return "oid";
 	}
 	return "invalid";
 }
@@ -766,6 +785,31 @@ decode_typed_params(wasm_exec_env_t env, SPIPlanPtr plan, uint32 params_ptr,
 					if (v->len > 0)
 						memcpy(VARDATA(b), src, v->len);
 					(*values)[i] = PointerGetDatum(b);
+					break;
+				}
+			case PLZIG_KIND_DATE:
+			case PLZIG_KIND_TIME:
+			case PLZIG_KIND_TIMETZ:
+			case PLZIG_KIND_TIMESTAMP:
+			case PLZIG_KIND_TIMESTAMPTZ:
+			case PLZIG_KIND_OID:
+				/* range-checked like the type's receive function would */
+				(*values)[i] = plzig_scalar_from_guest(plzig_kind_type(want), v->val, v->len,
+													   psprintf("parameter $%u", i + 1));
+				break;
+			case PLZIG_KIND_INTERVAL:
+			case PLZIG_KIND_UUID:
+				{
+					char		b[PLZIG_FIXED16];
+					const char *where = psprintf("parameter $%u", i + 1);
+
+					plzig_fixed16_check_len(plzig_kind_type(want), v->len, where);
+					if (v->val > PG_UINT32_MAX)
+						goto bad_pointer;
+					memcpy(b, plzig_guest_ptr(wasm_runtime_get_module_inst(env),
+											  (uint32) v->val, PLZIG_FIXED16),
+						   PLZIG_FIXED16);
+					(*values)[i] = plzig_fixed16_from_guest(plzig_kind_type(want), b, v->len, where);
 					break;
 				}
 		}
@@ -942,6 +986,35 @@ rowbuf_load(PlzigRowBuf *rb, HeapTuple tup, TupleDesc td)
 					len = VARSIZE_ANY_EXHDR(v);
 					break;
 				}
+			case PLZIG_KIND_DATE:
+				c->val = (uint64) (int64) DatumGetDateADT(values[i]);
+				break;
+			case PLZIG_KIND_TIME:
+				c->val = (uint64) DatumGetTimeADT(values[i]);
+				break;
+			case PLZIG_KIND_TIMETZ:
+				{
+					TimeTzADT  *t = DatumGetTimeTzADTP(values[i]);
+
+					c->val = (uint64) t->time;
+					c->zone = t->zone;
+					break;
+				}
+			case PLZIG_KIND_TIMESTAMP:
+				c->val = (uint64) DatumGetTimestamp(values[i]);
+				break;
+			case PLZIG_KIND_TIMESTAMPTZ:
+				c->val = (uint64) DatumGetTimestampTz(values[i]);
+				break;
+			case PLZIG_KIND_OID:
+				c->val = (uint64) DatumGetObjectId(values[i]);
+				break;
+			case PLZIG_KIND_INTERVAL:
+			case PLZIG_KIND_UUID:
+				/* fixed-length by-reference: the 16 bytes in the tuple */
+				c->data = DatumGetPointer(values[i]);
+				len = PLZIG_FIXED16;
+				break;
 			default:
 				c->data = OutputFunctionCall(&ci->out, values[i]);
 				len = strlen(c->data);
@@ -1000,8 +1073,7 @@ rowbuf_write(wasm_exec_env_t env, PlzigRowBuf *rb, uint32 buf, uint32 buf_len)
 		v.is_null = c->isnull ? 1 : 0;
 		if (!c->isnull)
 		{
-			if (c->kind == PLZIG_KIND_TEXT || c->kind == PLZIG_KIND_BYTEA ||
-				c->kind == PLZIG_KIND_OTHER)
+			if (plzig_kind_is_bytes(c->kind))
 			{
 				Assert(off + c->len <= rb->size);
 				v.len = c->len;
@@ -1011,7 +1083,11 @@ rowbuf_write(wasm_exec_env_t env, PlzigRowBuf *rb, uint32 buf, uint32 buf_len)
 				off += align8(c->len);
 			}
 			else
+			{
 				v.val = c->val;
+				if (c->kind == PLZIG_KIND_TIMETZ)
+					v.len = (uint32) c->zone;
+			}
 		}
 		memcpy(base + (Size) i * sizeof(PlzigValue), &v, sizeof(v));
 	}

@@ -232,16 +232,18 @@ SELECT t_bytea('\x0102'::bytea), t_bytea(''::bytea);
  \x010200ff | \x00ff
 (1 row)
 
--- everything else travels as its text representation
-CREATE FUNCTION t_io(n numeric, d date, a int[], j jsonb) RETURNS text LANGUAGE plzig AS $$
+-- every type without a native mapping travels as its text representation
+-- (the natively mapped date/time, uuid, oid, numeric and jsonb types are
+-- tested in types_fixed, types_numeric and types_jsonb)
+CREATE FUNCTION t_io(n inet, d daterange, a int[], j json) RETURNS text LANGUAGE plzig AS $$
     return try std.fmt.allocPrint(plzig.allocator, "{s} {s} {s} {s}",
         .{ n orelse "null", d orelse "null", a orelse "null", j orelse "null" });
 $$;
 SET datestyle = 'ISO, YMD';
-SELECT t_io(3.14159, '2024-02-29', ARRAY[1,NULL,3], '{"b": 1, "a": [true]}');
-                        t_io                         
------------------------------------------------------
- 3.14159 2024-02-29 {1,NULL,3} {"a": [true], "b": 1}
+SELECT t_io('192.168.0.1/24', '[2024-02-29,2024-03-01]', ARRAY[1,NULL,3], '{"b": 1, "a": [true]}');
+                                  t_io                                   
+-------------------------------------------------------------------------
+ 192.168.0.1/24 [2024-02-29,2024-03-02) {1,NULL,3} {"b": 1, "a": [true]}
 (1 row)
 
 SELECT t_io(NULL, NULL, NULL, NULL);
@@ -250,27 +252,27 @@ SELECT t_io(NULL, NULL, NULL, NULL);
  null null null null
 (1 row)
 
-CREATE FUNCTION t_numeric(x numeric) RETURNS numeric STRICT LANGUAGE plzig AS $$
+CREATE FUNCTION t_bits(x bit varying) RETURNS bit varying STRICT LANGUAGE plzig AS $$
     return try std.fmt.allocPrint(plzig.allocator, "{s}0", .{x});
 $$;
-SELECT t_numeric(1.5);
- t_numeric 
------------
-      1.50
+SELECT t_bits(B'101');
+ t_bits 
+--------
+ 1010
 (1 row)
 
 -- results go through the type's input function: invalid values are rejected
-CREATE FUNCTION t_date(s text) RETURNS date STRICT LANGUAGE plzig AS $$
+CREATE FUNCTION t_inet(s text) RETURNS inet STRICT LANGUAGE plzig AS $$
     return s;
 $$;
-SELECT t_date('2024-01-31');
-   t_date   
-------------
- 2024-01-31
+SELECT t_inet('10.0.0.1');
+  t_inet  
+----------
+ 10.0.0.1
 (1 row)
 
-SELECT t_date('2024-02-30');
-ERROR:  date/time field value out of range: "2024-02-30"
+SELECT t_inet('10.0.0.256');
+ERROR:  invalid input syntax for type inet: "10.0.0.256"
 -- domains: constraints are enforced by PostgreSQL on the result
 CREATE DOMAIN small_pos AS int CHECK (VALUE BETWEEN 1 AND 10);
 CREATE FUNCTION t_domain(x small_pos) RETURNS small_pos STRICT LANGUAGE plzig AS $$

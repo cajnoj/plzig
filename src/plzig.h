@@ -17,7 +17,7 @@
 #include "lib/stringinfo.h"
 
 #define PLZIG_VERSION_STR		"1.0"
-#define PLZIG_ABI_VERSION		3
+#define PLZIG_ABI_VERSION		4
 /*
  * The Zig version the source validator was built with, from the Makefile
  * (ZIG_VERSION).  The backend runs only a compiler reporting exactly this.
@@ -80,6 +80,15 @@ typedef enum PlzigTypeKind
 	PLZIG_T_TEXT,				/* text: bytes in, bytes out (encoding checked) */
 	PLZIG_T_TEXTIO,				/* varchar/bpchar: bytes in, input function out */
 	PLZIG_T_BYTEA,
+	/* fixed-width types: raw values, range-checked on the way back */
+	PLZIG_T_DATE,				/* DateADT in val */
+	PLZIG_T_TIME,				/* TimeADT in val */
+	PLZIG_T_TIMETZ,				/* time in val, zone in len */
+	PLZIG_T_TIMESTAMP,			/* Timestamp in val */
+	PLZIG_T_TIMESTAMPTZ,		/* TimestampTz in val */
+	PLZIG_T_INTERVAL,			/* 16-byte Interval, out of line */
+	PLZIG_T_UUID,				/* 16 bytes, out of line */
+	PLZIG_T_OID,				/* Oid in val */
 	PLZIG_T_IO					/* anything else: text I/O representation */
 } PlzigTypeKind;
 
@@ -116,6 +125,18 @@ typedef struct PlzigSlot
 #define PLZIG_KIND_TEXT		7		/* text, varchar, bpchar: the value's bytes */
 #define PLZIG_KIND_BYTEA	8
 #define PLZIG_KIND_OTHER	9		/* result only: text representation */
+#define PLZIG_KIND_DATE		10
+#define PLZIG_KIND_TIME		11
+#define PLZIG_KIND_TIMETZ	12		/* time in val, zone in len */
+#define PLZIG_KIND_TIMESTAMP	13
+#define PLZIG_KIND_TIMESTAMPTZ	14
+#define PLZIG_KIND_INTERVAL	15		/* 16 bytes, out of line */
+#define PLZIG_KIND_UUID		16		/* 16 bytes, out of line */
+#define PLZIG_KIND_OID		17
+#define PLZIG_KIND_MAX		17
+
+/* size of the out-of-line fixed-width values (interval, uuid) */
+#define PLZIG_FIXED16		16
 
 /* Typed value (params of prepared statements, result rows), 16 bytes */
 typedef struct PlzigValue
@@ -128,9 +149,16 @@ typedef struct PlzigValue
 
 extern PlzigTypeKind plzig_type_kind(Oid typid);
 extern uint16 plzig_value_kind(Oid typid);
+extern bool plzig_kind_is_bytes(uint16 kind);
+extern PlzigTypeKind plzig_kind_type(uint16 kind);
+extern Datum plzig_scalar_from_guest(PlzigTypeKind k, uint64 val, uint32 len,
+									 const char *where);
+extern void plzig_fixed16_check_len(PlzigTypeKind k, uint32 len, const char *where);
+extern Datum plzig_fixed16_from_guest(PlzigTypeKind k, const char *bytes, uint32 len,
+									  const char *where);
 extern Oid	plzig_param_kind_oid(uint32 kind);
 extern uint16 plzig_param_oid_kind(Oid typid);
-extern const char *plzig_zig_type_name(PlzigTypeKind kind);
+extern const char *plzig_zig_type_name(PlzigTypeKind kind, bool for_result);
 extern void plzig_type_info_init(PlzigTypeInfo *ti, Oid typid, bool for_result,
 								 MemoryContext mcxt);
 
