@@ -339,4 +339,20 @@ pub const host = struct {
         std.debug.assert(cursor == 0x77_0003);
         cursor_closes += 1;
     }
+
+    /// as src/plzig_host.c host_numeric_op, with a fake operation: the
+    /// result is operand a (or b for op 2) unchanged; -len if it does not fit
+    pub fn numeric_op(op: u32, a_ptr: [*]const u8, a_len: u32, b_ptr: [*]const u8, b_len: u32, arg: i32, out_ptr: [*]u8, out_cap: u32) i32 {
+        numeric_calls += 1;
+        last_numeric_op = op;
+        last_numeric_arg = arg;
+        const r = if (op == 2) b_ptr[0..b_len] else a_ptr[0..a_len];
+        if (r.len > out_cap) return -@as(i32, @intCast(r.len));
+        @memcpy(out_ptr[0..r.len], r);
+        return @intCast(r.len);
+    }
 };
+
+pub var numeric_calls: usize = 0;
+pub var last_numeric_op: u32 = 0;
+pub var last_numeric_arg: i32 = 0;

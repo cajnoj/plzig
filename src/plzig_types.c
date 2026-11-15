@@ -16,6 +16,7 @@
 
 #include "catalog/pg_type.h"
 #include "datatype/timestamp.h"
+#include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/lsyscache.h"
 #include "utils/timestamp.h"
@@ -63,6 +64,8 @@ plzig_type_kind(Oid typid)
 			return PLZIG_T_UUID;
 		case OIDOID:
 			return PLZIG_T_OID;
+		case NUMERICOID:
+			return PLZIG_T_NUMERIC;
 		default:
 			return PLZIG_T_IO;
 	}
@@ -108,6 +111,8 @@ plzig_zig_type_name(PlzigTypeKind kind, bool for_result)
 			return "plzig.Uuid";
 		case PLZIG_T_OID:
 			return "plzig.Oid";
+		case PLZIG_T_NUMERIC:
+			return "plzig.Numeric";
 		case PLZIG_T_TEXT:
 		case PLZIG_T_TEXTIO:
 		case PLZIG_T_BYTEA:
@@ -190,6 +195,8 @@ plzig_value_kind(Oid typid)
 			return PLZIG_KIND_UUID;
 		case PLZIG_T_OID:
 			return PLZIG_KIND_OID;
+		case PLZIG_T_NUMERIC:
+			return PLZIG_KIND_NUMERIC;
 		case PLZIG_T_VOID:
 		case PLZIG_T_IO:
 			break;
@@ -211,6 +218,7 @@ plzig_kind_is_bytes(uint16 kind)
 		case PLZIG_KIND_OTHER:
 		case PLZIG_KIND_INTERVAL:
 		case PLZIG_KIND_UUID:
+		case PLZIG_KIND_NUMERIC:
 			return true;
 		default:
 			return false;
@@ -360,6 +368,65 @@ plzig_fixed16_from_guest(PlzigTypeKind k, const char *bytes, uint32 len, const c
 }
 
 /*
+ * numeric from the binary wire format (numeric_send) a guest passed: a
+ * result, an SPI parameter or an operand of numeric_op.  `bytes` is a host
+ * copy of the guest's bytes.  The length must be exactly that of the digits
+ * the header announces (checked here first, so that numeric_recv never runs
+ * out of data: its "insufficient data left in message" would be a protocol
+ * violation, SQLSTATE class 08); everything else -- the sign, the scale,
+ * every digit < 10000, the weight and scale limits -- is checked by
+ * numeric_recv, the server's validating input path for untrusted bytes,
+ * called with typmod -1 (function results and prepared-statement parameters
+ * have no typmod).
+ */
+void
+plzig_numeric_check_len(uint32 len, const char *where)
+{
+	if (len < 8 || len > PLZIG_MAX_NUMERIC_WIRE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+				 errmsg("PL/Zig: invalid length %u of numeric value", len),
+				 errdetail("The PL/Zig function passed it as %s.", where)));
+}
+
+Datum
+plzig_numeric_from_wire(const char *bytes, uint32 len, const char *where)
+{
+	StringInfoData buf;
+	uint32		ndigits;
+	Datum		d;
+
+	plzig_numeric_check_len(len, where);	/* callers check it before copying */
+	ndigits = ((uint32) (uint8) bytes[0] << 8) | (uint8) bytes[1];
+	if (len != 8 + 2 * ndigits)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+				 errmsg("PL/Zig: invalid length %u of numeric value with %u digits", len, ndigits),
+				 errdetail("The PL/Zig function passed it as %s.", where)));
+
+	/* a read-only StringInfo over the copy (initReadOnlyStringInfo is 17+) */
+	buf.data = (char *) bytes;
+	buf.len = (int) len;
+	buf.maxlen = (int) len;
+	buf.cursor = 0;
+	d = DirectFunctionCall3(numeric_recv, PointerGetDatum(&buf),
+							ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1));
+	if (buf.cursor != buf.len)	/* cannot happen after the length check */
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+				 errmsg("PL/Zig: invalid numeric value"),
+				 errdetail("The PL/Zig function passed it as %s.", where)));
+	return d;
+}
+
+/* The wire format (numeric_send) of a numeric, as a palloc'd bytea. */
+struct varlena *
+plzig_numeric_to_wire(Datum num)
+{
+	return (struct varlena *) DatumGetPointer(DirectFunctionCall1(numeric_send, num));
+}
+
+/*
  * The parameter type a guest may declare for a prepared statement: only
  * these kinds, mapped to fixed OIDs (the guest never supplies an OID).
  * InvalidOid for anything else.
@@ -401,6 +468,8 @@ plzig_param_kind_oid(uint32 kind)
 			return UUIDOID;
 		case PLZIG_KIND_OID:
 			return OIDOID;
+		case PLZIG_KIND_NUMERIC:
+			return NUMERICOID;
 		default:
 			return InvalidOid;
 	}
@@ -444,6 +513,8 @@ plzig_param_oid_kind(Oid typid)
 			return PLZIG_KIND_UUID;
 		case OIDOID:
 			return PLZIG_KIND_OID;
+		case NUMERICOID:
+			return PLZIG_KIND_NUMERIC;
 		default:
 			return PLZIG_KIND_NULL;
 	}

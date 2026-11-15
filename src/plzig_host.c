@@ -154,6 +154,21 @@ guest_text(wasm_exec_env_t env, uint32 ptr, uint32 len, uint32 maxlen,
 	return t;
 }
 
+/*
+ * A numeric in the wire format from guest memory: length bounded first, then
+ * copied, then validated by numeric_recv (plzig_numeric_from_wire).
+ */
+static Datum
+guest_numeric(wasm_exec_env_t env, uint32 ptr, uint32 len, const char *where)
+{
+	char	   *copy;
+
+	plzig_numeric_check_len(len, where);	/* before copying */
+	copy = palloc(len);
+	memcpy(copy, plzig_guest_ptr(wasm_runtime_get_module_inst(env), ptr, len), len);
+	return plzig_numeric_from_wire(copy, len, where);
+}
+
 /* ---------------------------------------------------------------------
  * log / raise / panic
  * ---------------------------------------------------------------------
@@ -659,6 +674,8 @@ kind_name(uint32 kind)
 			return "uuid";
 		case PLZIG_KIND_OID:
 			return "oid";
+		case PLZIG_KIND_NUMERIC:
+			return "numeric";
 	}
 	return "invalid";
 }
@@ -812,6 +829,12 @@ decode_typed_params(wasm_exec_env_t env, SPIPlanPtr plan, uint32 params_ptr,
 					(*values)[i] = plzig_fixed16_from_guest(plzig_kind_type(want), b, v->len, where);
 					break;
 				}
+			case PLZIG_KIND_NUMERIC:
+				if (v->val > PG_UINT32_MAX && v->len > 0)
+					goto bad_pointer;
+				(*values)[i] = guest_numeric(env, (uint32) (v->val & PG_UINT32_MAX), v->len,
+											 psprintf("parameter $%u", i + 1));
+				break;
 		}
 		continue;
 
@@ -1015,6 +1038,15 @@ rowbuf_load(PlzigRowBuf *rb, HeapTuple tup, TupleDesc td)
 				c->data = DatumGetPointer(values[i]);
 				len = PLZIG_FIXED16;
 				break;
+			case PLZIG_KIND_NUMERIC:
+				{
+					/* the wire format, in the row context */
+					struct varlena *w = plzig_numeric_to_wire(values[i]);
+
+					c->data = VARDATA_ANY(w);
+					len = VARSIZE_ANY_EXHDR(w);
+					break;
+				}
 			default:
 				c->data = OutputFunctionCall(&ci->out, values[i]);
 				len = strlen(c->data);
@@ -1991,6 +2023,109 @@ host_spi_cursor_close(wasm_exec_env_t env, uint64 handle)
 	PG_END_TRY();
 }
 
+/* ---------------------------------------------------------------------
+ * numeric arithmetic
+ * ---------------------------------------------------------------------
+ */
+
+/*
+ * numeric_op(op, a, a_len, b, b_len, arg, out, out_cap): one arithmetic
+ * operation by PostgreSQL's own numeric functions, so the result is exactly
+ * PostgreSQL's.  Operands and the result are in the binary wire format
+ * (numeric_send); every operand is validated by numeric_recv first.  b is
+ * read only by the binary operations, arg only by round/trunc (the scale).
+ * The result is written to [out, out + len) if len <= out_cap and len is
+ * returned; otherwise nothing is written and -len is returned, so that the
+ * guest can call again with a large enough buffer (the operation is
+ * computed again: it is deterministic).  Division by zero, overflow etc.
+ * are SQL errors like any other.
+ */
+static int32
+host_numeric_op(wasm_exec_env_t env, uint32 op, uint32 a_ptr, uint32 a_len,
+				uint32 b_ptr, uint32 b_len, int32 arg, uint32 out_ptr, uint32 out_cap)
+{
+	PlzigCallCtx *ctx = host_ctx(env);
+	MemoryContext oldcxt = CurrentMemoryContext;
+	int32		result = 0;
+
+	if (ctx == NULL)
+		return 0;
+	PG_TRY();
+	{
+		Datum		a;
+		Datum		b = (Datum) 0;
+		Datum		r;
+		struct varlena *w;
+		uint32		n;
+		bool		binary;
+
+		MemoryContextReset(ctx->scratch);
+		MemoryContextSwitchTo(ctx->scratch);
+		if (op < 1 || op > PLZIG_NUMERIC_OP_MAX)
+			ereport(ERROR,
+					(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+					 errmsg("PL/Zig: invalid numeric operation %u", op)));
+		binary = (op <= PLZIG_NUMERIC_MOD);
+		a = guest_numeric(env, a_ptr, a_len, "an operand");
+		if (binary)
+			b = guest_numeric(env, b_ptr, b_len, "an operand");
+		switch (op)
+		{
+			case PLZIG_NUMERIC_ADD:
+				r = DirectFunctionCall2(numeric_add, a, b);
+				break;
+			case PLZIG_NUMERIC_SUB:
+				r = DirectFunctionCall2(numeric_sub, a, b);
+				break;
+			case PLZIG_NUMERIC_MUL:
+				r = DirectFunctionCall2(numeric_mul, a, b);
+				break;
+			case PLZIG_NUMERIC_DIV:
+				r = DirectFunctionCall2(numeric_div, a, b);
+				break;
+			case PLZIG_NUMERIC_DIV_TRUNC:
+				r = DirectFunctionCall2(numeric_div_trunc, a, b);
+				break;
+			case PLZIG_NUMERIC_MOD:
+				r = DirectFunctionCall2(numeric_mod, a, b);
+				break;
+			case PLZIG_NUMERIC_ROUND:
+				r = DirectFunctionCall2(numeric_round, a, Int32GetDatum(arg));
+				break;
+			case PLZIG_NUMERIC_TRUNC:
+				r = DirectFunctionCall2(numeric_trunc, a, Int32GetDatum(arg));
+				break;
+			case PLZIG_NUMERIC_ABS:
+				r = DirectFunctionCall1(numeric_abs, a);
+				break;
+			default:			/* PLZIG_NUMERIC_NEG */
+				r = DirectFunctionCall1(numeric_uminus, a);
+				break;
+		}
+		w = plzig_numeric_to_wire(r);
+		n = VARSIZE_ANY_EXHDR(w);
+		if (n > PLZIG_MAX_NUMERIC_WIRE)	/* cannot happen: ndigits is 16 bits */
+			elog(ERROR, "PL/Zig: numeric result too large");
+		if (n <= out_cap)
+		{
+			memcpy(plzig_guest_ptr(wasm_runtime_get_module_inst(env), out_ptr, n),
+				   VARDATA_ANY(w), n);
+			result = (int32) n;
+		}
+		else
+			result = -(int32) n;
+		MemoryContextSwitchTo(oldcxt);
+		MemoryContextReset(ctx->scratch);
+	}
+	PG_CATCH();
+	{
+		host_catch(ctx, env, oldcxt);
+		result = 0;
+	}
+	PG_END_TRY();
+	return result;
+}
+
 /*
  * Called by the call handler after a successful guest call: close every
  * cursor the guest left open, then end the SPI connection (which frees all
@@ -2040,6 +2175,7 @@ static NativeSymbol plzig_native_symbols[] = {
 	{"spi_cursor_open_plan", (void *) host_spi_cursor_open_plan, "(Iii)I", NULL},
 	{"spi_cursor_fetch", (void *) host_spi_cursor_fetch, "(Iii)I", NULL},
 	{"spi_cursor_close", (void *) host_spi_cursor_close, "(I)", NULL},
+	{"numeric_op", (void *) host_numeric_op, "(iiiiiiii)i", NULL},
 };
 
 void *

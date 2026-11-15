@@ -71,6 +71,12 @@ pub fn decode(comptime T: type, slot: *const Slot) T {
     if (T == plzig.Time or T == plzig.Timestamp or T == plzig.TimestampTz) return .{ .usecs = @bitCast(slot.val) };
     if (T == plzig.TimeTz) return .{ .usecs = @bitCast(slot.val), .zone = @bitCast(slot.len) };
     if (T == plzig.Oid) return .{ .value = @truncate(slot.val) };
+    if (T == plzig.Numeric) {
+        // numeric_send of the argument: valid
+        if (slot.len == 0) return plzig.Numeric.zero;
+        const p: [*]const u8 = @ptrFromInt(@as(usize, @intCast(slot.val)));
+        return .{ .wire = p[0..slot.len] };
+    }
     if (T == plzig.Interval or T == plzig.Uuid) {
         if (slot.len != 16) plzig.raiseMsg("plzig: invalid fixed-width argument");
         const p: *align(1) const T = @ptrFromInt(@as(usize, @intCast(slot.val)));
@@ -105,6 +111,10 @@ pub fn encode(comptime T: type, v: T, out: *Slot) void {
         out.len = @bitCast(v.zone);
     } else if (T == plzig.Oid) {
         out.val = v.value;
+    } else if (T == plzig.Numeric) {
+        // checked by the host with numeric_recv
+        out.val = @intFromPtr(v.wire.ptr);
+        out.len = @intCast(@min(v.wire.len, 0xffff_ffff));
     } else if (T == plzig.Interval or T == plzig.Uuid) {
         @memcpy(&fixed_result, s.mem.asBytes(&v));
         out.val = @intFromPtr(&fixed_result);

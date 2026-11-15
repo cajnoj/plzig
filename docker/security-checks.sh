@@ -311,6 +311,27 @@ CREATE OR REPLACE FUNCTION hostile(what int) RETURNS int STRICT LANGUAGE plzig A
             };
             _ = h.spi_execute_plan(pf.handle, &vals, 1);
         },
+        // numeric: numeric_op and parameters with forged operands, lengths, buffers
+        58, 59, 60, 61, 62, 63, 64 => {
+            const one = "\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01"; // 1
+            switch (what) {
+                58 => _ = h.numeric_op(1, P([*]const u8, bad), 10, one, one.len, 0, &buf, buf.len),
+                59 => _ = h.numeric_op(99, one, one.len, one, one.len, 0, &buf, buf.len),
+                60 => _ = h.numeric_op(1, one, one.len, one, one.len, 0, P([*]u8, bad), 256),
+                61 => _ = h.numeric_op(9, one, 0xffff_ffff, one, one.len, 0, &buf, buf.len),
+                62 => {
+                    @memset(&buf, 0xaa);
+                    const r = h.numeric_op(1, one, one.len, one, one.len, 0, &buf, 9);
+                    if (r == -10 and buf[0] == 0xaa and buf[9] == 0xaa) plzig.raiseMsg("numeric_op: too small, nothing written");
+                },
+                63, 64 => {
+                    const pn = try plzig.spi.prepare("SELECT $1::text", &.{.numeric});
+                    vals[0] = .{ .val = if (what == 63) bad else 1 << 40, .len = 10, .kind = 18, .is_null = 0 };
+                    _ = h.spi_execute_plan(pn.handle, &vals, 1);
+                },
+                else => {},
+            }
+        },
         else => return 0,
     }
     return 1;
@@ -385,9 +406,16 @@ done <<'CASES'
 55|invalid SPI parameter pointer
 56|time out of range
 57|timestamp out of range
+58|guest passed an invalid memory range
+59|invalid numeric operation 99
+60|guest passed an invalid memory range
+61|invalid length 4294967295 of numeric value
+62|numeric_op: too small, nothing written
+63|guest passed an invalid memory range
+64|invalid SPI parameter pointer
 0|0
 CASES
-if [ "$n" -eq 58 ]; then pass "hostile guest: all 57 forged calls end in a clean ERROR"; fi
+if [ "$n" -eq 65 ]; then pass "hostile guest: all 64 forged calls end in a clean ERROR"; fi
 expect "hostile guest: backend still healthy" "4242" "SELECT 4242;"
 if grep -qE "terminated by signal|server process .* was terminated" /tmp/server.log; then fail "hostile guest: no backend crash in the server log"; else pass "hostile guest: no backend crash in the server log"; fi
 psqlq -c "DROP FUNCTION hostile(int); SELECT plzig_cache_clear();" >/dev/null

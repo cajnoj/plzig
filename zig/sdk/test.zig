@@ -880,3 +880,342 @@ test "plzig_call: arguments in, result or error out" {
     const e: [*]const u8 = @ptrFromInt(@as(usize, @intCast(res.val)));
     try testing.expectEqualStrings("SomethingFailed", e[0..res.len]);
 }
+
+// ---------------------------------------------------------------------------
+// numeric
+
+const Numeric = plzig.Numeric;
+
+/// free a Numeric made with testing.allocator (the constants are static)
+fn freeNum(n: Numeric) void {
+    for ([_]Numeric{ Numeric.nan, Numeric.infinity, Numeric.neg_infinity, Numeric.zero }) |c| {
+        if (n.wire.ptr == c.wire.ptr) return;
+    }
+    testing.allocator.free(n.wire);
+}
+
+/// n '0' characters, at comptime
+fn zeros(comptime n: usize) *const [n]u8 {
+    const z: [n]u8 = @splat('0');
+    return &z;
+}
+
+/// wire bytes from header fields and digits
+fn wire(buf: []u8, w: i16, sign: u16, dscale: u16, digits: []const u16) []const u8 {
+    const put = struct {
+        fn f(b: []u8, off: usize, v: u16) void {
+            b[off] = @intCast(v >> 8);
+            b[off + 1] = @truncate(v);
+        }
+    }.f;
+    put(buf, 0, @intCast(digits.len));
+    put(buf, 2, @bitCast(w));
+    put(buf, 4, sign);
+    put(buf, 6, dscale);
+    for (digits, 0..) |d, i| put(buf, 8 + 2 * i, d);
+    return buf[0 .. 8 + 2 * digits.len];
+}
+
+fn numText(n: Numeric) ![]u8 {
+    return n.toTextAlloc(testing.allocator);
+}
+
+fn expectParsesTo(text: []const u8, want: []const u8) !void {
+    const n = try Numeric.parseAlloc(testing.allocator, text);
+    defer freeNum(n);
+    _ = try Numeric.fromWire(n.wire); // what parse builds is valid wire format
+    const got = try numText(n);
+    defer testing.allocator.free(got);
+    testing.expectEqualStrings(want, got) catch |err| {
+        std.debug.print("parse({s})\n", .{text});
+        return err;
+    };
+}
+
+test "Numeric.fromWire: the layout numeric_recv accepts" {
+    var b: [64]u8 = undefined;
+    _ = try Numeric.fromWire(wire(&b, 0, 0, 0, &.{}));
+    _ = try Numeric.fromWire(wire(&b, -32768, 0x4000, 0x3fff, &.{ 9999, 0, 1 }));
+    _ = try Numeric.fromWire(wire(&b, 0, 0xC000, 0, &.{}));
+    _ = try Numeric.fromWire(wire(&b, 5, 0xD000, 0, &.{7})); // digits of specials are ignored
+    try testing.expectError(error.InvalidNumeric, Numeric.fromWire(""));
+    try testing.expectError(error.InvalidNumeric, Numeric.fromWire(b[0..7]));
+    const ok = wire(&b, 0, 0, 0, &.{1});
+    try testing.expectError(error.InvalidNumeric, Numeric.fromWire(ok[0 .. ok.len - 1]));
+    try testing.expectError(error.InvalidNumeric, Numeric.fromWire(b[0 .. ok.len + 1]));
+    try testing.expectError(error.InvalidNumeric, Numeric.fromWire(wire(&b, 0, 0, 0, &.{10000})));
+    try testing.expectError(error.InvalidNumeric, Numeric.fromWire(wire(&b, 0, 0x8000, 0, &.{})));
+    try testing.expectError(error.InvalidNumeric, Numeric.fromWire(wire(&b, 0, 0xE000, 0, &.{})));
+    try testing.expectError(error.InvalidNumeric, Numeric.fromWire(wire(&b, 0, 0, 0x4000, &.{})));
+}
+
+test "Numeric: text exactly as numeric_out writes it" {
+    var b: [64]u8 = undefined;
+    const cases = [_]struct { []const u8, i16, u16, u16, []const u16 }{
+        .{ "0", 0, 0, 0, &.{} },
+        .{ "0.000", 0, 0, 3, &.{} },
+        .{ "-0", 0, 0x4000, 0, &.{} }, // unnormalised: numeric_out prints the sign
+        .{ "1", 0, 0, 0, &.{1} },
+        .{ "12345678", 1, 0, 0, &.{ 1234, 5678 } },
+        .{ "10000", 1, 0, 0, &.{1} },
+        .{ "-0.0001", -1, 0x4000, 4, &.{1} },
+        .{ "0.00012", -1, 0, 5, &.{ 1, 2000 } },
+        .{ "0.0001", -1, 0, 3 + 1, &.{1} },
+        .{ "0.000", -1, 0, 3, &.{1} }, // dscale hides digits: cut, as numeric_out does
+        .{ "3.14159265", 0, 0, 8, &.{ 3, 1415, 9265 } },
+        .{ "100000000.0000", 2, 0, 4, &.{1} },
+        .{ "NaN", 0, 0xC000, 0, &.{} },
+        .{ "Infinity", 0, 0xD000, 0, &.{} },
+        .{ "-Infinity", 0, 0xF000, 0, &.{} },
+    };
+    for (cases) |c| {
+        const n = try Numeric.fromWire(wire(&b, c[1], c[2], c[3], c[4]));
+        const t = try numText(n);
+        defer testing.allocator.free(t);
+        try testing.expectEqualStrings(c[0], t);
+        try testing.expectEqual(c[0].len, n.textLen());
+        var fb: [64]u8 = undefined;
+        try testing.expectEqualStrings(c[0], try std.fmt.bufPrint(&fb, "{f}", .{n}));
+    }
+}
+
+test "Numeric.parse: numeric_in's syntax, scale and normalisation" {
+    try expectParsesTo("0", "0");
+    try expectParsesTo("-0", "0");
+    try expectParsesTo("0.000", "0.000");
+    try expectParsesTo("  1.50  ", "1.50");
+    try expectParsesTo("+7", "7");
+    try expectParsesTo(".5", "0.5");
+    try expectParsesTo("5.", "5");
+    try expectParsesTo("-0.001e3", "-1");
+    try expectParsesTo("1e-5", "0.00001");
+    try expectParsesTo("1.5E+3", "1500");
+    try expectParsesTo("1.23456e2", "123.456");
+    try expectParsesTo("000123.4500", "123.4500");
+    try expectParsesTo("12345678901234567890.123456789", "12345678901234567890.123456789");
+    try expectParsesTo("\t\n-999999999999.99990000\r", "-999999999999.99990000");
+    try expectParsesTo("NaN", "NaN");
+    try expectParsesTo(" nan ", "NaN");
+    try expectParsesTo("Infinity", "Infinity");
+    try expectParsesTo("+inf", "Infinity");
+    try expectParsesTo("-INFINITY", "-Infinity");
+    try expectParsesTo("-inf", "-Infinity");
+    for ([_][]const u8{ "", " ", "-", ".", "e5", "1e", "1e+", "1.2.3", "1 2", "1_000", "0x1F", "abc", "--1", "+-1", "1e5x", "- 1", "Infinityx", "nana" }) |t| {
+        try testing.expectError(error.InvalidCharacter, Numeric.parseAlloc(testing.allocator, t));
+    }
+    // the limits of the format: weight and scale
+    const big = try Numeric.parseAlloc(testing.allocator, "1e131071");
+    defer freeNum(big);
+    try testing.expectEqual(@as(i16, 32767), big.weight());
+    try testing.expectError(error.Overflow, Numeric.parseAlloc(testing.allocator, "1e131072"));
+    const small = try Numeric.parseAlloc(testing.allocator, "1e-16383");
+    defer freeNum(small);
+    try testing.expectEqual(@as(u16, 16383), small.scale());
+    try testing.expectError(error.Overflow, Numeric.parseAlloc(testing.allocator, "1e-16384"));
+    try testing.expectError(error.Overflow, Numeric.parseAlloc(testing.allocator, "1e9999999999"));
+    // long input, normalised (leading/trailing zero digits not stored)
+    var long: [26000]u8 = undefined;
+    @memset(&long, '0');
+    long[10000] = '7';
+    long[10001] = '.';
+    const l = try Numeric.parseAlloc(testing.allocator, &long);
+    defer freeNum(l);
+    try testing.expectEqual(@as(usize, 10), l.wire.len); // one digit
+    try testing.expectEqual(@as(u16, 26000 - 10002), l.scale());
+    long[10001] = '0';
+    long[3] = '.'; // more than 16383 digits after the point
+    try testing.expectError(error.Overflow, Numeric.parseAlloc(testing.allocator, &long));
+}
+
+test "Numeric.order and eql: PostgreSQL's ordering" {
+    const vals = [_][]const u8{ "-Infinity", "-1e100", "-1.5", "-1", "-0.0001", "0", "0.00", "1e-1000", "0.1", "1", "1.000", "1.0000001", "99999999", "1e100", "Infinity", "NaN", "nan" };
+    // the order of each value in that list: equal ones share a rank
+    const rank = [_]u8{ 0, 1, 2, 3, 4, 5, 5, 6, 7, 8, 8, 9, 10, 11, 12, 13, 13 };
+    for (vals, 0..) |x, i| {
+        const na = try Numeric.parseAlloc(testing.allocator, x);
+        defer freeNum(na);
+        for (vals, 0..) |y, j| {
+            const nb = try Numeric.parseAlloc(testing.allocator, y);
+            defer freeNum(nb);
+            try testing.expectEqual(std.math.order(rank[i], rank[j]), Numeric.order(na, nb));
+            try testing.expectEqual(rank[i] == rank[j], Numeric.eql(na, nb));
+        }
+    }
+    // unnormalised digits compare by value too
+    var b1: [64]u8 = undefined;
+    var b2: [64]u8 = undefined;
+    const u = try Numeric.fromWire(wire(&b1, 1, 0, 0, &.{ 0, 5, 0 })); // 0005.0000 = 5
+    const five = try Numeric.fromWire(wire(&b2, 0, 0, 0, &.{5}));
+    try testing.expect(Numeric.eql(u, five));
+    try testing.expect(Numeric.eql(Numeric.zero, try Numeric.fromWire(wire(&b1, 3, 0x4000, 2, &.{ 0, 0 }))));
+}
+
+test "Numeric predicates" {
+    try testing.expect(Numeric.nan.isNaN() and !Numeric.nan.isFinite() and !Numeric.nan.isNegative() and !Numeric.nan.isZero());
+    try testing.expect(Numeric.infinity.isInf() and Numeric.infinity.isPosInf() and !Numeric.infinity.isNegative());
+    try testing.expect(Numeric.neg_infinity.isNegInf() and Numeric.neg_infinity.isNegative());
+    try testing.expect(Numeric.zero.isZero() and Numeric.zero.isFinite() and !Numeric.zero.isNegative());
+    const m = try Numeric.parseAlloc(testing.allocator, "-0.5");
+    defer freeNum(m);
+    try testing.expect(m.isNegative() and !m.isZero() and m.scale() == 1 and m.weight() == -1);
+}
+
+test "Numeric.toI64 / fromI64" {
+    const cases = [_]struct { []const u8, ?i64 }{
+        .{ "0", 0 },                       .{ "-0.000", 0 },                .{ "1.000", 1 },
+        .{ "9223372036854775807", std.math.maxInt(i64) }, .{ "-9223372036854775808", std.math.minInt(i64) },
+        .{ "123456789012", 123456789012 }, .{ "-10000", -10000 },           .{ "1e18", 1_000_000_000_000_000_000 },
+    };
+    for (cases) |c| {
+        const n = try Numeric.parseAlloc(testing.allocator, c[0]);
+        defer freeNum(n);
+        try testing.expectEqual(c[1].?, try n.toI64());
+        // and back: the same value, scale 0
+        const back = try Numeric.fromI64Alloc(testing.allocator, c[1].?);
+        defer freeNum(back);
+        try testing.expect(Numeric.eql(n, back));
+        try testing.expectEqual(@as(u16, 0), back.scale());
+        _ = try Numeric.fromWire(back.wire);
+        const t = try numText(back);
+        defer testing.allocator.free(t);
+        var fb: [32]u8 = undefined;
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&fb, "{d}", .{c[1].?}), t);
+    }
+    const errs = [_]struct { []const u8, anyerror }{
+        .{ "9223372036854775808", error.Overflow }, .{ "-9223372036854775809", error.Overflow },
+        .{ "1e100", error.Overflow },               .{ "0.5", error.NotIntegral },
+        .{ "-1.0000001", error.NotIntegral },       .{ "1e-1000", error.NotIntegral },
+        .{ "NaN", error.NotFinite },                .{ "-Infinity", error.NotFinite },
+    };
+    for (errs) |c| {
+        const n = try Numeric.parseAlloc(testing.allocator, c[0]);
+        defer freeNum(n);
+        try testing.expectError(c[1], n.toI64());
+    }
+}
+
+test "Numeric.toF64: correctly rounded, out of range is an error" {
+    const cases = [_][]const u8{ "0.1", "1", "-2.5", "3.141592653589793238462643383279", "1e308", "1.7976931348623157e308", "4.9406564584124654e-324", "2.2250738585072014e-308", "123456789012345678901234567890", "-0.000000000000000000000001" };
+    for (cases) |c| {
+        const n = try Numeric.parseAlloc(testing.allocator, c);
+        defer freeNum(n);
+        try testing.expectEqual(try std.fmt.parseFloat(f64, c), try n.toF64());
+    }
+    const z = try Numeric.parseAlloc(testing.allocator, "0.000");
+    defer freeNum(z);
+    try testing.expectEqual(@as(f64, 0), try z.toF64());
+    try testing.expect(std.math.isNan(try Numeric.nan.toF64()));
+    try testing.expect(std.math.isPositiveInf(try Numeric.infinity.toF64()));
+    try testing.expect(std.math.isNegativeInf(try Numeric.neg_infinity.toF64()));
+    const big = try Numeric.parseAlloc(testing.allocator, "1e309");
+    defer freeNum(big);
+    try testing.expectError(error.Overflow, big.toF64());
+    const tiny = try Numeric.parseAlloc(testing.allocator, "-1e-400");
+    defer freeNum(tiny);
+    try testing.expectError(error.Underflow, tiny.toF64());
+    // more than 800 significant digits: the cut digits still round correctly
+    // (0.5 + 2^-53 + tiny rounds up; without the tiny part it is a tie)
+    var long: [1300]u8 = undefined;
+    const half_ulp = "0.500000000000000055511151231257827021181583404541015625"; // 0.5 + 2^-54 exactly
+    @memcpy(long[0..half_ulp.len], half_ulp);
+    @memset(long[half_ulp.len..], '0');
+    long[long.len - 1] = '1';
+    const ln = try Numeric.parseAlloc(testing.allocator, &long);
+    defer freeNum(ln);
+    try testing.expectEqual(@as(f64, 0.5) + std.math.pow(f64, 2, -53), try ln.toF64());
+    const tie = try Numeric.parseAlloc(testing.allocator, half_ulp);
+    defer freeNum(tie);
+    try testing.expectEqual(@as(f64, 0.5), try tie.toF64());
+}
+
+test "Numeric.fromF64: 15 significant digits of the exact value, as %.15g" {
+    const cases = [_]struct { f64, []const u8 }{
+        .{ 0.1, "0.1" },
+        .{ 1.0 / 3.0, "0.333333333333333" },
+        .{ 2.0 / 3.0, "0.666666666666667" },
+        .{ -1.5, "-1.5" },
+        .{ 1e20, "100000000000000000000" },
+        .{ 1.23456789012345678e17, "123456789012346000" },
+        .{ 1e-5, "0.00001" },
+        .{ 0.0, "0" },
+        .{ -0.0, "0" },
+        .{ 100, "100" },
+        // exact ties at the 16th digit: half to even, from the exact binary value
+        .{ std.math.pow(f64, 2, -22), "0.000000238418579101562" }, // 2.384185791015625e-07
+        .{ 3 * std.math.pow(f64, 2, -22), "0.000000715255737304688" }, // 7.152557373046875e-07
+        .{ std.math.pow(f64, 2, -21), "0.000000476837158203125" },
+        .{ 9.999999999999999e22, "100000000000000000000000" }, // rounds up to a new power of ten
+        .{ 1.7976931348623157e308, "179769313486232" ++ zeros(294) },
+    };
+    for (cases) |c| {
+        const n = try Numeric.fromF64Alloc(testing.allocator, c[0]);
+        defer freeNum(n);
+        _ = try Numeric.fromWire(n.wire);
+        const t = try numText(n);
+        defer testing.allocator.free(t);
+        testing.expectEqualStrings(c[1], t) catch |err| {
+            std.debug.print("fromF64({e})\n", .{c[0]});
+            return err;
+        };
+    }
+    const sub = try Numeric.fromF64Alloc(testing.allocator, 5e-324);
+    defer freeNum(sub);
+    const st = try numText(sub);
+    defer testing.allocator.free(st);
+    try testing.expectEqualStrings("0." ++ zeros(323) ++ "494065645841247", st);
+    try testing.expect((try Numeric.fromF64Alloc(testing.allocator, std.math.nan(f64))).isNaN());
+    try testing.expect((try Numeric.fromF64Alloc(testing.allocator, -std.math.inf(f64))).isNegInf());
+}
+
+test "Numeric arithmetic: one host call, a second one for a result larger than the stack buffer" {
+    try setup(64);
+    const na = try Numeric.parse("1.5");
+    const nb = try Numeric.parse("-2");
+    env.numeric_calls = 0;
+    const r = try na.add(nb);
+    try testing.expectEqual(@as(usize, 1), env.numeric_calls);
+    try testing.expectEqual(@as(u32, 1), env.last_numeric_op);
+    try testing.expect(Numeric.eql(r, na)); // the stand-in returns operand a
+    _ = try nb.sub(na);
+    try testing.expectEqual(@as(u32, 2), env.last_numeric_op);
+    _ = try na.round(-3);
+    try testing.expectEqual(@as(u32, 7), env.last_numeric_op);
+    try testing.expectEqual(@as(i32, -3), env.last_numeric_arg);
+    inline for (.{ .{ "mul", 3 }, .{ "div", 4 }, .{ "divTrunc", 5 }, .{ "mod", 6 } }) |op| {
+        _ = try @field(Numeric, op[0])(na, nb);
+        try testing.expectEqual(@as(u32, op[1]), env.last_numeric_op);
+    }
+    _ = try na.trunc(2);
+    try testing.expectEqual(@as(u32, 8), env.last_numeric_op);
+    _ = try na.abs();
+    try testing.expectEqual(@as(u32, 9), env.last_numeric_op);
+    _ = try na.neg();
+    try testing.expectEqual(@as(u32, 10), env.last_numeric_op);
+    const big = try Numeric.parse("1" ++ zeros(2000) ++ ".5");
+    env.numeric_calls = 0;
+    const rb = try big.abs();
+    try testing.expectEqual(@as(usize, 2), env.numeric_calls);
+    try testing.expect(Numeric.eql(rb, big));
+}
+
+test "Numeric as typed column, parameter, argument and result" {
+    try setup(64);
+    const n = try Numeric.parse("-12.5");
+    const r = try row(&.{ .{ .raw = .{ .kind = .numeric, .bytes = n.wire } }, .{ .null_of = .numeric }, .{ .other = "1" } });
+    try testing.expect(Numeric.eql(n, try r.get(Numeric, 0)));
+    try testing.expectEqual(@as(?Numeric, null), try r.get(?Numeric, 1));
+    try testing.expectError(error.TypeMismatch, r.get(Numeric, 2));
+    try testing.expectError(error.TypeMismatch, r.get([]const u8, 0));
+    var plan = try plzig.spi.prepare("SELECT $1", &.{.numeric});
+    try testing.expectEqual(@as(u32, 18), env.last_kinds[0]);
+    _ = try plan.execute(.{n});
+    try testing.expectEqual(@as(u16, 18), env.last_values[0].kind);
+    try testing.expectEqual(@as(u32, @intCast(n.wire.len)), env.last_values[0].len);
+    try testing.expectEqual(@as(u64, @intFromPtr(n.wire.ptr)), env.last_values[0].val);
+    const d = sdk_root.decode(Numeric, &.{ .val = @intFromPtr(n.wire.ptr), .len = @intCast(n.wire.len), .is_null = 0 });
+    try testing.expect(Numeric.eql(n, d));
+    var out: Slot = undefined;
+    sdk_root.encode(Numeric, n, &out);
+    try testing.expectEqual(@as(u64, @intFromPtr(n.wire.ptr)), out.val);
+    try testing.expectEqual(@as(u32, @intCast(n.wire.len)), out.len);
+}

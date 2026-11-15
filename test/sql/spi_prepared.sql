@@ -32,10 +32,8 @@ CREATE FUNCTION pt_row(i int) RETURNS text STRICT LANGUAGE plzig AS $$
     if (try row.get(?[]const u8, 7)) |b| {
         for (b) |x| try out.print(a, "{x:0>2}", .{x});
     } else try out.appendSlice(a, "null");
-    try out.print(a, " [{?s}] [{?s}] {?s} ", .{
-        try row.get(?[]const u8, 8), try row.get(?[]const u8, 9),
-        try row.get(?[]const u8, 10),
-    });
+    try out.print(a, " [{?s}] [{?s}] ", .{ try row.get(?[]const u8, 8), try row.get(?[]const u8, 9) });
+    if (try row.get(?plzig.Numeric, 10)) |n| try out.print(a, "{f} ", .{n}) else try out.appendSlice(a, "null ");
     if (try row.get(?plzig.Date, 11)) |d| try out.print(a, "{d}", .{d.days}) else try out.appendSlice(a, "null");
     return out.items;
 $$;

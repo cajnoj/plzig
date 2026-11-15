@@ -309,7 +309,7 @@ static const char *const plzig_known_imports[] = {
 	"spi_value_copy", "spi_colname_len", "spi_colname_copy",
 	"spi_row_size", "spi_row_read", "spi_prepare", "spi_plan_free",
 	"spi_execute_plan", "spi_cursor_open", "spi_cursor_open_plan",
-	"spi_cursor_fetch", "spi_cursor_close", NULL
+	"spi_cursor_fetch", "spi_cursor_close", "numeric_op", NULL
 };
 
 static bool
@@ -999,6 +999,14 @@ plzig_decode_result(PlzigInstance *pi, PlzigSlot *slot, PlzigTypeInfo *rt,
 				b = plzig_copy_out(pi, slot->val, PLZIG_FIXED16);
 				return plzig_fixed16_from_guest(rt->kind, b, PLZIG_FIXED16, "its result");
 			}
+		case PLZIG_T_NUMERIC:
+			{
+				char	   *b;
+
+				plzig_numeric_check_len(slot->len, "its result");	/* before copying */
+				b = plzig_copy_out(pi, slot->val, slot->len);
+				return plzig_numeric_from_wire(b, slot->len, "its result");
+			}
 		case PLZIG_T_VOID:
 			break;
 	}
@@ -1092,6 +1100,14 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 				/* fixed-length by-reference types: the 16 bytes as they are */
 				bytes[i] = DatumGetPointer(args[i].value);
 				lens[i] = PLZIG_FIXED16;
+			}
+			else if (k == PLZIG_T_NUMERIC)
+			{
+				/* the binary wire format (numeric_send) */
+				struct varlena *w = plzig_numeric_to_wire(args[i].value);
+
+				bytes[i] = VARDATA_ANY(w);
+				lens[i] = VARSIZE_ANY_EXHDR(w);
 			}
 			total += TYPEALIGN(8, (uint64) lens[i]);
 		}
@@ -1197,6 +1213,7 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 					case PLZIG_T_IO:
 					case PLZIG_T_INTERVAL:
 					case PLZIG_T_UUID:
+					case PLZIG_T_NUMERIC:
 						plzig_put_bytes(base, &off, &s, guest_base, bytes[i], lens[i]);
 						break;
 					case PLZIG_T_VOID:

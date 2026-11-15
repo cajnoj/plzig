@@ -89,6 +89,7 @@ typedef enum PlzigTypeKind
 	PLZIG_T_INTERVAL,			/* 16-byte Interval, out of line */
 	PLZIG_T_UUID,				/* 16 bytes, out of line */
 	PLZIG_T_OID,				/* Oid in val */
+	PLZIG_T_NUMERIC,			/* numeric_send wire format, out of line */
 	PLZIG_T_IO					/* anything else: text I/O representation */
 } PlzigTypeKind;
 
@@ -133,10 +134,29 @@ typedef struct PlzigSlot
 #define PLZIG_KIND_INTERVAL	15		/* 16 bytes, out of line */
 #define PLZIG_KIND_UUID		16		/* 16 bytes, out of line */
 #define PLZIG_KIND_OID		17
-#define PLZIG_KIND_MAX		17
+#define PLZIG_KIND_NUMERIC	18		/* wire format (numeric_send), out of line */
+#define PLZIG_KIND_MAX		18
 
 /* size of the out-of-line fixed-width values (interval, uuid) */
 #define PLZIG_FIXED16		16
+/*
+ * Largest numeric in the wire format: 8 header bytes and at most 65535
+ * base-10000 digits (ndigits is a uint16).
+ */
+#define PLZIG_MAX_NUMERIC_WIRE	(8 + 2 * 65535)
+
+/* operations of the numeric_op import (doc/abi.md) */
+#define PLZIG_NUMERIC_ADD		1
+#define PLZIG_NUMERIC_SUB		2
+#define PLZIG_NUMERIC_MUL		3
+#define PLZIG_NUMERIC_DIV		4
+#define PLZIG_NUMERIC_DIV_TRUNC	5
+#define PLZIG_NUMERIC_MOD		6
+#define PLZIG_NUMERIC_ROUND		7
+#define PLZIG_NUMERIC_TRUNC		8
+#define PLZIG_NUMERIC_ABS		9
+#define PLZIG_NUMERIC_NEG		10
+#define PLZIG_NUMERIC_OP_MAX	10
 
 /* Typed value (params of prepared statements, result rows), 16 bytes */
 typedef struct PlzigValue
@@ -156,6 +176,9 @@ extern Datum plzig_scalar_from_guest(PlzigTypeKind k, uint64 val, uint32 len,
 extern void plzig_fixed16_check_len(PlzigTypeKind k, uint32 len, const char *where);
 extern Datum plzig_fixed16_from_guest(PlzigTypeKind k, const char *bytes, uint32 len,
 									  const char *where);
+extern void plzig_numeric_check_len(uint32 len, const char *where);
+extern Datum plzig_numeric_from_wire(const char *bytes, uint32 len, const char *where);
+extern struct varlena *plzig_numeric_to_wire(Datum num);
 extern Oid	plzig_param_kind_oid(uint32 kind);
 extern uint16 plzig_param_oid_kind(Oid typid);
 extern const char *plzig_zig_type_name(PlzigTypeKind kind, bool for_result);

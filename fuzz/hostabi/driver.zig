@@ -54,7 +54,36 @@ const pool = [_][]const u8{
     "SET LOCAL work_mem = '64kB' /*fuzzq*/",
     "SELECT 1; SELECT 2 /*fuzzq*/",
     "SELECT n FROM generate_series(1, 100000) n /*fuzzq*/",
+    "SELECT (n / 7.0)::numeric AS num, date '2000-01-01' + n AS d, timestamp '2000-01-01' + n * interval '1 hour' AS ts, (timestamptz '2000-01-01 00:00+00' + n * interval '1 day') AS tz, n::oid AS o, md5(n::text)::uuid AS u, (n || ' days')::interval AS iv, '12:00+02'::timetz AS ttz, ('00:00'::time + n * interval '1 minute') AS t, 'NaN'::numeric AS nan FROM generate_series(1, 60) n /*fuzzq*/",
+    "SELECT $1::numeric, $2::date, $3::timestamptz /*fuzzq*/",
 };
+
+/// parameter kinds the host accepts (doc/abi.md, "Kinds"), and some it does not
+const param_kinds = [_]u16{ 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18 };
+
+/// numeric operands in the wire format: valid ones, and a few the host must refuse
+const numerics = [_][]const u8{
+    "\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01", // 1
+    "\x00\x00\x00\x00\x00\x00\x00\x00", // 0
+    "\x00\x02\x00\x00\x40\x00\x00\x02\x00\x07\x13\x88", // -7.50
+    "\x00\x00\x00\x00\xc0\x00\x00\x00", // NaN
+    "\x00\x00\x00\x00\xd0\x00\x00\x00", // Infinity
+    "\x00\x01\x7f\xff\x00\x00\x00\x00\x00\x09", // 9e131068
+    "\x00\x01\x80\x00\x00\x00\x3f\xff\x00\x01", // 1e-131072, scale 16383
+    "\x00\x01\x00\x00\x00\x00\x00\x00\x27\x10", // digit 10000
+    "\x00\x00\x00\x00\x80\x00\x00\x00", // bad sign
+    "\x00\x05\x00\x00", // short
+};
+
+/// a numeric operand: from the pool, or forged pointer/length
+fn numArg(sc: *Script) struct { u32, u32 } {
+    const sel = sc.byte();
+    if (sel < 220) {
+        const n = numerics[sel % numerics.len];
+        return .{ @intCast(plzig.addrOf(n.ptr)), @intCast(n.len) };
+    }
+    return .{ ptrArg(sc), lenArg(sc) };
+}
 
 const Script = struct {
     s: []const u8,
@@ -213,7 +242,7 @@ fn typedParams(sc: *Script, n: u32) u32 {
     const vals = plzig.rawPtr([*]Value, gbase());
     for (0..max) |k| {
         const sel = sc.byte();
-        const kind: u16 = if (sel < 200) 1 + (sel % 8) else if (sel < 230) (sel % 10) else sc.int(u16);
+        const kind: u16 = if (sel < 200) param_kinds[sel % param_kinds.len] else if (sel < 230) (sel % 21) else sc.int(u16);
         const how = sc.byte();
         vals[k] = if (how < 40)
             .{ .val = 0, .len = 0, .kind = kind, .is_null = 1 }
@@ -251,7 +280,17 @@ fn run(script: []const u8) i32 {
                 const n = small(&sc);
                 noteResult(h.spi_execute(P([*]const u8, q[0]), q[1], P([*]const Slot, textParams(&sc, n)), n));
             },
-            5 => _ = h.spi_ncols(),
+            5 => if (op < 128) {
+                _ = h.spi_ncols();
+            } else {
+                // numeric_op: operation (sometimes invalid), operands from the
+                // pool or forged, a result buffer that may be too small or forged
+                const a = numArg(&sc);
+                const b = numArg(&sc);
+                const nop = if (sc.byte() < 230) 1 + sc.byte() % 10 else sc.int(u32);
+                const arg: i32 = @bitCast(small(&sc));
+                last_size = @bitCast(h.numeric_op(nop, P([*]const u8, a[0]), a[1], P([*]const u8, b[0]), b[1], arg, P([*]u8, ptrArg(&sc)), lenArg(&sc)));
+            },
             6 => if (last_cols > 0 or sc.byte() > 220) {
                 last_size = @bitCast(h.spi_value_len(rowArg(&sc), colArg(&sc)));
             },
@@ -274,7 +313,7 @@ fn run(script: []const u8) i32 {
                 const q = sqlArg(&sc);
                 const n = small(&sc);
                 const kinds = plzig.rawPtr([*]u32, gbase());
-                for (0..@min(n, 64)) |k| kinds[k] = if (sc.byte() < 235) 1 + sc.byte() % 8 else sc.int(u32);
+                for (0..@min(n, 64)) |k| kinds[k] = if (sc.byte() < 235) param_kinds[sc.byte() % param_kinds.len] else sc.int(u32);
                 const p = if (sc.byte() < 240) gbase() else ptrArg(&sc);
                 keep(&plans, h.spi_prepare(P([*]const u8, q[0]), q[1], P([*]const u32, p), n));
             },

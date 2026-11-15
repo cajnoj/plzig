@@ -139,6 +139,18 @@ h_Iii_I_fetch(wasm_exec_env_t env, uint64 a, uint32 b, uint32 c)
 	return -1;
 }
 
+/* numeric_op: operand ranges checked, then the trap a failing import causes */
+static int32
+h_numeric_op(wasm_exec_env_t env, uint32 op, uint32 a, uint32 alen, uint32 b, uint32 blen,
+			 int32 arg, uint32 out, uint32 out_cap)
+{
+	(void) stub_range(env, a, alen > 131078 ? 0 : alen);
+	(void) stub_range(env, b, blen > 131078 ? 0 : blen);
+	(void) stub_range(env, out, out_cap > 131078 ? 0 : out_cap);
+	stub_trap(env, "plzig: host error");
+	return 0;
+}
+
 /* keep in sync with plzig_native_symbols in src/plzig_host.c (checked by fuzz/build.sh) */
 static NativeSymbol stub_symbols[] = {
 	{"log", (void *) h_log, "(iii)", NULL},
@@ -160,6 +172,7 @@ static NativeSymbol stub_symbols[] = {
 	{"spi_cursor_open_plan", (void *) h_Iii_I, "(Iii)I", NULL},
 	{"spi_cursor_fetch", (void *) h_Iii_I_fetch, "(Iii)I", NULL},
 	{"spi_cursor_close", (void *) h_I, "(I)", NULL},
+	{"numeric_op", (void *) h_numeric_op, "(iiiiiiii)i", NULL},
 };
 
 void *
@@ -216,3 +229,23 @@ plzig_fixed16_from_guest(PlzigTypeKind k, const char *bytes, uint32 len, const c
 	return (Datum) 0;
 }
 
+
+void
+plzig_numeric_check_len(uint32 len, const char *where)
+{
+	stub_value_error();
+}
+
+Datum
+plzig_numeric_from_wire(const char *bytes, uint32 len, const char *where)
+{
+	stub_value_error();
+	return (Datum) 0;
+}
+
+struct varlena *
+plzig_numeric_to_wire(Datum num)
+{
+	stub_value_error();
+	return NULL;
+}

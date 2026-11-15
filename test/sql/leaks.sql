@@ -14,9 +14,17 @@ CREATE TABLE lk_t AS SELECT g AS x, md5(g::text) AS t FROM generate_series(1, 10
 CREATE FUNCTION lk_scalar(x int) RETURNS int STRICT LANGUAGE plzig AS $$
     return x + 1;
 $$;
--- text-I/O argument (numeric) and result (numeric), via the arena
-CREATE FUNCTION lk_text(n numeric) RETURNS numeric LANGUAGE plzig AS $$
+-- text-I/O argument and result (a domain over numeric: domains are passed
+-- as text), via the arena
+CREATE DOMAIN lk_num AS numeric;
+CREATE FUNCTION lk_text(n lk_num) RETURNS lk_num LANGUAGE plzig AS $$
     return try std.fmt.allocPrint(plzig.allocator, "{s}.5", .{n orelse return null});
+$$;
+-- numeric in the wire format: numeric_send for the argument, numeric_recv
+-- for the result, and a host call (numeric_op) in between
+CREATE FUNCTION lk_numeric(n numeric) RETURNS numeric LANGUAGE plzig AS $$
+    const half = plzig.Numeric{ .wire = &.{ 0, 1, 0xff, 0xff, 0, 0, 0, 1, 0x13, 0x88 } }; // 0.5
+    return try (n orelse return null).add(half);
 $$;
 CREATE FUNCTION lk_spi(x int) RETURNS bigint STRICT LANGUAGE plzig AS $$
     var buf: [16]u8 = undefined;
@@ -62,8 +70,8 @@ BEGIN
 END $d$;
 
 -- warm up every shape (modules loaded, instances cached, plans prepared)
-SELECT lk_run(f, 200) FROM unnest(ARRAY['lk_scalar', 'lk_text', 'lk_spi', 'lk_cursor', 'lk_prepared', 'lk_fail']) f;
-SELECT lk_text(NULL), lk_text(41);
+SELECT lk_run(f, 200) FROM unnest(ARRAY['lk_scalar', 'lk_text', 'lk_numeric', 'lk_spi', 'lk_cursor', 'lk_prepared', 'lk_fail']) f;
+SELECT lk_text(NULL), lk_text(41), lk_numeric(NULL), lk_numeric(41);
 
 SELECT lk_mem() AS m0 \gset
 SELECT lk_run('lk_scalar', 10000);
@@ -71,6 +79,9 @@ SELECT lk_mem() - :m0 AS growth_scalar;
 SELECT lk_mem() AS m0 \gset
 SELECT lk_run('lk_text', 10000);
 SELECT lk_mem() - :m0 AS growth_text;
+SELECT lk_mem() AS m0 \gset
+SELECT lk_run('lk_numeric', 10000);
+SELECT lk_mem() - :m0 AS growth_numeric;
 SELECT lk_mem() AS m0 \gset
 SELECT lk_run('lk_spi', 10000);
 SELECT lk_mem() - :m0 AS growth_spi;
@@ -86,7 +97,7 @@ SELECT lk_run('lk_fail', 10000);
 SELECT lk_mem() - :m0 <= 0 AS no_growth_fail;
 -- a plain loop in one statement (no subtransactions)
 SELECT lk_mem() AS m0 \gset
-SELECT sum(lk_scalar(g)) + sum(lk_text(g)) FROM generate_series(1, 10000) g;
+SELECT sum(lk_scalar(g)) + sum(lk_text(g)) + sum(lk_numeric(g)) FROM generate_series(1, 10000) g;
 SELECT lk_mem() - :m0 AS growth_one_statement;
 
 -- the call contexts belong to the instance and are reset when a call
@@ -121,8 +132,10 @@ RESET plzig.instance_cache_max_memory;
 -- the whole backend does not grow either (PL/Zig memory hangs below
 -- TopMemoryContext and the per-query contexts)
 SELECT sum(total_bytes) AS t0 FROM pg_backend_memory_contexts \gset
-SELECT lk_run(f, 3000) FROM unnest(ARRAY['lk_scalar', 'lk_text', 'lk_spi', 'lk_cursor', 'lk_prepared', 'lk_fail']) f;
+SELECT lk_run(f, 3000) FROM unnest(ARRAY['lk_scalar', 'lk_text', 'lk_numeric', 'lk_spi', 'lk_cursor', 'lk_prepared', 'lk_fail']) f;
 SELECT sum(total_bytes) - :t0 < 256 * 1024 AS backend_flat FROM pg_backend_memory_contexts;
 
 DROP TABLE lk_t CASCADE;
+DROP FUNCTION lk_text(lk_num);
+DROP DOMAIN lk_num;
 DROP TABLE lk_big_t;

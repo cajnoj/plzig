@@ -84,11 +84,11 @@ SELECT generate_source('{int4,int4}', '{a,b}', 'int4', true, 'return a + b;');
 
 SELECT generate_source('{bool,int2,int4,int8,float4,float8,text,varchar,bpchar,bytea,numeric,jsonb,int4[]}',
                        '{a,b,c,d,e,f,g,h,i,j,k,l,m}', 'text', false, 'return null;');
-                                                                                                                                                                                                                    generate_source                                                                                                                                                                                                                     
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- const plzig = @import("plzig"); const std = plzig.std; pub fn call(@"a": ?bool, @"b": ?i16, @"c": ?i32, @"d": ?i64, @"e": ?f32, @"f": ?f64, @"g": ?[]const u8, @"h": ?[]const u8, @"i": ?[]const u8, @"j": ?[]const u8, @"k": ?[]const u8, @"l": ?[]const u8, @"m": ?[]const u8) anyerror!?[]const u8 { _ = &@"a"; _ = &@"b"; _ = &@"c"; _ = &@"d"; _ = &@"e"; _ = &@"f"; _ = &@"g"; _ = &@"h"; _ = &@"i"; _ = &@"j"; _ = &@"k"; _ = &@"l"; _ = &@"m";+
- return null;                                                                                                                                                                                                                                                                                                                                                                                                                                          +
- }                                                                                                                                                                                                                                                                                                                                                                                                                                                     +
+                                                                                                                                                                                                                      generate_source                                                                                                                                                                                                                      
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ const plzig = @import("plzig"); const std = plzig.std; pub fn call(@"a": ?bool, @"b": ?i16, @"c": ?i32, @"d": ?i64, @"e": ?f32, @"f": ?f64, @"g": ?[]const u8, @"h": ?[]const u8, @"i": ?[]const u8, @"j": ?[]const u8, @"k": ?plzig.Numeric, @"l": ?[]const u8, @"m": ?[]const u8) anyerror!?[]const u8 { _ = &@"a"; _ = &@"b"; _ = &@"c"; _ = &@"d"; _ = &@"e"; _ = &@"f"; _ = &@"g"; _ = &@"h"; _ = &@"i"; _ = &@"j"; _ = &@"k"; _ = &@"l"; _ = &@"m";+
+ return null;                                                                                                                                                                                                                                                                                                                                                                                                                                             +
+ }                                                                                                                                                                                                                                                                                                                                                                                                                                                        +
  
 (1 row)
 
@@ -112,14 +112,14 @@ SELECT generate_source('{int4,int4,int4}', ARRAY[NULL, 'return', NULL], 'bytea',
 (1 row)
 
 SELECT generate_source('{text}', '{x}', 'numeric', false, E'line 1\n}\nfn helper() void {\n// line 3');
-                                                     generate_source                                                     
--------------------------------------------------------------------------------------------------------------------------
- const plzig = @import("plzig"); const std = plzig.std; pub fn call(@"x": ?[]const u8) anyerror!?[]const u8 { _ = &@"x";+
- line 1                                                                                                                 +
- }                                                                                                                      +
- fn helper() void {                                                                                                     +
- // line 3                                                                                                              +
- }                                                                                                                      +
+                                                      generate_source                                                       
+----------------------------------------------------------------------------------------------------------------------------
+ const plzig = @import("plzig"); const std = plzig.std; pub fn call(@"x": ?[]const u8) anyerror!?plzig.Numeric { _ = &@"x";+
+ line 1                                                                                                                    +
+ }                                                                                                                         +
+ fn helper() void {                                                                                                        +
+ // line 3                                                                                                                 +
+ }                                                                                                                         +
  
 (1 row)
 
@@ -196,7 +196,7 @@ SELECT t, type_map(t)
  bytea                       | []const u8 8 8
  name                        | []const u8 9 0
  "char"                      | []const u8 9 0
- numeric                     | []const u8 9 0
+ numeric                     | plzig.Numeric 18 18
  json                        | []const u8 9 0
  integer[]                   | []const u8 9 0
  text[]                      | []const u8 9 0
@@ -240,7 +240,7 @@ SELECT k, param_kind_oid(k) FROM generate_series(0, 21) k;
  15 | interval
  16 | uuid
  17 | oid
- 18 | -
+ 18 | numeric
  19 | -
  20 | -
  21 | -
