@@ -47,7 +47,7 @@ module loader, and §6.2 spells out what B can achieve.
  client SQL ──► backend (trusted C: plzig.so + WAMR)
                  │   ├── guest module (untrusted Wasm code, in-process,
                  │   │     interpreted by WAMR; reaches the backend only
-                 │   │     through 19 host imports)              ◄── boundary 1
+                 │   │     through 21 host imports)              ◄── boundary 1
                  │   ├── $PGDATA/plzig/cache/*.wasm (B can write; every
                  │   │     file is re-validated when loaded)      ◄── boundary 2
                  │   └── fork + execve
@@ -153,11 +153,11 @@ freshly compiled or read from the cache:
   is capped at 1023 MB, WAMR rejects more than 65535 locals anyway, the
   table limit is far above what a Zig module needs);
 * full WAMR validation (`wasm_runtime_load`);
-* every import must be a *function* from module `plzig`, one of the 19
+* every import must be a *function* from module `plzig`, one of the 21
   known names, and linked by WAMR (signature equal to the registered one);
 * a trial instantiation under `plzig.max_memory`, the four exports with
   exactly the right parameter/result types, a linear memory,
-  `plzig_abi_version() == 3`, and an argument buffer from `plzig_init()`
+  `plzig_abi_version() == 4`, and an argument buffer from `plzig_init()`
   of 16 bytes to 1 MB inside the linear memory (re-validated on every call
   with the actual argument size; `doc/abi.md`).
 
@@ -218,14 +218,47 @@ wrong-mode cache files), `test/tap/t/060_environment.pl`, fuzz target
   `raise_error` raises only `ERROR`, with a well-formed SQLSTATE outside
   the classes a server condition uses (`00`, `01`, `02`, `08`, `53`, `57`,
   `58`, `F0`, `XX`), so a function cannot make its failure look like a
-  connection loss, a shutdown or an internal error.
+  connection loss, a shutdown or an internal error;
+* **values of the natively mapped types** (`doc/abi.md`, *Range checks*,
+  *numeric*, *jsonb*) that come back from a guest -- a function result, a
+  prepared-statement parameter, an operand of `numeric_op`, the value
+  `tz_convert` converts -- are never stored as the guest built them:
+  `date`, `time`, `timetz`, `timestamp`, `timestamptz` and `oid` are
+  range-checked with PostgreSQL's own macros as the types' receive
+  functions do (`plzig_scalar_from_guest`), so no value outside what
+  PostgreSQL itself can produce reaches a table or an index; `interval` and
+  `uuid` must be exactly 16 bytes (every bit pattern is a valid value);
+  `numeric` must have exactly the length its header announces and then goes
+  through `numeric_recv`, the server's validating input path
+  (`plzig_numeric_from_wire`); `jsonb` is accepted only as JSON text and
+  parsed by `jsonb_in` -- a binary jsonb from a guest would be stored
+  unchecked, so there is no way to pass one; a domain over any of these
+  types is passed as text through the domain's input function, so its
+  constraints and typmod apply;
+* the two value imports call PostgreSQL's own functions on validated
+  copies: `numeric_op` (`numeric_add` ... `numeric_uminus`; results are
+  PostgreSQL's exactly, errors are ordinary SQL errors) and `tz_convert`
+  (`timestamptz_zone` and friends; the guest sees neither the time zone
+  database nor `TimeZone` itself, only what the equivalent SQL returns, and
+  there is still no clock); their results are copied out only if the
+  guest's buffer is large enough (validated range), else only the size is
+  returned;
+* arguments and columns of these types carry no host data beyond the value
+  itself: fixed-width values are passed by value, `numeric` as
+  `numeric_send` output, `jsonb` as the detoasted value's bytes (one copy,
+  never a host pointer).
 
 Tests: `test/sql/spi*.sql`, `test/sql/adversarial.sql` (row-level security
 and column privileges through `spi.execute`, prepared statements and
 cursors; a kept plan re-checked after `SET ROLE`; definer/invoker nesting;
 refused identity changes; read-only transactions and data-modifying CTEs),
-`docker/security-checks.sh` (49 hostile-guest calls, forged argument buffers), fuzz target `hostabi`
-(§7), TAP `040_standby.pl` (read-only on a standby).
+`docker/security-checks.sh` (73 hostile-guest calls, among them forged
+fixed-width, numeric and jsonb parameters and forged `numeric_op` and
+`tz_convert` calls; forged argument buffers), `test/sql/types_fixed.sql`,
+`types_numeric.sql`, `types_calendar.sql`, `types_jsonb.sql` (every range
+limit, malformed numerics as results and parameters), fuzz targets
+`hostabi`, `marshal` and `jsonb` (§7), TAP `040_standby.pl` (read-only on a
+standby).
 
 ### 4.8 The compiler process
 
@@ -428,8 +461,10 @@ because the cache is writable by nobody but the server's OS user (§2).
 * Fuzzing (`fuzz/README.md`, `docker/run-fuzz.sh`): the validator
   (differential), the module loader (ASan/UBSan, the production runtime
   code), the host-import ABI on a live ASan server, marshalling and the
-  source generator (property tests), and the whole pipeline. Results of the
-  runs made for this document are in §9.
+  source generator (property tests, including the guest's jsonb
+  serialisation against `jsonb_out`), the SDK's jsonb reader and numeric
+  decoders on mutated PostgreSQL-produced bytes, and the whole pipeline.
+  Results of the runs made for this document are in §9.
 * Static analysis (`docker/static-analysis.sh`): the clang static analyzer
   and cppcheck over `src/`, and the hardening of the installed binaries
   (RELRO/BIND_NOW, no executable stack, no text relocations, PIE for the
@@ -554,6 +589,12 @@ because the cache is writable by nobody but the server's OS user (§2).
 12. **Toolchain trust.** PL/Zig checks ownership, permissions, location and
     version of the compiler, and optionally its hash, but cannot prove it
     is an authentic Zig build; the lib directory is not hashed.
+13. **Guest-side readers of native values.** The jsonb reader and the
+    numeric/calendar code run in the guest: a bug there can only give a
+    function a wrong answer or a trap, never touch host memory (it is
+    sandboxed like user code). What a function returns is checked by the
+    host either way (*4.7*). The jsonb layout is read in host byte order, so
+    `jsonb` falls back to text on big-endian hosts (untested).
 
 ## 9. Verification status
 

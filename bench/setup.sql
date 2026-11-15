@@ -52,6 +52,18 @@ SELECT 1,
        -- 29 characters, 32 bytes in UTF-8
        repeat('Grüße aus Zürich, 0123456789 ', :blob_kb * 32);
 
+-- task 13: jsonb documents and timestamps, big_rows / 10 rows each
+CREATE TABLE bench_jsonb (id int PRIMARY KEY, doc jsonb NOT NULL);
+INSERT INTO bench_jsonb
+SELECT i, jsonb_build_object('id', i, 'name', 'customer ' || i, 'qty', i % 50,
+                             'price', (i % 1000) * 0.25, 'tags', jsonb_build_array('a', 'b', i % 7),
+                             'note', repeat('x', i % 40))
+FROM generate_series(1, :big_rows / 10) AS i;
+CREATE TABLE bench_ts (id int PRIMARY KEY, ts timestamp NOT NULL);
+INSERT INTO bench_ts
+SELECT i, timestamp '2020-01-01' + i * interval '1 minute 7 seconds'
+FROM generate_series(1, :big_rows / 10) AS i;
+
 -- task 9
 CREATE TABLE bench_t9 (id int PRIMARY KEY, v int NOT NULL) WITH (autovacuum_enabled = off);
 

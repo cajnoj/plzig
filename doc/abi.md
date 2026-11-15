@@ -1,4 +1,4 @@
-# PL/Zig host/guest ABI (version 3)
+# PL/Zig host/guest ABI (version 4)
 
 This describes the interface between the PostgreSQL backend (host, `src/`)
 and a compiled PL/Zig function (guest, a `wasm32-freestanding` module built
@@ -31,12 +31,12 @@ A module is accepted by the loader (`plzig_module_load`) only if
   (checked before WAMR sees the module, see doc/security.md §4.5);
 * WAMR's loader validates it (full validation, classic interpreter);
 * every import is a **function** imported from module **`plzig`**, its name
-  is one of the 19 host functions below, and WAMR linked it (i.e. the
+  is one of the 21 host functions below, and WAMR linked it (i.e. the
   signature matched the registered one) — anything else is rejected;
 * it instantiates under the current `plzig.max_memory`;
 * it exports a linear memory and the four functions below with exactly the
   listed parameter and result types;
-* `plzig_abi_version()` returns `3` (`PLZIG_ABI_VERSION`; the version is
+* `plzig_abi_version()` returns `4` (`PLZIG_ABI_VERSION`; the version is
   part of the module cache key, so modules built for earlier versions are
   recompiled, never loaded);
 * `plzig_init()` reports a valid argument buffer (below).
@@ -47,7 +47,7 @@ Size limit for the module file: 16 MB.
 
 | Export | Signature | Meaning |
 |--------|-----------|---------|
-| `plzig_abi_version` | `() -> i32` | Returns 3. |
+| `plzig_abi_version` | `() -> i32` | Returns 4. |
 | `plzig_init` | `() -> i64` | Called once per instance, right after `plzig_abi_version`: the guest's argument buffer as `capacity << 32 \| address`. The SDK returns a 4096-byte static buffer outside the arena. |
 | `plzig_alloc_args` | `(len: i32) -> i32` | Fallback for argument blocks larger than the buffer: start a call (reset the per-call arena: everything allocated by the previous call is released), then allocate `len` bytes, 8-byte aligned, in the arena. 0 on failure. |
 | `plzig_call` | `(args: i32, nargs: i32, result: i32, begin: i32) -> i32` | Run the user function. `args` points to `nargs` slots, `result` to one slot. `begin` ≠ 0: start the call first (reset the arena); `begin` = 0: `plzig_alloc_args` has already done that. Returns a status. |
@@ -65,27 +65,111 @@ host.
 | 8 | `len` | u32 |
 | 12 | `is_null` | u32 (0/1) |
 
-Encoding of `val`/`len` by SQL type class:
+Encoding of `val`/`len` by SQL type (exact type OIDs: a domain over any of
+these types is a text-I/O type):
 
-| Class (SQL types) | Zig type | Encoding |
-|-------------------|----------|----------|
+| SQL type | Zig type (argument / result) | Encoding |
+|----------|------------------------------|----------|
 | `boolean` | `bool` | `val` = 0/1 |
 | `smallint`, `integer`, `bigint` | `i16`, `i32`, `i64` | `val` = value sign-extended to 64 bits |
 | `real` | `f32` | low 32 bits of `val` = IEEE-754 bits |
 | `double precision` | `f64` | `val` = IEEE-754 bits |
+| `date` | `plzig.Date` | `val` = DateADT (days since 2000-01-01, `INT32_MIN`/`INT32_MAX` = ∓infinity) sign-extended |
+| `time` | `plzig.Time` | `val` = TimeADT (µs since midnight, 0 ..= 86 400 000 000) |
+| `time with time zone` | `plzig.TimeTz` | `val` = time (µs), `len` = zone (i32 bits: seconds **west** of UTC, as TimeTzADT) |
+| `timestamp`, `timestamp with time zone` | `plzig.Timestamp`, `plzig.TimestampTz` | `val` = Timestamp (µs since 2000-01-01 00:00 (UTC); `INT64_MIN`/`INT64_MAX` = ∓infinity) |
+| `oid` | `plzig.Oid` | `val` = the OID, zero-extended |
+| `interval` | `plzig.Interval` | `val` = pointer, `len` = 16: PostgreSQL's Interval (i64 µs, i32 days, i32 months, little endian) |
+| `uuid` | `plzig.Uuid` | `val` = pointer, `len` = 16: the bytes in network order |
+| `numeric` | `plzig.Numeric` | `val` = pointer, `len` = byte length of the binary wire format (*numeric*) |
+| `jsonb` | `plzig.Jsonb` / `plzig.JsonText` | argument: `val` = pointer, `len` = length of the detoasted value's on-disk layout (*jsonb*); result: JSON text |
 | `text`, `varchar`, `bpchar`, `bytea`, everything else | `[]const u8` | `val` = pointer, `len` = byte length |
 
 For non-`bytea` byte types the bytes are: the detoasted value for
 `text`/`varchar`/`bpchar` (database encoding, not NUL-terminated); the
 output-function result for all other types. A zero-length slice may carry a
 dangling pointer; the host never dereferences or validates pointers when
-`len` is 0.
+`len` is 0. Fixed-width values are raw PostgreSQL values: nothing is
+converted on the way in. `interval` and `uuid` take 16 bytes, which do not
+fit next to the slot's flags, so they are passed like byte values (copied
+after the slots, 8-byte aligned); a 16-byte result is copied by the SDK to a
+static buffer outside the stack and the arena before `plzig_call` returns.
 
 Results: `text` bytes must be valid in the database encoding and contain no
-NUL (checked with `pg_verifymbstr`); `varchar`, `bpchar` and all text-I/O
-types are additionally passed through the type's input function (so domain
-constraints, enum labels, array syntax etc. are enforced by PostgreSQL);
-`bytea` is copied verbatim.
+NUL (checked with `pg_verifymbstr`); `varchar`, `bpchar`, `jsonb` and all
+text-I/O types are additionally passed through the type's input function (so
+domain constraints, enum labels, array syntax, JSON syntax etc. are enforced
+by PostgreSQL); `bytea` is copied verbatim; fixed-width values are
+range-checked (*Range checks*); `numeric` goes through `numeric_recv`
+(*numeric*). No typmod is applied to any result: PostgreSQL does not keep
+the typmod of a function result (`pg_proc` has none), for any language; the
+typmod of a domain is applied by the domain's input function, since domains
+are text-I/O types.
+
+### Range checks
+
+Every fixed-width value a guest hands back -- a function result, a
+prepared-statement parameter, the value converted by `tz_convert` -- is
+checked by `plzig_scalar_from_guest`/`plzig_fixed16_from_guest`
+(`src/plzig_types.c`) exactly as the type's binary receive function checks
+it, with PostgreSQL's own macros, and an invalid one is an `ERROR` with
+PostgreSQL's message and SQLSTATE (the detail names the raw value and
+whether it was the result or parameter `$n`):
+
+| Type | Accepted | Otherwise |
+|------|----------|-----------|
+| `date` | `DATE_NOT_FINITE(d) \|\| IS_VALID_DATE(d)`; `val` within i32 | `22008 date out of range` |
+| `time` | `0 <= t <= USECS_PER_DAY` | `22008 time out of range` |
+| `timetz` | time as `time`; `-TZDISP_LIMIT < zone < TZDISP_LIMIT` | `22008` / `22009 time zone displacement out of range` |
+| `timestamp`, `timestamptz` | `TIMESTAMP_NOT_FINITE(t) \|\| IS_VALID_TIMESTAMP(t)` | `22008 timestamp out of range` |
+| `oid` | `val <= UINT32_MAX` | `22003 OID out of range` |
+| `interval`, `uuid` | `len` = 16 (every bit pattern is a value `interval_recv`/`uuid_recv` accept) | `22P03 invalid length` |
+
+### numeric
+
+A `numeric` crosses the boundary in PostgreSQL's binary wire format, the
+one `numeric_send` writes: big-endian u16 `ndigits`, i16 `weight`, u16
+`sign` (`0x0000` +, `0x4000` −, `0xC000` NaN, `0xD000` +Infinity, `0xF000`
+−Infinity), u16 `dscale`, then `ndigits` u16 base-10000 digits; the value is
+Σ digit[i] · 10000^(weight − i). It is architecture independent, and its
+reader `numeric_recv` is the server's validating path for untrusted bytes.
+On the way in (arguments, columns) the host calls `numeric_send`. On the way
+back (results, parameters, `numeric_op` operands; `plzig_numeric_from_wire`)
+the host first requires the length to be 8 to 131 078 bytes and exactly
+`8 + 2·ndigits` (so `numeric_recv` can never run out of data: its
+"insufficient data" error would carry a class-08 protocol SQLSTATE), then
+calls `numeric_recv` (typmod −1) on a copy, which checks the sign, the
+scale, every digit (< 10000) and the weight/scale limits, truncates digits
+beyond `dscale` and normalises. Errors: `22P03` (bad length, sign, scale or
+digit), `22003` (value overflows numeric format).
+
+### jsonb
+
+A `jsonb` argument or column is the detoasted value's on-disk layout
+(`VARDATA` of the varlena: the root `JsonbContainer`), copied once into
+guest memory and read in place by the SDK (`plzig.Jsonb`); jsonb results and
+parameters are JSON text that the host parses with `jsonb_in`, so a guest
+can never store a binary jsonb. The layout (`src/include/utils/jsonb.h`,
+identical in 14–19) is in host byte order: on a big-endian host
+(`WORDS_BIGENDIAN`) `jsonb` falls back to the text representation, decided
+at compile time in `plzig_type_kind`; only little-endian hosts are tested.
+
+Layout as the SDK reads it (`zig/sdk/plzig.zig`, *jsonb*): a container is a
+u32 header (`count | flags`, flags `0x40000000` array, `0x20000000` object,
+`0x50000000` a raw scalar — a one-element array, root only), then the
+JEntries (one per element; for an object all keys, then all values), then
+the children's data. A JEntry is `type (0x70000000) | HAS_OFF (0x80000000) |
+length-or-end-offset (0x0FFFFFFF)`; types string, numeric, false, true,
+null, container. A child's start is the sum of the preceding lengths back to
+the nearest entry with `HAS_OFF` (every 32nd stores its end offset:
+`getJsonbOffset`); numerics and nested containers start at the next 4-byte
+boundary (`INTALIGN`, relative to the data area). Keys are unique and sorted
+by length, then bytes (`lengthCompareJsonbString`); object lookup is the
+binary search of `getKeyJsonValueFromContainer`. Numbers are PostgreSQL's
+on-disk numerics (a varlena with a 1- or 4-byte header; numeric header
+short, long or special), decoded in the guest into the wire format above.
+Every read is checked against the value's bounds; malformed bytes give
+`error.InvalidJsonb`, never a read outside the value.
 
 ### Argument buffer
 
@@ -159,7 +243,7 @@ parentheses). Every import:
   guest memory across anything that could run guest code;
 * validates every handle on every use (*Handles*).
 
-19 imports, the complete list (the loader's allowlist,
+21 imports, the complete list (the loader's allowlist,
 `plzig_known_imports` in `src/plzig_runtime.c`, and the registration table
 in `src/plzig_host.c` must match):
 
@@ -177,13 +261,15 @@ in `src/plzig_host.c` must match):
 | `spi_colname_copy(col, buf, buf_len)` | `(iii)i` | Copy up to `buf_len` bytes of the column name; returns bytes copied. |
 | `spi_row_size(row)` | `(i)I` | Select row `row` of the last result for typed reading and return the size of its encoding (see *Rows*). Out-of-range or no result → `ERROR`. |
 | `spi_row_read(row, buf, buf_len)` | `(iii)i` | Write the encoding of row `row` to `[buf, buf + buf_len)`; `buf_len` must be at least the size. Returns the number of columns. |
-| `spi_prepare(sql_ptr, sql_len, types_ptr, ntypes)` | `(iiii)I` | Prepare `sql` with `ntypes` (≤ 65535) parameters; `types_ptr` points to `ntypes` u32 type codes `1`..`8` (*Kinds*), anything else → `ERROR`. The host maps the codes to fixed type OIDs; the guest never supplies an OID. `SPI_prepare_cursor(..., CURSOR_OPT_NO_SCROLL)` + `SPI_keepplan`; the plan goes into the calling instance's plan table. More than `plzig.max_prepared_plans` live plans in the instance → `ERROR` (no eviction). Returns a plan handle (never 0). |
+| `spi_prepare(sql_ptr, sql_len, types_ptr, ntypes)` | `(iiii)I` | Prepare `sql` with `ntypes` (≤ 65535) parameters; `types_ptr` points to `ntypes` u32 type codes `1`..`8`, `10`..`19` (*Kinds*), anything else → `ERROR`. The host maps the codes to fixed type OIDs; the guest never supplies an OID. `SPI_prepare_cursor(..., CURSOR_OPT_NO_SCROLL)` + `SPI_keepplan`; the plan goes into the calling instance's plan table. More than `plzig.max_prepared_plans` live plans in the instance → `ERROR` (no eviction). Returns a plan handle (never 0). |
 | `spi_plan_free(plan)` | `(I)` | Free a plan (`SPI_freeplan`); the handle is invalid afterwards. |
-| `spi_execute_plan(plan, params_ptr, nparams)` | `(Iii)I` | Execute a plan with `nparams` typed values (*Values*); `nparams` must equal the plan's parameter count and each value's `kind` must equal the kind of the plan's parameter type (`SPI_getargtypeid`), or be `0` with `is_null` = 1. Values must be in range for the type (`int2`/`int4` sign-extended within range, `bool` 0/1, `float4` upper 32 bits zero); text must be valid in the database encoding without NUL. `read_only` as for `spi_execute`, decided at every execution. The result replaces the last result. Returns `SPI_processed`. |
+| `spi_execute_plan(plan, params_ptr, nparams)` | `(Iii)I` | Execute a plan with `nparams` typed values (*Values*); `nparams` must equal the plan's parameter count and each value's `kind` must equal the kind of the plan's parameter type (`SPI_getargtypeid`), or be `0` with `is_null` = 1. Values must be in range for the type (`int2`/`int4` sign-extended within range, `bool` 0/1, `float4` upper 32 bits zero, fixed-width types as in *Range checks*); text must be valid in the database encoding without NUL; a `numeric` goes through `numeric_recv`, a `jsonb` is JSON text through `jsonb_in`. `read_only` as for `spi_execute`, decided at every execution. The result replaces the last result. Returns `SPI_processed`. |
 | `spi_cursor_open(sql_ptr, sql_len, params_ptr, nparams)` | `(iiii)I` | Open a cursor on `sql` with text parameters (as `spi_execute`): `SPI_cursor_open_with_args(NULL, ..., read_only, CURSOR_OPT_NO_SCROLL)`. More than `plzig.max_open_cursors` open cursors in this call → `ERROR`. Returns a cursor handle (never 0). |
 | `spi_cursor_open_plan(plan, params_ptr, nparams)` | `(Iii)I` | Open a cursor on a plan with typed values (checked as for `spi_execute_plan`): `SPI_cursor_open(NULL, plan, ..., read_only)`. Only plans that return rows (`SELECT`, `... RETURNING`) can be opened. |
 | `spi_cursor_fetch(cursor, buf, buf_len)` | `(Iii)I` | The next row: returns `-1` at the end, else `ncols << 32 \| size` (size of the row's encoding, see *Rows*). If `size ≤ buf_len` the row has been written to `[buf, buf + size)` (range validated) and is consumed; otherwise nothing is written and the row stays current: the next call delivers the same, already converted row (so a guest grows its buffer and calls again; a row is taken from the portal exactly once). Rows are fetched from the portal `PLZIG_CURSOR_BATCH` (50) at a time with `SPI_cursor_fetch(portal, forward, 50)`; the previous batch is freed first. At the end the portal is closed (the handle stays valid until `spi_cursor_close`; further calls return `-1`). |
 | `spi_cursor_close(cursor)` | `(I)` | Close the cursor and free its handle. |
+| `numeric_op(op, a_ptr, a_len, b_ptr, b_len, arg, out_ptr, out_cap)` | `(iiiiiiii)i` | One `numeric` operation by PostgreSQL's own function, operands and result in the binary wire format (*numeric*): `op` 1 `numeric_add`, 2 `numeric_sub`, 3 `numeric_mul`, 4 `numeric_div`, 5 `numeric_div_trunc`, 6 `numeric_mod`, 7 `numeric_round(a, arg)`, 8 `numeric_trunc(a, arg)`, 9 `numeric_abs`, 10 `numeric_uminus`; anything else → `ERROR`. Operand `b` is read only by ops 1–6, `arg` only by 7 and 8. Each operand is length-checked, copied and validated by `numeric_recv` before use. If the result's length ≤ `out_cap` it is written to `[out_ptr, out_ptr + len)` (range validated) and `len` is returned; otherwise nothing is written and `-len` is returned (the guest calls again with a large enough buffer; the operation is deterministic). Division by zero (`22012`), overflow (`22003`) etc. are ordinary SQL errors. |
+| `tz_convert(op, value, zone_ptr, zone_len)` | `(iIii)I` | Time zone conversion by PostgreSQL's own functions: `op` 1 = timestamptz → local timestamp, 2 = local timestamp → timestamptz; anything else → `ERROR`. `value` is range-checked first (*Range checks*; infinities pass through). `zone_len` = 0: the session's `TimeZone` (`timestamptz_timestamp` / `timestamp_timestamptz`); otherwise the zone name (≤ 1024 bytes, `54000` beyond; database encoding, no NUL) is copied into a `text` and `timestamptz_zone` / `timestamp_zone` (`AT TIME ZONE`) are called, so an unknown zone is `22023`. Returns the converted value. |
 
 Text values of `spi_value_*` are produced with `SPI_getvalue` (type output
 functions); a one-entry cache avoids converting a value twice for `len` +
@@ -212,6 +298,16 @@ Value kinds (`u16`), shared by parameters and result columns:
 | 7 | text | `text` | `text`, `varchar`, `bpchar` | `val` = pointer, `len` = bytes of the (detoasted) value, database encoding |
 | 8 | bytea | `bytea` | `bytea` | `val` = pointer, `len` = byte length |
 | 9 | other | – (pass text, cast in SQL) | every other type (exact OID match, so domains too) | `val` = pointer, `len` = length of the type's text output |
+| 10 | date | `date` | `date` | `val` = DateADT sign-extended |
+| 11 | time | `time` | `time` | `val` = TimeADT |
+| 12 | timetz | `time with time zone` | same | `val` = time, `len` = zone (i32 bits) |
+| 13 | timestamp | `timestamp` | `timestamp` | `val` = Timestamp |
+| 14 | timestamptz | `timestamp with time zone` | same | `val` = TimestampTz |
+| 15 | interval | `interval` | `interval` | `val` = pointer, `len` = 16 (Interval layout) |
+| 16 | uuid | `uuid` | `uuid` | `val` = pointer, `len` = 16 |
+| 17 | oid | `oid` | `oid` | `val` = OID |
+| 18 | numeric | `numeric` | `numeric` | `val` = pointer, `len` = length of the wire format |
+| 19 | jsonb | `jsonb`: the value is **JSON text**, parsed by `jsonb_in` | `jsonb`: the value's **on-disk layout** (detoasted) | `val` = pointer, `len` = byte length |
 
 The kind of a result column is derived by the host from the actual tuple
 descriptor of the result (`TupleDescAttr(...)->atttypid`), separately for
@@ -229,12 +325,12 @@ every result and every cursor; it is never taken from the guest.
 ### Rows
 
 `spi_row_read` and `spi_cursor_fetch` write a row as `ncols` Values followed
-by the bytes of the byte-kind values (kinds 7–9), each starting 8-byte
-aligned; their `val` holds the guest address of the bytes. Size =
+by the bytes of the byte-kind values (kinds 7–9, 15, 16, 18, 19), each
+starting 8-byte aligned; their `val` holds the guest address of the bytes. Size =
 `16 * ncols` + the sum of the byte lengths rounded up to 8, at most
 `MaxAllocSize` (larger rows → `ERROR`). The host converts the row when it is
 selected (`spi_row_size`, or `spi_cursor_fetch` when it takes the next row
-from the batch: detoasting, output functions; the per-column arrays are
+from the batch: detoasting, output functions, `numeric_send`; the per-column arrays are
 allocated once per result/cursor, the values in a per-row context that is
 reset for the next row), so its size is known before it is copied, and
 copies it into guest memory when the guest reads it (never aliasing host
@@ -287,8 +383,10 @@ name crosses the boundary.
   context, reset by every SPI import. Host memory therefore does not grow
   with the number of rows or executions.
 
-There are deliberately no imports for time, randomness, environment, files,
-network, threads, memory management or transaction control; guest memory
+There are deliberately no imports for the clock, randomness, environment,
+files, network, threads, memory management or transaction control
+(`tz_convert` converts a timestamp the guest already has; it does not read
+the clock); guest memory
 grows only through the `memory.grow` instruction, bounded by
 `plzig.max_memory`.
 
@@ -310,13 +408,16 @@ grows only through the `memory.grow` instruction, bounded by
   `Result.columnName(col) ![]const u8`. Only the most recent result is
   accessible.
 * `plzig.spi.prepare(sql, types: []const Type) !Plan` with `Type` =
-  `.boolean, .int2, .int4, .int8, .float4, .float8, .text, .bytea`;
-  `Plan.execute(args) !Result`, `Plan.open(args) !Cursor`, `Plan.free()`.
-  `args` is a tuple of `bool`, `i16`, `i32`, `i64`, `f32`, `f64`, byte
-  slices / string literals (text), `plzig.bytea(bytes)` (bytea), optionals
-  of these, or `null`; values are encoded on the stack (no arena use). An
-  untyped numeric literal is a compile error. The `Plan` struct holds only
-  the handle and may be kept in a global.
+  `.boolean, .int2, .int4, .int8, .float4, .float8, .text, .bytea, .date,
+  .time, .timetz, .timestamp, .timestamptz, .interval, .uuid, .oid,
+  .numeric, .jsonb`; `Plan.execute(args) !Result`, `Plan.open(args)
+  !Cursor`, `Plan.free()`. `args` is a tuple of `bool`, `i16`, `i32`, `i64`,
+  `f32`, `f64`, byte slices / string literals (text), `plzig.bytea(bytes)`
+  (bytea), `plzig.Date` ... `plzig.Oid`, `plzig.Numeric`, `plzig.JsonText`
+  (jsonb), optionals of these, or `null`; values are encoded on the stack
+  (16-byte values copied into a stack array; no arena use). An untyped
+  numeric literal is a compile error. The `Plan` struct holds only the
+  handle and may be kept in a global.
 * `plzig.spi.open(sql, params: []const ?[]const u8) !Cursor`;
   `Cursor.next() !?Row` (`error.CursorClosed` after `close`), `Cursor.close()`.
   The SDK closes the cursor when `next` reaches the end. Each Cursor has a
@@ -326,10 +427,34 @@ grows only through the `memory.grow` instruction, bounded by
   when the buffer has to grow first. `Result.row` uses one such buffer shared by all
   Results (invalid after the next `Result.row`; reset with the arena).
 * `Row.len()`, `Row.kind(col) !Kind`, `Row.isNull(col) !bool`,
-  `Row.get(T, col)` with `T` = `bool`, `i16`, `i32`, `i64`, `f32`, `f64`
-  (column kind must match exactly), `[]const u8` (kinds text, bytea, other),
-  or `?T`; errors `error.TypeMismatch`, `error.UnexpectedNull`,
-  `error.ColumnOutOfRange`. Never converts or reinterprets.
+  `Row.get(T, col)` with `T` = `bool`, `i16`, `i32`, `i64`, `f32`, `f64`,
+  `plzig.Date`, `Time`, `TimeTz`, `Timestamp`, `TimestampTz`, `Interval`,
+  `Uuid`, `Oid`, `Numeric`, `Jsonb` (column kind must match exactly),
+  `[]const u8` (kinds text, bytea, other), or `?T`; errors
+  `error.TypeMismatch`, `error.UnexpectedNull`, `error.ColumnOutOfRange`.
+  Never converts or reinterprets.
+* Fixed-width types (`plzig.Date{ .days }`, `Time{ .usecs }`,
+  `TimeTz{ .usecs, .zone }`, `Timestamp{ .usecs }`, `TimestampTz{ .usecs }`,
+  `Interval{ .usecs, .days, .months }`, `Uuid{ .bytes }`, `Oid{ .value }`):
+  PostgreSQL's representation; calendar conversions in the guest
+  (`Date.fromYmd/ymd/dayOfWeek/dayOfYear/toTimestamp`, `Time.fromHms/hms`,
+  `Timestamp.fromFields/fields/date/time`; PostgreSQL's Julian-day code,
+  `make_date`/`make_timestamp` rules, BC years negative) and time zones by
+  the host (`TimestampTz.toLocal/fromLocal/fields/fromFields(zone)`, null =
+  the session's TimeZone: `tz_convert`); `Uuid.parse/format`.
+* `plzig.Numeric{ .wire }`: `fromWire` (validated), `isNaN/isInf/isFinite/
+  isZero/isNegative`, `scale`, `weight`, `order/eql` (PostgreSQL's ordering),
+  `toI64` (exact), `toF64` (correctly rounded), `fromI64`, `fromF64`
+  (`%.15g`, as `float8::numeric`), `parse` (numeric_in's decimal syntax),
+  `toText`/`{f}` (numeric_out's text); arithmetic by the host
+  (`add/sub/mul/div/divTrunc/mod/round/trunc/abs/neg`: `numeric_op`).
+  `*Alloc` variants take an explicit allocator.
+* `plzig.Jsonb{ .bytes }`: `root() !JsonValue` (`null`, `bool`, `string`,
+  `number: JsonNumber`, `array: JsonArray`, `object: JsonObject`),
+  `JsonArray.len/get/iterator`, `JsonObject.len/get(key)/entry/iterator`,
+  `JsonNumber.numeric/toI64/toF64`, `toJsonText()` (jsonb_out's text);
+  `plzig.JsonText{ .text }` / `plzig.jsonText(t)` for jsonb results and
+  parameters.
 * `plzig.std` (also predeclared as `std`): `mem`, `fmt`, `math`, `ascii`,
   `unicode`, `sort`, `hash`, `hash_map`, `meta`, `base64`, `enums`,
   `bit_set`, `ArrayList`, the hash maps, `StaticStringMap`,

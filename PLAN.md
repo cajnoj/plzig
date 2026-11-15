@@ -615,22 +615,24 @@ v1 is expected to be slower than PL/pgSQL; neither weakens the sandbox.
     of earlier calls of the same instance instead of 0xAA.
 12. **Native mappings for more built-in types** (owner decision,
     2026-11-15; before the extension port of item 13 and before packaging).
+    **Steps 1–4 done (2026-11-15), see Deviations from plan, 29; step 5
+    (arrays) not started.**
     Today every type other than bool, int2/4/8, float4/8, text-like and
     bytea crosses the boundary as text. In this order:
-    1. *Fixed-width types*: `date`, `time`, `timestamp`, `timestamptz`,
+    1. **Done.** *Fixed-width types*: `date`, `time`, `timestamp`, `timestamptz`,
        `interval`, `uuid`, `oid`. Raw values in the existing 16-byte slot;
        the host range-checks every value a guest returns or passes as an SPI
        parameter (PostgreSQL's own range macros) and raises an error for an
        invalid one.
-    2. *`numeric`*: PostgreSQL's binary wire format in both directions
+    2. **Done.** *`numeric`*: PostgreSQL's binary wire format in both directions
        (`numeric_send` / `numeric_recv`: architecture independent, and
        `numeric_recv` is the server's validating path for untrusted bytes).
        Comparison, conversion to `i64`/`f64` and formatting in the SDK;
        arithmetic as host imports that call the native functions, so results
        are PostgreSQL's exactly.
-    3. *Time zone and calendar conversion* as host imports (the guest sees
+    3. **Done.** *Time zone and calendar conversion* as host imports (the guest sees
        neither the time zone database nor the session's `TimeZone`).
-    4. *`jsonb` input* in the on-disk layout (stable since 9.4, identical in
+    4. **Done.** *`jsonb` input* in the on-disk layout (stable since 9.4, identical in
        14–19), read in place by an SDK reader: lazy, binary search on object
        keys. Parsing happens inside the sandbox. `jsonb` *results* stay text
        through `jsonb_in`: a guest-built binary value stored unchecked would
@@ -1539,3 +1541,85 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
     - *Not done:* the same single-call scheme for `Result.row`
       (`spi_row_size` + `spi_row_read` stay two calls); the three
       optional items 9-11 of §12.
+29. **§12 item 12, steps 1–4: native mappings for more built-in types
+    (2026-11-15).** SDK ABI version 4 (part of the cache key: every module
+    is recompiled once); two new host imports, `numeric_op` and
+    `tz_convert` (21 in total); value kinds 10–19 (`doc/abi.md`, *Kinds*);
+    no new GUC. Implemented as written, except:
+    - *16-byte types out of line.* `interval` and `uuid` are 16 bytes and do
+      not fit in the slot next to its flags, so they are passed like byte
+      values (copied after the slots, `len` = 16, checked); everything else
+      of step 1 is a raw value in `val` (`timetz`: time in `val`, zone in
+      `len`, so `timetz` is mapped too). A 16-byte result is copied by the
+      SDK to a static buffer outside the stack and the arena.
+    - *Range checks* (`plzig_scalar_from_guest`, `src/plzig_types.c`) use
+      PostgreSQL's macros as the receive functions do (`DATE_NOT_FINITE`,
+      `IS_VALID_DATE`, `TIMESTAMP_NOT_FINITE`, `IS_VALID_TIMESTAMP`,
+      `0..USECS_PER_DAY`, `TZDISP_LIMIT`) with their messages and SQLSTATEs
+      (22008, 22009; `oid` > 2^32−1: 22003); `interval` and `uuid` accept
+      every bit pattern (their receive functions do), only the length is
+      checked. The same checks apply to prepared-statement parameters and to
+      the value `tz_convert` converts.
+    - *Typmods*: no typmod is applied to results, because PostgreSQL keeps
+      none for function results (as for every language; tested against
+      PL/pgSQL with `timestamp(0)`, `interval day`, `numeric(5,2)`).
+      Domains over the new types stay text-I/O types (exact OID matching,
+      as before), so a domain's typmod and constraints are applied by its
+      input function; prepared-statement parameters have no typmod either
+      (a column's typmod applies at `INSERT`, tested).
+    - *numeric*: the host checks the wire length against `ndigits` before
+      calling `numeric_recv` (its "insufficient data left in message" would
+      carry the class-08 SQLSTATE `08P01`). Guest-side: inspection,
+      `order`/`eql`, `toI64` (exact, never rounded), `toF64` (correctly
+      rounded, overflow/underflow are errors as in PostgreSQL), `fromI64`,
+      `fromF64` (15 significant digits of the *exact* binary value, half to
+      even, as glibc's `%.15g` in `float8_numeric`; Zig's own precision
+      formatting rounds the shortest representation instead, which differs
+      on ties, so the SDK has a small exact digit generator), `parse`
+      (numeric_in's decimal syntax; PostgreSQL 16's underscores and 0x/0o/0b
+      forms are refused) and `toText`. Arithmetic set: add, sub, mul, div,
+      divTrunc, mod, round(scale), trunc(scale), abs, neg -- one import,
+      results written to a guest buffer if they fit, else `-len` and the
+      guest calls again with a larger buffer (recomputed: no host-side
+      state).
+    - *Time zones*: one import with two operations (to local, from local),
+      zone name or the session's `TimeZone`; calendar arithmetic
+      (`Date.fromYmd/ymd/dayOfWeek/dayOfYear`, `Time.fromHms/hms`,
+      `Timestamp.fromFields/fields/date/time`) is in the guest, a port of
+      `date2j`/`j2date` with `make_date`/`make_time`/`make_timestamp`'s
+      validation order, BC years negative as EXTRACT gives them. The SQL
+      comparison caught an i64 overflow in an early `Timestamp.fromFields`
+      (dates far beyond the timestamp range) before it was committed.
+    - *jsonb*: argument and column values are the detoasted value's bytes
+      (`VARDATA_ANY`, one copy); the reader returns `error.InvalidJsonb` for
+      every malformed layout instead of trapping (the plan allowed traps):
+      the unit tests walk every prefix and many byte flips of each fixture,
+      and the native fuzz target treats any panic as a finding. jsonb
+      *parameters* are added as kind 19 = JSON text through `jsonb_in`
+      (useful, and as safe as results); results are `plzig.JsonText`. The
+      serialiser (`toJsonText`) reproduces `jsonb_out` exactly (checked
+      against `jsonb_out` by the regression test and differentially by the
+      marshal fuzz target) and is iterative, so nesting depth never meets
+      the guest stack. Big-endian hosts fall back to text by
+      `#ifndef WORDS_BIGENDIAN` in `plzig_type_kind` (the only new
+      conditional; no new `PG_VERSION_NUM` conditional).
+    - *Existing behaviour that changed*: functions and prepared statements
+      with arguments/results/columns of the ten types now get the native
+      Zig types (a body that returned `numeric` or `date` as text does not
+      compile any more; `Row.get([]const u8, col)` on such a column is
+      `error.TypeMismatch`). Tests and README examples were updated;
+      `types.sql`'s text-I/O cases now use types that stay text (`inet`,
+      `daterange`, `bit varying`), `leaks.sql`'s text-I/O shape uses a
+      domain over `numeric`.
+    - *Tests*: `test/sql/types_fixed.sql`, `types_numeric.sql`,
+      `types_calendar.sql`, `types_jsonb.sql` (also in the Valgrind list),
+      new shapes in `leaks.sql` (numeric, time zones, jsonb results, a
+      compressed out-of-line jsonb argument), 24 new hostile-guest cases in
+      `docker/security-checks.sh` (50–73), SDK unit tests (byte fixtures
+      from PostgreSQL), fuzz target `jsonb` (new) and extensions of
+      `hostabi` (both new imports, every kind) and `marshal` (range-limit
+      values, random jsonb documents, jsonb_out differential).
+    - *Benchmark*: task 13 (`bench/tasks/13_native_types`): numeric
+      arithmetic loop, jsonb field extraction per row (binary and through
+      the text representation of a domain over jsonb), timestamp column sum
+      over a cursor.

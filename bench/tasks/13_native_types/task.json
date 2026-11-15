@@ -1,0 +1,10 @@
+{
+  "title": "Natively mapped types: numeric arithmetic, jsonb field extraction, timestamp column",
+  "stresses": "numeric host calls, the jsonb reader (binary vs. text), fixed-width columns",
+  "params": {"full": {"n": 200000}, "quick": {"n": 20000}},
+  "variants": [
+    {"name": "numeric_loop", "fn": "t13a", "query": "SELECT {fn}({n})"},
+    {"name": "jsonb_field", "fn": "t13b", "query": "SELECT sum({fn}(doc)) FROM bench_jsonb"},
+    {"name": "timestamp_sum", "fn": "t13c", "query": "SELECT {fn}()"}
+  ]
+}

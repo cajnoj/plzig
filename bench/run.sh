@@ -11,7 +11,7 @@
 #   --versions "V ..."   PostgreSQL versions (postgres:<V>-bookworm), default 18.7;
 #                        the first one is the primary version of the report
 #   --quick              small data, 1 warm-up + 5 timed runs, 3 s pgbench, JIT off only
-#   --tasks LIST         comma-separated task numbers 1..12 (default: all)
+#   --tasks LIST         comma-separated task numbers 1..13 (default: all)
 #   --jit LIST           off,on (default; quick: off)
 #   --warmup N --runs N  per task and implementation (default 3 and 15)
 #   --clients LIST       pgbench client counts (default 1,4,8; empty: no pgbench)

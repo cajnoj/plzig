@@ -185,8 +185,9 @@ architecture; only x86_64 has been run.
 
 **Fuzzing** (`docker/run-fuzz.sh <target> <seconds>`, see
 `fuzz/README.md`): the validator, the module loader, the host-import ABI,
-marshalling and the source generator, and the whole compile pipeline, each
-for a time budget, non-zero exit status on a finding.
+marshalling and the source generator, the SDK's jsonb reader and numeric
+decoders, and the whole compile pipeline, each for a time budget, non-zero
+exit status on a finding.
 
 **Benchmarks** (not tests, not part of the build): `bench/run.sh`, see
 [bench/README.md](bench/README.md) and [doc/benchmarks.md](doc/benchmarks.md).
@@ -219,17 +220,37 @@ library, also `plzig.std`).
 | `real`, `double precision` | `f32`, `f64` |
 | `text`, `varchar`, `char(n)` | `[]const u8` (bytes in the database encoding) |
 | `bytea` | `[]const u8` |
-| anything else (numeric, date, arrays, enums, domains, composites, json…) | `[]const u8` holding the type's text representation |
+| `date` | `plzig.Date` (`.days` since 2000-01-01; `Date.infinity`, `Date.neg_infinity`) |
+| `time`, `time with time zone` | `plzig.Time` (`.usecs` since midnight), `plzig.TimeTz` (`.usecs`, `.zone` = seconds west of UTC) |
+| `timestamp`, `timestamp with time zone` | `plzig.Timestamp`, `plzig.TimestampTz` (`.usecs` since 2000-01-01 00:00 (UTC); infinities) |
+| `interval` | `plzig.Interval` (`.months`, `.days`, `.usecs`) |
+| `uuid` | `plzig.Uuid` (`.bytes`; `parse`, `format`) |
+| `oid` | `plzig.Oid` (`.value`) |
+| `numeric` | `plzig.Numeric` (PostgreSQL's binary format; text, comparison, conversions, arithmetic) |
+| `jsonb` | argument: `plzig.Jsonb` (read in place); result: `plzig.JsonText` (JSON text) |
+| anything else (arrays, enums, domains, ranges, composites, json, inet…) | `[]const u8` holding the type's text representation |
 | `void` | `void` |
 
 * `STRICT` functions get plain parameter types; otherwise parameters are
   optionals (`?i32`), `null` meaning SQL NULL.
 * The return type is `anyerror!?T`: `return null;` returns SQL NULL,
   returning a Zig error raises `ERROR: plzig function failed: <ErrorName>`.
-* Returned text must be valid in the database encoding; values of other
-  types go through the type's input function, so invalid dates, domain
-  constraint violations etc. are reported by PostgreSQL (a NULL result of
-  a domain type is checked against the domain's constraints too).
+* Returned text must be valid in the database encoding; values of
+  text-represented types go through the type's input function, so domain
+  constraint violations, bad array syntax etc. are reported by PostgreSQL
+  (a NULL result of a domain type is checked against the domain's
+  constraints too).
+* Values of the natively mapped types are PostgreSQL's own representation,
+  and the types are distinct, so returning a `plzig.Date` from a function
+  declared `RETURNS timestamp` does not compile. What a function returns
+  (or passes as a prepared-statement parameter) is checked exactly as
+  PostgreSQL's binary input functions check it: a date, time or timestamp
+  outside PostgreSQL's range is `ERROR: date out of range` (`22008`) etc.;
+  a `numeric` goes through `numeric_recv`; a `jsonb` result is JSON text
+  parsed by `jsonb_in`. Domains over these types are passed as text. As in
+  every language, the typmod of a declared result type (`timestamp(0)`,
+  `numeric(5,2)`) is not applied, because PostgreSQL does not keep it;
+  use a domain (`CREATE DOMAIN money2 AS numeric(12,2)`) to have it applied.
 * Unnamed parameters are called `arg1`, `arg2`, …; parameter names must
   be ASCII identifiers (`[A-Za-z_][A-Za-z0-9_]*`) other than `plzig`, `std`
   and `call`. Zig keywords are fine as names: refer to them as `@"return"`.
@@ -252,6 +273,67 @@ fn fibImpl(n: u32) i64 {
     return a;
 $$;
 ```
+
+### Dates, times, numeric and jsonb
+
+```sql
+CREATE FUNCTION next_monday(d date) RETURNS date STRICT LANGUAGE plzig AS $$
+    const dow: i32 = try d.dayOfWeek();         // 0 = Sunday, as EXTRACT(dow)
+    return .{ .days = d.days + (if (dow == 1) 7 else @mod(8 - dow, 7)) };
+$$;
+
+CREATE FUNCTION local_hour(t timestamptz, zone text) RETURNS int STRICT LANGUAGE plzig AS $$
+    const f = try t.fields(zone);               // the host converts; null = session TimeZone
+    return f.hour;
+$$;
+
+CREATE FUNCTION with_tax(price numeric) RETURNS numeric STRICT LANGUAGE plzig AS $$
+    const rate = try plzig.Numeric.parse("1.19");
+    return try (try price.mul(rate)).round(2);  // PostgreSQL's numeric code, exactly
+$$;
+
+CREATE FUNCTION qty_of(doc jsonb) RETURNS int STRICT LANGUAGE plzig AS $$
+    const v = (try (try doc.root()).object.get("qty")) orelse return null;
+    return @intCast(try v.number.toI64());
+$$;
+
+CREATE FUNCTION tagged(doc jsonb) RETURNS jsonb STRICT LANGUAGE plzig AS $$
+    // results are JSON text (parsed by jsonb_in)
+    return plzig.jsonText(try std.fmt.allocPrint(plzig.allocator,
+        "{{\"doc\": {s}, \"tag\": 1}}", .{(try doc.toJsonText()).text}));
+$$;
+```
+
+* **Calendar** (in the guest, PostgreSQL's Julian-day code):
+  `Date.fromYmd(y, m, d)` (as `make_date`; a negative year is BC),
+  `d.ymd()`, `d.dayOfWeek()`, `d.dayOfYear()`, `d.toTimestamp()`;
+  `Time.fromHms(h, m, s, us)`, `t.hms()`; `Timestamp.fromFields(.{ .year,
+  .month, .day, .hour, .minute, .second, .microsecond })` (as
+  `make_timestamp`; second 60 is a leap second), `ts.fields()`, `ts.date()`,
+  `ts.time()`. Impossible fields are `error.InvalidDate`/`InvalidTime`,
+  values outside PostgreSQL's range `error.OutOfRange`.
+* **Time zones** (by the host, PostgreSQL's time zone code):
+  `tz.toLocal(zone)` (`AT TIME ZONE`), `TimestampTz.fromLocal(ts, zone)`,
+  `tz.fields(zone)`, `TimestampTz.fromFields(f, zone)`; `zone` is a name
+  (`"Europe/Berlin"`, `"UTC"`, `"+05:30"`, ...) or `null` for the session's
+  `TimeZone`.
+* **numeric**: `n.toText()` (and `{f}` in format strings: numeric_out's
+  text), `Numeric.parse(text)`, `n.order(m)`/`eql` (PostgreSQL's ordering:
+  NaN largest), `isNaN`/`isInf`/`isFinite`/`isZero`/`isNegative`, `scale()`,
+  `toI64()` (exact: `error.NotIntegral`/`Overflow`), `toF64()` (correctly
+  rounded), `fromI64`, `fromF64` (as `float8::numeric`); arithmetic by the
+  host: `add`, `sub`, `mul`, `div`, `divTrunc`, `mod`, `round(digits)`,
+  `trunc(digits)`, `abs`, `neg` -- results are PostgreSQL's exactly,
+  division by zero is the usual SQL error. Every result is allocated in the
+  arena (a few dozen bytes per operation).
+* **jsonb**: `doc.root()` gives a `plzig.JsonValue` (`.null`, `.bool`,
+  `.string`, `.number`, `.array`, `.object`); `obj.get(key)` (a binary
+  search, as jsonb does), `obj.iterator()` (keys in jsonb's order: by
+  length, then bytes), `arr.len()`, `arr.get(i)`, `arr.iterator()`;
+  `number.toI64()`/`toF64()`/`numeric()`; `toJsonText()` on a document or
+  any value gives jsonb_out's text. Malformed bytes (never produced by
+  PostgreSQL) are `error.InvalidJsonb`. On a big-endian server `jsonb`
+  arguments are text instead.
 
 ### Memory
 
@@ -317,7 +399,7 @@ CREATE FUNCTION price_of(item text) RETURNS numeric STRICT LANGUAGE plzig AS $$
     const r = try plzig.spi.execute(
         "SELECT price FROM items WHERE name = $1", &.{item});
     if (r.rows == 0) return null;
-    return try r.get(0, 0);
+    return try (try r.row(0)).get(?plzig.Numeric, 0);
 $$;
 ```
 
@@ -343,10 +425,15 @@ $$;
 ```
 
 * Parameter types: `.boolean`, `.int2`, `.int4`, `.int8`, `.float4`,
-  `.float8`, `.text`, `.bytea`. Other types: declare `.text` and cast in SQL.
+  `.float8`, `.text`, `.bytea`, `.date`, `.time`, `.timetz`, `.timestamp`,
+  `.timestamptz`, `.interval`, `.uuid`, `.oid`, `.numeric`, `.jsonb`.
+  Other types: declare `.text` and cast in SQL.
 * Arguments are a tuple whose element types must match exactly: `bool`,
   `i16`, `i32`, `i64`, `f32`, `f64`, byte slices and string literals
-  (`text`), `plzig.bytea(bytes)` (`bytea`), optionals of these, or `null`.
+  (`text`), `plzig.bytea(bytes)` (`bytea`), `plzig.Date` ... `plzig.Oid`,
+  `plzig.Numeric`, `plzig.JsonText` (`jsonb`: JSON text, parsed by
+  `jsonb_in`), optionals of these, or `null`. Values are range-checked like
+  function results.
   Untyped numeric literals do not compile (write `@as(i32, 5)`); a type or
   count mismatch is an `ERROR`.
 * A `Plan` belongs to the instance that prepared it (globals persist per
@@ -390,9 +477,12 @@ $$;
 **Typed rows** (`Result.row(i)`, `Cursor.next()`): `row.get(T, col)` with
 `T` = `bool`, `i16`, `i32`, `i64`, `f32`, `f64` (the column type must be
 exactly `boolean`, `smallint`, `integer`, `bigint`, `real`, `double
-precision`), or `[]const u8` (`text`/`varchar`/`char(n)` bytes, `bytea`
-bytes, or the text representation of any other type, e.g. `numeric` or a
-domain), or `?T` to accept NULL. Nothing is converted: a different column
+precision`), `plzig.Date`, `Time`, `TimeTz`, `Timestamp`, `TimestampTz`,
+`Interval`, `Uuid`, `Oid`, `Numeric`, `Jsonb` (exactly that type; a
+`Jsonb` from a cursor row is valid until the next `next()`), or
+`[]const u8` (`text`/`varchar`/`char(n)` bytes, `bytea` bytes, or the text
+representation of any other type, e.g. an array or a domain), or `?T` to
+accept NULL. Nothing is converted: a different column
 type is `error.TypeMismatch`, NULL into a non-optional
 `error.UnexpectedNull`, a bad column `error.ColumnOutOfRange` (cast in SQL
 instead: `count(*)::int4`). `row.kind(col)`, `row.isNull(col)`,
@@ -426,8 +516,8 @@ start over.
 Triggers, event triggers, set-returning functions, `OUT`/`INOUT`/`VARIADIC`/
 `TABLE` parameters, polymorphic and other pseudo-types (except `void`
 results), aggregates/window functions, transaction control, catching SQL
-errors, and any access to time, randomness, environment, files or network
-from guest code (use SQL through SPI: `SELECT now()`).
+errors, and any access to the clock, randomness, environment, files or
+network from guest code (use SQL through SPI: `SELECT now()`).
 
 ## Configuration (GUCs)
 
