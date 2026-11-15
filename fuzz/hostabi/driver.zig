@@ -1,6 +1,7 @@
     // fuzz/hostabi/driver.zig: body of
     //   fuzz_hostabi(script bytea) RETURNS int STRICT VOLATILE LANGUAGE plzig
     //   fuzz_hostabi_row(script bytea) RETURNS fuzz_hostabi_rt ...
+    //   fuzz_hostabi_set(script bytea) RETURNS SETOF fuzz_hostabi_rt ...
     // compiled through docker/fake/hostilezig.c (which makes the SDK's host
     // import table public, adds rawPtr/addrOf/memSize helpers and lets
     // hostileCall below replace the SDK's plzig_call), so that it can call
@@ -26,12 +27,42 @@ pub fn hostileCall(args: [*]const Slot, nargs: u32, result: *Slot, begin: u32) u
     const ops = run(script);
     if (Ret == ?i32) {
         result.* = .{ .val = @bitCast(@as(i64, ops)), .len = 0, .is_null = 0 };
+    } else if (Ret == void) {
+        // a set (the script pushed its rows with srf_return_next)
+        result.* = .{ .val = 0, .len = 0, .is_null = 1 };
     } else {
         // a row (struct): forged from the script again
         var sc: Script = .{ .s = script };
-        forgeRow(@typeInfo(Ret).optional.child, &sc, result);
+        if (sc.byte() < 10) {
+            result.* = .{ .val = 0, .len = 0, .is_null = 1 };
+        } else {
+            const f = forgeRow(@typeInfo(Ret).optional.child, &sc);
+            result.* = .{ .val = f[0], .len = f[1], .is_null = 0 };
+        }
     }
     return 0;
+}
+
+/// the row type of a row or set result (the generated Result), if any
+const RowType: ?type = blk: {
+    if (!@hasDecl(@This(), "Result")) break :blk null;
+    const R = @field(@This(), "Result");
+    break :blk if (plzig.isRowType(R)) R else null;
+};
+
+/// srf_return_next with a row forged like a row result (kinds of the real
+/// row type when there is one), or with forged values throughout; outside a
+/// set-returning call the host must refuse it
+fn pushRow(sc: *Script) void {
+    if (RowType) |R| {
+        if (sc.byte() < 220) {
+            const f = forgeRow(R, sc);
+            h.srf_return_next(P([*]const Value, @intCast(f[0] & 0xffff_ffff)), f[1]);
+            return;
+        }
+    }
+    const n = small(sc);
+    h.srf_return_next(P([*]const Value, typedParams(sc, n)), n);
 }
 
 /// the values of a forged row, and the 16-byte payloads they may point to
@@ -41,12 +72,8 @@ var row_fixed: [64][16]u8 align(8) = undefined;
 /// a row result: mostly the right number of values with the right kinds
 /// (taken from encoding an all-NULL row of the real struct), with values
 /// chosen like SPI parameters (typedParams), sometimes forged throughout
-fn forgeRow(comptime R: type, sc: *Script, result: *Slot) void {
+fn forgeRow(comptime R: type, sc: *Script) struct { u64, u32 } {
     const n = comptime plzig.rowFieldCount(R);
-    if (sc.byte() < 10) {
-        result.* = .{ .val = 0, .len = 0, .is_null = 1 };
-        return;
-    }
     const nulls: R = plzig.std.mem.zeroes(R);
     plzig.encodeRow(R, nulls, row_vals[0..n], row_fixed[0..plzig.rowFixedCount(R)]) catch unreachable;
     for (row_vals[0..n], 0..) |*v, k| {
@@ -98,7 +125,7 @@ fn forgeRow(comptime R: type, sc: *Script, result: *Slot) void {
         1 => sc.int(u64),
         else => plzig.addrOf(&row_vals) + 1 + sc.byte() % 7,
     };
-    result.* = .{ .val = where, .len = count, .is_null = 0 };
+    return .{ where, count };
 }
 
 const h = plzig.host;
@@ -356,7 +383,7 @@ fn run(script: []const u8) i32 {
     last_cols = 0;
     while (!sc.done()) : (ops += 1) {
         const op = sc.byte();
-        switch (op % 24) {
+        switch (op % 25) {
             0 => h.log(sc.byte() % 6, P([*]const u8, ptrArg(&sc)), lenArg(&sc)),
             1 => if (op == 1) {
                 h.raise(P([*]const u8, ptrArg(&sc)), lenArg(&sc));
@@ -450,6 +477,7 @@ fn run(script: []const u8) i32 {
                 const pages = sc.byte() % 16;
                 _ = plzig.allocator.alloc(u8, @as(usize, pages) * 65536 + 1) catch {};
             },
+            23 => pushRow(&sc),
             22 => {
                 // scribble on the scratch buffer the host reads from
                 const off = sc.int(u16) % gbuf.len;

@@ -219,8 +219,8 @@ DETAIL:  line 2, column 5: error:
       @compileError("\n\x1b[31m\nERROR:  forged line\x07\x7f\rWARNING:  more\x00");
       ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   referenced by:
-      plzig_call: sdk/root.zig:186:19
-      plzig_call: sdk/root.zig:177:1
+      plzig_call: sdk/root.zig:182:19
+      plzig_call: sdk/root.zig:173:1
       4 reference(s) hidden; use '-freference-trace=6' to see all references
 -- curated std: OS-facing parts are simply not there
 CREATE FUNCTION s_no_fs() RETURNS int LANGUAGE plzig AS $$
@@ -235,8 +235,8 @@ DETAIL:  line 2, column 12: error: struct 'plzig.std' has no member named 'fs'
   pub const std = struct {
                   ^~~~~~
   referenced by:
-      plzig_call: sdk/root.zig:186:19
-      plzig_call: sdk/root.zig:177:1
+      plzig_call: sdk/root.zig:182:19
+      plzig_call: sdk/root.zig:173:1
       4 reference(s) hidden; use '-freference-trace=6' to see all references
 \set VERBOSITY terse
 --

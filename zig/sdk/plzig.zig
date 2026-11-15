@@ -87,6 +87,7 @@ const wasm_env = struct {
         extern "plzig" fn spi_cursor_close(cursor: u64) void;
         extern "plzig" fn tz_convert(op: u32, value: i64, zone_ptr: [*]const u8, zone_len: u32) i64;
         extern "plzig" fn numeric_op(op: u32, a_ptr: [*]const u8, a_len: u32, b_ptr: [*]const u8, b_len: u32, arg: i32, out_ptr: [*]u8, out_cap: u32) i32;
+        extern "plzig" fn srf_return_next(values_ptr: [*]const Value, n: u32) void;
     };
 };
 
@@ -2533,6 +2534,47 @@ pub fn encodeRow(comptime T: type, row: T, out: []Value, fixed: [][16]u8) error{
         } else {
             out[i] = encodeParam(v, undefined);
         }
+    }
+}
+
+/// Whether T is a row struct (a generated composite type), as opposed to a
+/// scalar type: every struct that is not one of the SDK's value types.
+pub fn isRowType(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and T != Numeric and T != JsonText and T != Jsonb and
+        T != Date and T != Time and T != TimeTz and T != Timestamp and T != TimestampTz and
+        T != Interval and T != Uuid and T != Oid and T != Bytea;
+}
+
+/// Static buffers for the values of one row of type T (and its 16-byte
+/// fields): `undefined` statics cost nothing at run time, unlike a stack
+/// array (ReleaseSafe fills those with 0xAA byte by byte).
+fn RowBuffer(comptime T: type) type {
+    return struct {
+        var values: [rowFieldCount(T)]Value = undefined;
+        var fixed: [rowFixedCount(T)][16]u8 align(8) = undefined;
+    };
+}
+
+/// value of a one-column row (SETOF a scalar type), static like RowBuffer
+var scalar_row: [1]Value = undefined;
+var scalar_fixed: [16]u8 align(8) = undefined;
+
+/// Append a row to the result of a set-returning function (doc/abi.md,
+/// "Sets"): `T` is the generated `Result` (a struct, or the element type of
+/// SETOF a scalar type), `null` a row of NULLs.  A set-returning function's
+/// generated `returnNext(row)` calls this; in any other function the host
+/// raises an error.  One host call per row; the host checks the row like a
+/// row result and appends it to the result set (spilled to a temporary file
+/// beyond `work_mem`).
+pub fn returnNext(comptime T: type, row: ?T) void {
+    if (comptime isRowType(T)) {
+        const B = RowBuffer(T);
+        const r: T = row orelse s.mem.zeroes(T);
+        encodeRow(T, r, &B.values, &B.fixed) catch |err| raise("plzig: could not encode the row: {s}", .{@errorName(err)});
+        host.srf_return_next(&B.values, @intCast(B.values.len));
+    } else {
+        scalar_row[0] = encodeParam(row, &scalar_fixed);
+        host.srf_return_next(&scalar_row, 1);
     }
 }
 

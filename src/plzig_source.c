@@ -138,16 +138,19 @@ plzig_check_signature(HeapTuple proctup, PlzigSignature *sig)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("PL/Zig does not support aggregate or window functions")));
 
-	if (proc->proretset)
+	/* set-returning functions: materialize mode (doc/abi.md, "Sets") */
+	if (proc->proretset && proc->prorettype == VOIDOID)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("PL/Zig functions cannot return sets")));
+				 errmsg("PL/Zig functions cannot return SETOF void")));
+	sig->retset = proc->proretset;
 
 	nall = get_func_arg_info(proctup, &argtypes, &argnames, &argmodes);
 	if (nall > FUNC_MAX_ARGS)
 		elog(ERROR, "too many arguments");
 	for (i = 0; i < nall; i++)
-		if (argmodes && (argmodes[i] == PROARGMODE_OUT || argmodes[i] == PROARGMODE_INOUT))
+		if (argmodes && (argmodes[i] == PROARGMODE_OUT || argmodes[i] == PROARGMODE_INOUT ||
+						 argmodes[i] == PROARGMODE_TABLE))
 			nout++;
 
 	/* the declared result type first (RECORD is checked with the outputs below) */
@@ -162,14 +165,14 @@ plzig_check_signature(HeapTuple proctup, PlzigSignature *sig)
 		char		mode = argmodes ? argmodes[i] : PROARGMODE_IN;
 		int			n;
 
-		if (mode == PROARGMODE_VARIADIC || mode == PROARGMODE_TABLE)
+		if (mode == PROARGMODE_VARIADIC)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("PL/Zig does not support VARIADIC or TABLE parameters")));
+					 errmsg("PL/Zig does not support VARIADIC parameters")));
 
-		if (mode == PROARGMODE_OUT || mode == PROARGMODE_INOUT)
+		if (mode == PROARGMODE_OUT || mode == PROARGMODE_INOUT || mode == PROARGMODE_TABLE)
 			plzig_check_type(argtypes[i], true);
-		if (mode == PROARGMODE_OUT)
+		if (mode == PROARGMODE_OUT || mode == PROARGMODE_TABLE)
 			continue;			/* a field of the result, checked with the row type */
 
 		/* an input argument (IN, INOUT) */
@@ -227,14 +230,23 @@ plzig_check_signature(HeapTuple proctup, PlzigSignature *sig)
 		}
 	}
 
-	/* the generated file declares the row type as Result */
-	if (sig->rettupdesc)
-		for (i = 0; i < sig->nargs; i++)
-			if (strcmp(sig->argnames[i], "Result") == 0)
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
-						 errmsg("invalid PL/Zig parameter name \"%s\"", sig->argnames[i]),
-						 errdetail("In a function returning a row, the generated code declares the row type as Result.")));
+	/*
+	 * The generated file declares the row type (and the element type of a
+	 * set) as Result, and a set-returning function's returnNext.
+	 */
+	for (i = 0; i < sig->nargs; i++)
+	{
+		if ((sig->rettupdesc || sig->retset) && strcmp(sig->argnames[i], "Result") == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+					 errmsg("invalid PL/Zig parameter name \"%s\"", sig->argnames[i]),
+					 errdetail("In a function returning a row or a set, the generated code declares the result type as Result.")));
+		if (sig->retset && strcmp(sig->argnames[i], "returnNext") == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+					 errmsg("invalid PL/Zig parameter name \"%s\"", sig->argnames[i]),
+					 errdetail("In a set-returning function, the generated code declares returnNext.")));
+	}
 
 	sig->rettype = proc->prorettype;
 	sig->strict = proc->proisstrict;
@@ -364,6 +376,12 @@ plzig_generate_source(const PlzigSignature *sig, const char *body, size_t *srcle
 		else
 			plzig_emit_struct(&buf, "Result", sig->rettupdesc, true);
 	}
+	else if (sig->retset)
+		appendStringInfo(&buf, "const Result = %s; ",
+						 plzig_zig_type_name(plzig_type_kind(sig->rettype), true));
+	/* a set: rows are pushed (doc/abi.md, "Sets"); NULL is a row of NULLs */
+	if (sig->retset)
+		appendStringInfoString(&buf, "fn returnNext(row: ?Result) void { plzig.returnNext(Result, row); } ");
 
 	appendStringInfoString(&buf, "pub fn call(");
 	for (i = 0; i < sig->nargs; i++)
@@ -377,7 +395,9 @@ plzig_generate_source(const PlzigSignature *sig, const char *body, size_t *srcle
 		else
 			appendStringInfoString(&buf, plzig_zig_type_name(plzig_type_kind(sig->argtypes[i]), false));
 	}
-	if (sig->rettupdesc)
+	if (sig->retset)
+		appendStringInfoString(&buf, ") anyerror!void {");
+	else if (sig->rettupdesc)
 		/* a procedure must return its output row (PostgreSQL refuses NULL) */
 		appendStringInfoString(&buf, sig->is_procedure ? ") anyerror!Result {" : ") anyerror!?Result {");
 	else if (sig->rettype == VOIDOID)

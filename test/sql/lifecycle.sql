@@ -22,7 +22,7 @@ CREATE FUNCTION lazy_ok() RETURNS text LANGUAGE plzig AS $$ return "compiled laz
 CREATE FUNCTION lazy_bad() RETURNS int LANGUAGE plzig AS $$ return @embedFile("/etc/passwd"); $$;
 CREATE FUNCTION lazy_broken() RETURNS int LANGUAGE plzig AS $$ return nope; $$;
 -- ... but signature checks still apply
-CREATE FUNCTION lazy_setof() RETURNS SETOF int LANGUAGE plzig AS $$ return 1; $$;
+CREATE FUNCTION lazy_setof() RETURNS SETOF record LANGUAGE plzig AS $$ return; $$;
 RESET check_function_bodies;
 -- ... compiled (and policy-checked) at first call
 SELECT lazy_ok();

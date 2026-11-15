@@ -393,6 +393,7 @@ struct PlzigCallCtx
 	 */
 	MemoryContext errcxt;
 	ErrorData  *edata;			/* stashed error from a host import */
+	struct PlzigSrf *srf;		/* set-returning call: where rows go, or NULL */
 	bool		read_only;
 	bool		spi_connected;
 	void	   *tuptable;		/* SPITupleTable * of the last spi_execute */
@@ -437,6 +438,13 @@ extern void plzig_row_values_from_guest(void *module_inst, PlzigRowDesc *rd,
 										bool *nulls, const char *what);
 extern Datum plzig_row_result(void *module_inst, PlzigRowDesc *rd, const PlzigSlot *slot,
 							  bool *isnull);
+
+/* set-returning functions, materialize mode (plzig_row.c) */
+typedef struct PlzigSrf PlzigSrf;
+extern PlzigSrf *plzig_srf_begin(struct ReturnSetInfo *rsinfo, PlzigRowDesc *rd,
+								 MemoryContext cxt);
+extern void plzig_srf_push(PlzigSrf *srf, void *module_inst, uint64 ptr, uint32 n);
+extern void plzig_srf_finish(PlzigSrf *srf);
 extern void plzig_host_finish_call(PlzigCallCtx *ctx);
 extern void plzig_host_free_plans(PlzigPlanTable *plans);
 

@@ -31,7 +31,7 @@ A module is accepted by the loader (`plzig_module_load`) only if
   (checked before WAMR sees the module, see doc/security.md §4.5);
 * WAMR's loader validates it (full validation, classic interpreter);
 * every import is a **function** imported from module **`plzig`**, its name
-  is one of the 21 host functions below, and WAMR linked it (i.e. the
+  is one of the 22 host functions below, and WAMR linked it (i.e. the
   signature matched the registered one) — anything else is rejected;
 * it instantiates under the current `plzig.max_memory`;
 * it exports a linear memory and the four functions below with exactly the
@@ -149,6 +149,21 @@ number of values; `is_null` = 1 is a NULL row.
     the domain's input function (its `NOT NULL` and `CHECK` constraints).
   * The tuple is built by the host with the row type's own descriptor
     (`heap_form_tuple`; dropped attributes NULL; blessed for `record`).
+* **Sets** (`RETURNS SETOF`, `RETURNS TABLE`): materialize mode only.
+  Before the guest runs, the host requires a caller that accepts a
+  materialized set (`ReturnSetInfo` with `SFRM_Materialize` and an
+  expected descriptor; else `0A000 set-valued function called in context
+  that cannot accept a set`) and creates a tuplestore in the per-query
+  context with the call's resource owner and `work_mem`. The guest pushes
+  each row with `srf_return_next(values, n)`: the values of a row as for a
+  row result (SETOF a scalar type: one value, the row type being one column
+  named `value` of that type), checked identically, appended with
+  `tuplestore_putvalues` (a temporary file, when it starts, belongs to the
+  call's resource owner). `plzig_call` returns `void`; the host then
+  checks the row type is unchanged, and hands the tuplestore and a copy of
+  the descriptor to the executor (which compares it with the one it
+  expects). There is no value-per-call mode: an instance never stays
+  suspended between calls. Rows pushed by any other call are refused.
 * **Staleness**: the struct is generated from the type cache's descriptor
   of the composite type when the function is loaded (`tupDesc_identifier`
   is kept). At every call the identifier is compared (and, when it
@@ -295,7 +310,7 @@ parentheses). Every import:
   guest memory across anything that could run guest code;
 * validates every handle on every use (*Handles*).
 
-21 imports, the complete list (the loader's allowlist,
+22 imports, the complete list (the loader's allowlist,
 `plzig_known_imports` in `src/plzig_runtime.c`, and the registration table
 in `src/plzig_host.c` must match):
 
@@ -322,6 +337,8 @@ in `src/plzig_host.c` must match):
 | `spi_cursor_close(cursor)` | `(I)` | Close the cursor and free its handle. |
 | `numeric_op(op, a_ptr, a_len, b_ptr, b_len, arg, out_ptr, out_cap)` | `(iiiiiiii)i` | One `numeric` operation by PostgreSQL's own function, operands and result in the binary wire format (*numeric*): `op` 1 `numeric_add`, 2 `numeric_sub`, 3 `numeric_mul`, 4 `numeric_div`, 5 `numeric_div_trunc`, 6 `numeric_mod`, 7 `numeric_round(a, arg)`, 8 `numeric_trunc(a, arg)`, 9 `numeric_abs`, 10 `numeric_uminus`; anything else → `ERROR`. Operand `b` is read only by ops 1–6, `arg` only by 7 and 8. Each operand is length-checked, copied and validated by `numeric_recv` before use. If the result's length ≤ `out_cap` it is written to `[out_ptr, out_ptr + len)` (range validated) and `len` is returned; otherwise nothing is written and `-len` is returned (the guest calls again with a large enough buffer; the operation is deterministic). Division by zero (`22012`), overflow (`22003`) etc. are ordinary SQL errors. |
 | `tz_convert(op, value, zone_ptr, zone_len)` | `(iIii)I` | Time zone conversion by PostgreSQL's own functions: `op` 1 = timestamptz → local timestamp, 2 = local timestamp → timestamptz; anything else → `ERROR`. `value` is range-checked first (*Range checks*; infinities pass through). `zone_len` = 0: the session's `TimeZone` (`timestamptz_timestamp` / `timestamp_timestamptz`); otherwise the zone name (≤ 1024 bytes, `54000` beyond; database encoding, no NUL) is copied into a `text` and `timestamptz_zone` / `timestamp_zone` (`AT TIME ZONE`) are called, so an unknown zone is `22023`. Returns the converted value. |
+
+| `srf_return_next(values_ptr, n)` | `(ii)` | Append one row to the result of a set-returning call (*Rows*, *Sets*): `n` values at `values_ptr`, `n` = the number of live attributes of the row type (1 for SETOF a scalar type); every value checked as for a row result; `ERROR` in any call that does not return a set. |
 
 Text values of `spi_value_*` are produced with `SPI_getvalue` (type output
 functions); a one-entry cache avoids converting a value twice for `len` +
@@ -508,8 +525,10 @@ grows only through the `memory.grow` instruction, bounded by
   `plzig.JsonText{ .text }` / `plzig.jsonText(t)` for jsonb results and
   parameters.
 * Rows (*Rows*): `plzig.rowFieldCount(T)`, `rowFixedCount(T)`,
-  `encodeRow(T, row, values, fixed)`, `decodeRow(T, values)` — used by the
-  SDK root for composite arguments and results.
+  `encodeRow(T, row, values, fixed)`, `decodeRow(T, values)`, `isRowType(T)`
+  — used by the SDK root for composite arguments and results.
+* `plzig.returnNext(T, ?T)`: `srf_return_next` with the row encoded into a
+  static buffer per row type (the generated `returnNext` calls it).
 * `plzig.std` (also predeclared as `std`): `mem`, `fmt`, `math`, `ascii`,
   `unicode`, `sort`, `hash`, `hash_map`, `meta`, `base64`, `enums`,
   `bit_set`, `ArrayList`, the hash maps, `StaticStringMap`,
@@ -540,6 +559,10 @@ const plzig = @import("plzig"); const std = plzig.std; pub fn call(@"a": i32, @"
   63 bytes) and unique, so they never need escaping; a parameter may not
   be called `Result` then.
 * Input parameters are `IN` and `INOUT`; `argN` counts input parameters.
+* Sets: `const Result = <element type>;` (a scalar type, or a row struct as
+  above), `fn returnNext(row: ?Result) void { plzig.returnNext(Result, row); }`,
+  and the return type `anyerror!void`; `Result` and `returnNext` are then
+  reserved parameter names.
 * Parameter names must match `[A-Za-z_][A-Za-z0-9_]*` and must not be
   `plzig`, `std` or `call` (the generated file's own declarations);
   unnamed parameters are `arg1..argN`.

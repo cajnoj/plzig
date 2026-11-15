@@ -2247,6 +2247,43 @@ host_tz_convert(wasm_exec_env_t env, uint32 op, int64 value, uint32 zone_ptr, ui
 	return result;
 }
 
+/* ---------------------------------------------------------------------
+ * set-returning functions
+ * ---------------------------------------------------------------------
+ */
+
+/*
+ * srf_return_next(values, n): append one row to the result set of a
+ * set-returning call (doc/abi.md, "Sets"); an error in any other call.
+ * The values are checked like a row result (plzig_srf_push).
+ */
+static void
+host_srf_return_next(wasm_exec_env_t env, uint32 ptr, uint32 n)
+{
+	PlzigCallCtx *ctx = host_ctx(env);
+	MemoryContext oldcxt = CurrentMemoryContext;
+
+	if (ctx == NULL)
+		return;
+	PG_TRY();
+	{
+		if (ctx->srf == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+					 errmsg("PL/Zig: rows can only be returned by a set-returning function")));
+		MemoryContextReset(ctx->scratch);
+		MemoryContextSwitchTo(ctx->scratch);
+		plzig_srf_push(ctx->srf, wasm_runtime_get_module_inst(env), ptr, n);
+		MemoryContextSwitchTo(oldcxt);
+		MemoryContextReset(ctx->scratch);
+	}
+	PG_CATCH();
+	{
+		host_catch(ctx, env, oldcxt);
+	}
+	PG_END_TRY();
+}
+
 /*
  * Called by the call handler after a successful guest call: close every
  * cursor the guest left open, then end the SPI connection (which frees all
@@ -2298,6 +2335,7 @@ static NativeSymbol plzig_native_symbols[] = {
 	{"spi_cursor_close", (void *) host_spi_cursor_close, "(I)", NULL},
 	{"numeric_op", (void *) host_numeric_op, "(iiiiiiii)i", NULL},
 	{"tz_convert", (void *) host_tz_convert, "(iIii)I", NULL},
+	{"srf_return_next", (void *) host_srf_return_next, "(ii)", NULL},
 };
 
 void *

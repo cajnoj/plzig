@@ -270,7 +270,14 @@ wrong-mode cache files), `test/tap/t/060_environment.pl`, fuzz target
   `CHECK`) never run while a native pointer into guest memory is held.
   Composite arguments are converted by the host (like typed SPI rows) into
   a per-call buffer (never shared with a recursive call that may run while
-  the arguments are placed) and written into the validated argument block.
+  the arguments are placed) and written into the validated argument block;
+* **sets** (`srf_return_next`) are refused outside a set-returning call;
+  each pushed row is checked exactly like a row result before it is
+  appended to a tuplestore that the host created in the per-query context
+  with the call's resource owner and `work_mem` (so a set spills to a
+  temporary file and is bounded by `temp_file_limit`, as PL/pgSQL's); there
+  is no value-per-call mode, so no instance or guest state stays alive
+  between calls of the executor;
 
 Tests: `test/sql/spi*.sql`, `test/sql/adversarial.sql` (row-level security
 and column privileges through `spi.execute`, prepared statements and
@@ -280,8 +287,9 @@ refused identity changes; read-only transactions and data-modifying CTEs),
 fixed-width, numeric and jsonb parameters and forged `numeric_op` and
 `tz_convert` calls; forged argument buffers; 20 forged row results: wrong
 field count, kinds, NULL flags, pointers, lengths, out-of-range values,
-binary jsonb, misaligned value arrays), `test/sql/rows.sql` (typmods,
-domains, changed row types), `test/sql/types_fixed.sql`,
+binary jsonb, misaligned value arrays; 9 forged or misplaced pushed rows),
+`test/sql/rows.sql` (typmods, domains, changed row types), `srf.sql`
+(work_mem spill, temp_file_limit, checked rows, rows outside a set), `test/sql/types_fixed.sql`,
 `types_numeric.sql`, `types_calendar.sql`, `types_jsonb.sql` (every range
 limit, malformed numerics as results and parameters), fuzz targets
 `hostabi`, `marshal` and `jsonb` (§7), TAP `040_standby.pl` (read-only on a

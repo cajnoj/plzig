@@ -151,6 +151,17 @@ h_numeric_op(wasm_exec_env_t env, uint32 op, uint32 a, uint32 alen, uint32 b, ui
 	return 0;
 }
 
+/*
+ * srf_return_next: the values' range checked, then the trap the import
+ * causes outside a set-returning call (the harness never declares one)
+ */
+static void
+h_srf_return_next(wasm_exec_env_t env, uint32 ptr, uint32 n)
+{
+	(void) stub_range(env, ptr, n > 1664 ? 1664 * 16 : n * 16);
+	stub_trap(env, "plzig: host error");
+}
+
 /* tz_convert: zone range checked, then the trap a failing import causes */
 static int64
 h_tz_convert(wasm_exec_env_t env, uint32 op, uint64 value, uint32 zone, uint32 zone_len)
@@ -183,6 +194,7 @@ static NativeSymbol stub_symbols[] = {
 	{"spi_cursor_close", (void *) h_I, "(I)", NULL},
 	{"numeric_op", (void *) h_numeric_op, "(iiiiiiii)i", NULL},
 	{"tz_convert", (void *) h_tz_convert, "(iIii)I", NULL},
+	{"srf_return_next", (void *) h_srf_return_next, "(ii)", NULL},
 };
 
 void *
@@ -288,4 +300,17 @@ plzig_row_result(void *module_inst, PlzigRowDesc *rd, const PlzigSlot *slot, boo
 {
 	stub_value_error();
 	return (Datum) 0;
+}
+
+PlzigSrf *
+plzig_srf_begin(struct ReturnSetInfo *rsinfo, PlzigRowDesc *rd, MemoryContext cxt)
+{
+	stub_value_error();
+	return NULL;
+}
+
+void
+plzig_srf_finish(PlzigSrf *srf)
+{
+	stub_value_error();
 }

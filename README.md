@@ -302,6 +302,27 @@ $$;
   no longer compile); a row type changed during a call (`ALTER TYPE` through
   SPI) makes the call fail. A stale struct is never used.
 
+### Set-returning functions
+
+`RETURNS SETOF <type>`, `RETURNS TABLE (...)` and `SETOF record` with
+output parameters push their rows with the generated `returnNext(row)`
+(`Result` is the element type: the scalar type, or the row struct; `null`
+is a NULL element, or a row of NULLs) and return `void`. The rows go into a
+tuplestore as in PL/pgSQL's `RETURN NEXT` (materialize mode: the whole set
+is produced by one call, spilling to a temporary file beyond `work_mem`,
+bounded by `temp_file_limit`); each row is checked like a row result.
+
+```sql
+CREATE FUNCTION squares(n int) RETURNS TABLE (i int, sq bigint) STRICT LANGUAGE plzig AS $$
+    var k: i32 = 1;
+    while (k <= n) : (k += 1) returnNext(.{ .i = k, .sq = @as(i64, k) * k });
+$$;
+SELECT * FROM squares(3);
+```
+
+`returnNext` and `Result` are reserved parameter names in set-returning
+functions; pushing rows from any other function is an error.
+
 You can define helper functions and globals after the body by closing the
 function yourself (the generated wrapper adds the final `}`):
 
@@ -560,9 +581,10 @@ start over.
 
 ### Not supported (by design, see PLAN.md D10)
 
-Triggers, event triggers, set-returning functions, `VARIADIC` and `TABLE`
-parameters, polymorphic and other pseudo-types (except `void` results and
-`record` described by output parameters), aggregates/window functions,
+Triggers, event triggers, set-returning functions in value-per-call mode,
+`VARIADIC` parameters, polymorphic and other pseudo-types (except `void`
+results and `record` described by output parameters), aggregates/window
+functions,
 transaction control, catching SQL errors, and any access to the clock,
 randomness, environment, files or network from guest code (use SQL through
 SPI: `SELECT now()`).

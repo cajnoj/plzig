@@ -67,7 +67,8 @@ typedef struct PlzigFunction
 	int			nargs;
 	PlzigTypeInfo *argtypes;
 	PlzigTypeInfo rettype;
-	PlzigRowDesc *retrow;		/* row result (struct), or NULL */
+	PlzigRowDesc *retrow;		/* row result (struct), the rows of a set, or NULL */
+	bool		retset;			/* set-returning (materialize mode) */
 	bool		read_only;
 	char	   *signature;		/* for error context */
 } PlzigFunction;
@@ -343,8 +344,18 @@ plzig_function_build(Oid fn_oid, HeapTuple proctup)
 			fn->rettype.kind = PLZIG_T_ROW;
 			fn->rettype.row = fn->retrow;
 		}
+		else if (sig.retset)
+		{
+			/* SETOF a scalar type: rows of one column (named "value") */
+			TupleDesc	td = CreateTemplateTupleDesc(1);
+
+			TupleDescInitEntry(td, (AttrNumber) 1, "value", sig.rettype, -1, 0);
+			fn->retrow = plzig_rowdesc_for_tupdesc(td, cxt);
+			plzig_type_info_init(&fn->rettype, sig.rettype, true, cxt);
+		}
 		else
 			plzig_type_info_init(&fn->rettype, sig.rettype, true, cxt);
+		fn->retset = sig.retset;
 		fn->read_only = (sig.volatility != PROVOLATILE_VOLATILE);
 		fn->signature = format_procedure(fn_oid);
 		MemoryContextSwitchTo(old);
@@ -531,6 +542,8 @@ plzig_function_execute(PlzigFunction *fn, FunctionCallInfo fcinfo)
 		spec.args = fcinfo->args;
 		spec.rettype = &fn->rettype;
 		spec.retrow = fn->retrow;
+		spec.retset = fn->retset;
+		spec.rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 		spec.read_only = fn->read_only;
 		if (fcinfo->nargs != fn->nargs)	/* cannot happen */
 			elog(ERROR, "PL/Zig: function called with %d arguments, expected %d",

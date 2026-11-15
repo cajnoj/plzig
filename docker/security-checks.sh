@@ -589,7 +589,63 @@ expect "hostile rows: a NULL row is NULL" "t" "SELECT hrow(13) IS NULL;"
 if [ "$n" -eq 20 ]; then pass "hostile rows: 20 forged rows end in a clean ERROR or are accepted as valid"; fi
 expect "hostile rows: backend still healthy" "4242" "SELECT 4242;"
 if grep -qE "terminated by signal|server process .* was terminated" /tmp/server.log; then fail "hostile rows: no backend crash in the server log"; else pass "hostile rows: no backend crash in the server log"; fi
-psqlq -c "DROP FUNCTION hrow(int); DROP TYPE hr_t; SELECT plzig_cache_clear();" >/dev/null
+# forged rows pushed into a set (srf_return_next), and pushed outside one
+cat > /tmp/plzig-hostile-srf.sql <<'SQL'
+CREATE OR REPLACE FUNCTION hsrf(what int) RETURNS SETOF hr_t STRICT LANGUAGE plzig AS $$
+    const h = plzig.host;
+    const txt = "hello";
+    const one = "\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01";
+    var vals = [5]plzig.Value{
+        .{ .val = 1, .len = 0, .kind = 3, .is_null = 0 },
+        .{ .val = plzig.addrOf(txt.ptr), .len = txt.len, .kind = 7, .is_null = 0 },
+        .{ .val = plzig.addrOf(one.ptr), .len = one.len, .kind = 18, .is_null = 0 },
+        .{ .val = 0, .len = 0, .kind = 10, .is_null = 0 },
+        .{ .val = 0, .len = 0, .kind = 19, .is_null = 1 },
+    };
+    h.srf_return_next(&vals, 5);
+    switch (what) {
+        1 => h.srf_return_next(&vals, 4),
+        2 => h.srf_return_next(plzig.rawPtr([*]const plzig.Value, 0x7fff_ff00), 5),
+        3 => { vals[3].kind = 13; h.srf_return_next(&vals, 5); },
+        4 => h.srf_return_next(&vals, 0xffff_ffff),
+        5 => { vals[0].val = 1 << 40; h.srf_return_next(&vals, 5); },
+        6 => { vals[1].len = 0xffff_fff0; h.srf_return_next(&vals, 5); },
+        7 => { vals[2].is_null = 2; h.srf_return_next(&vals, 5); },
+        else => h.srf_return_next(&vals, 5),
+    }
+$$;
+CREATE OR REPLACE FUNCTION hsrf_outside() RETURNS int LANGUAGE plzig AS $$
+    var v = [1]plzig.Value{.{ .val = 1, .len = 0, .kind = 3, .is_null = 0 }};
+    plzig.host.srf_return_next(&v, 1);
+    return 1;
+$$;
+SQL
+out=$(psqlq -f /tmp/plzig-hostile-srf.sql)
+if grep -q ERROR <<<"$out"; then fail "hostile sets: module loads"; echo "$out" | sed 's/^/         /'; else pass "hostile sets: module loads"; fi
+n=0
+while IFS='|' read -r what needle; do
+    [ -z "$what" ] && continue
+    out=$(psqlq -c "SELECT count(*) FROM hsrf($what);")
+    if grep -qF -- "$needle" <<<"$out"; then
+        n=$((n + 1))
+    else
+        fail "hostile sets case $what: expected \"$needle\""; echo "$out" | sed 's/^/         /'
+    fi
+done <<'CASES'
+0|2
+1|a returned row has 4 field(s), but its row type has 5
+2|guest passed an invalid memory range
+3|field "d" of a returned row is of type date, but a value of kind timestamp was passed
+4|a returned row has 4294967295 field(s), but its row type has 5
+5|value of field "a" of a returned row is out of range for type integer
+6|field "b" is too long
+7|invalid NULL flag in field "n" of a returned row
+CASES
+if [ "$n" -eq 8 ]; then pass "hostile sets: 8 forged pushes end in a clean ERROR or are accepted as valid"; fi
+expect "hostile sets: rows outside a set-returning function" "rows can only be returned by a set-returning function" "SELECT hsrf_outside();"
+expect "hostile sets: backend still healthy" "4242" "SELECT 4242;"
+if grep -qE "terminated by signal|server process .* was terminated" /tmp/server.log; then fail "hostile sets: no backend crash in the server log"; else pass "hostile sets: no backend crash in the server log"; fi
+psqlq -c "DROP FUNCTION hrow(int); DROP FUNCTION hsrf(int); DROP FUNCTION hsrf_outside(); DROP TYPE hr_t; SELECT plzig_cache_clear();" >/dev/null
 set_conf compiler_sandbox ""
 set_real
 

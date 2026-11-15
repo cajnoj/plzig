@@ -666,7 +666,8 @@ v1 is expected to be slower than PL/pgSQL; neither weakens the sandbox.
        function returns a Zig struct; the host builds the row
        (`heap_form_tuple`) from fields it has type-checked one by one, as it
        does for a scalar result. Foundation for the next two.
-    2. *Set-returning functions.* Materialize mode: the guest pushes rows
+    2. **Done (2026-11-15), see Deviations from plan, 33.**
+       *Set-returning functions.* Materialize mode: the guest pushes rows
        through a host import into a tuplestore (as PL/pgSQL's `RETURN NEXT`),
        bounded by `work_mem` as usual. No value-per-call mode: an instance
        never stays suspended between calls.
@@ -1771,3 +1772,47 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       returning a row forged from the script), `marshal` (output parameters
       in random signatures; its acceptance rules follow the new ones), the
       loader harness (new call interface, stand-ins for the row functions).
+33. **§12 item 14, step 2: set-returning functions (2026-11-15).** One new
+    host import, `srf_return_next(values, n)` (22 in total; ABI version
+    still 5: the import is new, nothing existing changed meaning). No new
+    GUC. As planned (materialize mode only, `doc/abi.md` *Sets*), and:
+    - `RETURNS SETOF <scalar or composite>`, `RETURNS TABLE (...)` and
+      `SETOF record` with output parameters. `TABLE` parameters (step 1's
+      remainder) are output fields like `OUT`. `SETOF void` and `SETOF
+      record` without output parameters are refused.
+    - *Generated code*: `const Result = <element type>;` and `fn
+      returnNext(row: ?Result) void` (calls `plzig.returnNext`), return type
+      `anyerror!void`. `null` is a NULL element or a row of NULLs (as
+      PL/pgSQL's `RETURN NEXT` of a NULL row). `Result` and `returnNext` are
+      reserved parameter names in set-returning functions only, so no
+      existing function changes.
+    - *Host*: the caller must accept a materialized set and supply an
+      expected descriptor (PL/pgSQL's condition, same message); the
+      tuplestore is created before the guest runs, in the per-query context,
+      with `work_mem` and random access when allowed; every pushed row goes
+      through the row checks of step 1 (`plzig_row_values_from_guest`),
+      then `tuplestore_putvalues` with the call's resource owner made
+      current (as PL/pgSQL does, so a temporary file started by a push
+      belongs to the call). At the end the row type must be unchanged and
+      the executor gets the tuplestore and a descriptor copy (it compares
+      the descriptor with what it expects). A set of a scalar type is a
+      one-column row type (column `value`), so there is one code path.
+    - *SDK*: one host call per row; the values are encoded into a static
+      buffer per row type (no 0xAA-filled stack array per row).
+    - *Changed tests*: the rejection tests of `SETOF`/`TABLE` in `types.sql`
+      and `signatures.sql` now show compile errors of their bodies; the two
+      tests that check "signature checks apply with `check_function_bodies =
+      off`" (`signatures.sql` `sg_lazy_setof`, `lifecycle.sql`
+      `lazy_setof`) now declare `SETOF record`, which is still refused, so
+      they keep checking the same thing.
+    - *Tests*: `test/sql/srf.sql` (new: scalar and composite elements, every
+      result form, target-list and `LATERAL` use, empty sets, NULL elements
+      and rows, domain and typmod checks of pushed rows, an error after
+      some rows, rows pushed from a non-set function, a procedure and `DO`,
+      nested sets through SPI, rows streamed from a cursor, 100 000 rows
+      with `work_mem = 64kB` (spill) and with `temp_file_limit`, a
+      scrollable cursor over the function, `statement_timeout`, a row type
+      changed during the call), an SDK unit test, 9 forged pushes in
+      `docker/security-checks.sh`, `hostabi` (a third driver function
+      returning `SETOF`, an operation pushing forged rows in every driver
+      function), `marshal` (`SETOF` in random signatures).

@@ -961,6 +961,29 @@ test "rows: a jsonb field is passed back as JSON text" {
     try testing.expectEqual(@as(u16, 19), vals[1].kind);
 }
 
+test "returnNext: one host call per row, NULL rows of NULLs" {
+    try setup(64);
+    plzig.returnNext(TestRow, .{ .a = 1, .b = "x", .c = null, .d = true });
+    try testing.expectEqual(@as(usize, 1), env.srf_rows);
+    try testing.expectEqual(@as(usize, 4), env.last_nvalues);
+    try testing.expectEqual(@as(u16, 3), env.last_values[0].kind);
+    try testing.expectEqual(@as(u64, 1), env.last_values[0].val);
+    plzig.returnNext(TestRow, null);
+    try testing.expectEqual(@as(usize, 2), env.srf_rows);
+    for (env.last_values[0..4]) |v| try testing.expectEqual(@as(u16, 1), v.is_null);
+    // SETOF a scalar type: one value
+    plzig.returnNext(i64, -5);
+    try testing.expectEqual(@as(usize, 1), env.last_nvalues);
+    try testing.expectEqual(@as(u16, 4), env.last_values[0].kind);
+    try testing.expectEqual(@as(u64, @bitCast(@as(i64, -5))), env.last_values[0].val);
+    plzig.returnNext([]const u8, null);
+    try testing.expectEqual(@as(u16, 1), env.last_values[0].is_null);
+    try testing.expectEqual(@as(u16, 7), env.last_values[0].kind);
+    plzig.returnNext(plzig.Uuid, .{ .bytes = @splat(7) });
+    try testing.expectEqual(@as(u32, 16), env.last_values[0].len);
+    try testing.expectEqual(@as(usize, 5), env.srf_rows);
+}
+
 // ---------------------------------------------------------------------------
 // numeric
 

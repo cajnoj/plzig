@@ -5,11 +5,11 @@
 \set VERBOSITY terse
 -- sets
 CREATE FUNCTION sg_setof() RETURNS SETOF int LANGUAGE plzig AS $$ return 1; $$;
-ERROR:  PL/Zig functions cannot return sets
+ERROR:  PL/Zig compilation failed
 CREATE FUNCTION sg_setof_rec(x int) RETURNS SETOF record LANGUAGE plzig AS $$ return null; $$;
-ERROR:  PL/Zig functions cannot return sets
+ERROR:  PL/Zig functions cannot return type record
 CREATE FUNCTION sg_table() RETURNS TABLE (a int, b text) LANGUAGE plzig AS $$ return null; $$;
-ERROR:  PL/Zig functions cannot return sets
+ERROR:  PL/Zig compilation failed
 -- parameter modes
 CREATE FUNCTION sg_out(x int, OUT y int) LANGUAGE plzig AS $$ return; $$;
 ERROR:  PL/Zig compilation failed
@@ -20,9 +20,9 @@ ERROR:  PL/Zig compilation failed
 CREATE PROCEDURE sg_proc_inout(INOUT x int) LANGUAGE plzig AS $$ return; $$;
 ERROR:  PL/Zig compilation failed
 CREATE FUNCTION sg_variadic(VARIADIC x int[]) RETURNS int LANGUAGE plzig AS $$ return 1; $$;
-ERROR:  PL/Zig does not support VARIADIC or TABLE parameters
+ERROR:  PL/Zig does not support VARIADIC parameters
 CREATE FUNCTION sg_variadic2(a text, VARIADIC x text[]) RETURNS int LANGUAGE plzig AS $$ return 1; $$;
-ERROR:  PL/Zig does not support VARIADIC or TABLE parameters
+ERROR:  PL/Zig does not support VARIADIC parameters
 -- polymorphic types, as arguments and as result
 CREATE FUNCTION sg_poly1(x anyelement) RETURNS int LANGUAGE plzig AS $$ return 1; $$;
 ERROR:  PL/Zig functions cannot accept type anyelement
@@ -84,8 +84,8 @@ CREATE FUNCTION sg_window(x int) RETURNS int WINDOW LANGUAGE plzig AS $$ return 
 ERROR:  PL/Zig does not support aggregate or window functions
 -- with check_function_bodies = off the signature is still checked
 SET check_function_bodies = off;
-CREATE FUNCTION sg_lazy_setof() RETURNS SETOF int LANGUAGE plzig AS $$ return 1; $$;
-ERROR:  PL/Zig functions cannot return sets
+CREATE FUNCTION sg_lazy_setof() RETURNS SETOF record LANGUAGE plzig AS $$ return; $$;
+ERROR:  PL/Zig functions cannot return type record
 CREATE FUNCTION sg_lazy_poly(x anyelement) RETURNS int LANGUAGE plzig AS $$ return 1; $$;
 ERROR:  PL/Zig functions cannot accept type anyelement
 CREATE FUNCTION sg_lazy_name("bad name" int) RETURNS int LANGUAGE plzig AS $$ return 1; $$;

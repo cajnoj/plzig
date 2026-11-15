@@ -109,11 +109,7 @@ fn RowResult(comptime T: type) type {
     };
 }
 
-fn isRow(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and T != plzig.Numeric and T != plzig.JsonText and
-        T != plzig.Date and T != plzig.Time and T != plzig.TimeTz and T != plzig.Timestamp and
-        T != plzig.TimestampTz and T != plzig.Interval and T != plzig.Uuid and T != plzig.Oid;
-}
+
 
 /// Where a 16-byte result (interval, uuid) is placed for the host to copy
 /// after plzig_call has returned: outside the stack and the arena.
@@ -153,7 +149,7 @@ pub fn encode(comptime T: type, v: T, out: *Slot) void {
         @memcpy(&fixed_result, s.mem.asBytes(&v));
         out.val = @intFromPtr(&fixed_result);
         out.len = 16;
-    } else if (comptime isRow(T)) {
+    } else if (comptime plzig.isRowType(T)) {
         // a row: val = its values, len = their number (doc/abi.md, "Rows")
         const B = RowResult(T);
         plzig.encodeRow(T, v, &B.values, &B.fixed) catch |err| plzig.raise("plzig: could not encode the result row: {s}", .{@errorName(err)});

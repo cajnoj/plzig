@@ -28,10 +28,13 @@
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
+#include "miscadmin.h"
 #include "parser/parse_coerce.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/resowner.h"
+#include "utils/tuplestore.h"
 #include "utils/typcache.h"
 
 #if PG_VERSION_NUM >= 160000
@@ -498,4 +501,96 @@ plzig_row_result(void *mi, PlzigRowDesc *rd, const PlzigSlot *slot, bool *isnull
 	plzig_row_values_from_guest(mi, rd, slot->val, slot->len, values, nulls, "the result");
 	tup = heap_form_tuple(rd->tupdesc, values, nulls);
 	return HeapTupleGetDatum(tup);
+}
+
+/* ---------------------------------------------------------------------
+ * Set-returning functions (materialize mode, doc/abi.md "Sets")
+ * ---------------------------------------------------------------------
+ */
+struct PlzigSrf
+{
+	ReturnSetInfo *rsinfo;
+	PlzigRowDesc *rd;			/* the rows: a row type, or one column */
+	Tuplestorestate *tupstore;	/* in the caller's per-query context */
+	ResourceOwner owner;		/* of the call: owns the tuplestore's temp files */
+};
+
+/*
+ * Start a set-returning call: the caller must accept a materialized set
+ * (as PL/pgSQL requires); the tuplestore is created in the per-query
+ * context with the call's resource owner and work_mem, like PL/pgSQL's.
+ * Nothing is kept beyond what the executor gets back: an instance never
+ * stays suspended between calls (no value-per-call mode).
+ */
+PlzigSrf *
+plzig_srf_begin(ReturnSetInfo *rsinfo, PlzigRowDesc *rd, MemoryContext cxt)
+{
+	PlzigSrf   *srf;
+	MemoryContext old;
+
+	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo) ||
+		(rsinfo->allowedModes & SFRM_Materialize) == 0 || rsinfo->expectedDesc == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("set-valued function called in context that cannot accept a set")));
+	srf = MemoryContextAllocZero(cxt, sizeof(PlzigSrf));
+	srf->rsinfo = rsinfo;
+	srf->rd = rd;
+	srf->owner = CurrentResourceOwner;
+	old = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
+	srf->tupstore = tuplestore_begin_heap((rsinfo->allowedModes & SFRM_Materialize_Random) != 0,
+										  false, work_mem);
+	MemoryContextSwitchTo(old);
+	return srf;
+}
+
+/*
+ * One row pushed by the guest (srf_return_next): n values at guest address
+ * ptr, converted and checked like a row result, appended to the tuplestore
+ * (which spills to a temporary file beyond work_mem).  The caller's current
+ * memory context is a scratch context reset for every row.
+ */
+void
+plzig_srf_push(PlzigSrf *srf, void *mi, uint64 ptr, uint32 n)
+{
+	PlzigRowDesc *rd = srf->rd;
+	Datum	   *values = palloc(sizeof(Datum) * (rd->natts > 0 ? rd->natts : 1));
+	bool	   *nulls = palloc(sizeof(bool) * (rd->natts > 0 ? rd->natts : 1));
+	ResourceOwner save = CurrentResourceOwner;
+
+	plzig_row_values_from_guest(mi, rd, ptr, n, values, nulls, "a returned row");
+	/* a temporary file, if one is started now, belongs to the call */
+	CurrentResourceOwner = srf->owner;
+	PG_TRY();
+	{
+		tuplestore_putvalues(srf->tupstore, rd->tupdesc, values, nulls);
+	}
+	PG_FINALLY();
+	{
+		CurrentResourceOwner = save;
+	}
+	PG_END_TRY();
+}
+
+/*
+ * The guest returned: hand the tuplestore and a copy of the row descriptor
+ * (in the per-query context, as the executor expects; it checks the
+ * descriptor against the one it expects) to the caller.  A row type
+ * changed during the call is refused, as for a row result.
+ */
+void
+plzig_srf_finish(PlzigSrf *srf)
+{
+	MemoryContext old;
+
+	if (!plzig_rowdesc_current(srf->rd))
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("PL/Zig: the row type %s changed during the call",
+						format_type_be(srf->rd->typid))));
+	srf->rsinfo->returnMode = SFRM_Materialize;
+	srf->rsinfo->setResult = srf->tupstore;
+	old = MemoryContextSwitchTo(srf->rsinfo->econtext->ecxt_per_query_memory);
+	srf->rsinfo->setDesc = CreateTupleDescCopy(srf->rd->tupdesc);
+	MemoryContextSwitchTo(old);
 }

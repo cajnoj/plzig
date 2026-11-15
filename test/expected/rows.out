@@ -375,8 +375,8 @@ DETAIL:  line 2, column 13: error: missing struct field: c
   const plzig = @import("plzig"); const std = plzig.std; const @"plzig.Row1" = struct { @"a": ?i32, @"b": ?[]const u8, @"c": ?i32 }; const Result = @"plzig.Row1"; pub fn call(@"x": ?i32) anyerror!?Result { _ = &@"x";
                                                                                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   referenced by:
-      plzig_call: sdk/root.zig:186:19
-      plzig_call: sdk/root.zig:177:1
+      plzig_call: sdk/root.zig:182:19
+      plzig_call: sdk/root.zig:173:1
       4 reference(s) hidden; use '-freference-trace=6' to see all references
 \set VERBOSITY terse
 SELECT rw_evarg(ROW(1, 'b', 3));

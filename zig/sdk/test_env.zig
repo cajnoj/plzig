@@ -121,6 +121,7 @@ pub var cursor_closes: usize = 0;
 pub var fetch_calls: usize = 0;
 pub var rows_taken: usize = 0;
 pub var plans_freed: usize = 0;
+pub var srf_rows: usize = 0;
 
 pub fn reset() void {
     rows = &.{};
@@ -136,6 +137,7 @@ pub fn reset() void {
     fetch_calls = 0;
     rows_taken = 0;
     plans_freed = 0;
+    srf_rows = 0;
 }
 
 fn align8(n: usize) usize {
@@ -241,6 +243,12 @@ pub const host = struct {
         recordSql(sql_ptr, sql_len);
         recordSlots(params_ptr, nparams);
         return @intCast(rows.len);
+    }
+
+    /// srf_return_next: records the row (like a prepared statement's values)
+    pub fn srf_return_next(values_ptr: [*]const Value, n: u32) void {
+        recordValues(values_ptr, n);
+        srf_rows += 1;
     }
 
     pub fn spi_ncols() u32 {

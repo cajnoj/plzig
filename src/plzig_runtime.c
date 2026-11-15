@@ -309,7 +309,8 @@ static const char *const plzig_known_imports[] = {
 	"spi_value_copy", "spi_colname_len", "spi_colname_copy",
 	"spi_row_size", "spi_row_read", "spi_prepare", "spi_plan_free",
 	"spi_execute_plan", "spi_cursor_open", "spi_cursor_open_plan",
-	"spi_cursor_fetch", "spi_cursor_close", "numeric_op", "tz_convert", NULL
+	"spi_cursor_fetch", "spi_cursor_close", "numeric_op", "tz_convert",
+	"srf_return_next", NULL
 };
 
 static bool
@@ -1260,6 +1261,10 @@ plzig_instance_call(PlzigInstance *pi, const PlzigCallSpec *spec, bool *isnull)
 		memset(base + (Size) nargs * sizeof(PlzigSlot), 0, sizeof(PlzigSlot));
 		/* base is not used after this point: the guest may move memory */
 
+		/* a set: where the rows the guest pushes go (doc/abi.md, "Sets") */
+		if (spec->retset)
+			ctx.srf = plzig_srf_begin(spec->rsinfo, spec->retrow, pi->call_cxt);
+
 		/* 3. call */
 		argv[0] = guest_base;
 		argv[1] = (uint32) nargs;
@@ -1301,7 +1306,14 @@ plzig_instance_call(PlzigInstance *pi, const PlzigCallSpec *spec, bool *isnull)
 					 errmsg("PL/Zig: invalid status %u from guest", status)));
 
 		MemoryContextSwitchTo(oldcxt);
-		if (spec->retrow)
+		if (spec->retset)
+		{
+			/* the rows are in the tuplestore; the result slot is ignored */
+			plzig_srf_finish(ctx.srf);
+			*isnull = true;
+			ret = (Datum) 0;
+		}
+		else if (spec->retrow)
 			ret = plzig_row_result(pi->inst, spec->retrow, &result, isnull);
 		else
 			ret = plzig_decode_result(pi, &result, spec->rettype, isnull);

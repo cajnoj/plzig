@@ -51,7 +51,7 @@ DROP TYPE sg_shell;
 CREATE FUNCTION sg_window(x int) RETURNS int WINDOW LANGUAGE plzig AS $$ return x; $$;
 -- with check_function_bodies = off the signature is still checked
 SET check_function_bodies = off;
-CREATE FUNCTION sg_lazy_setof() RETURNS SETOF int LANGUAGE plzig AS $$ return 1; $$;
+CREATE FUNCTION sg_lazy_setof() RETURNS SETOF record LANGUAGE plzig AS $$ return; $$;
 CREATE FUNCTION sg_lazy_poly(x anyelement) RETURNS int LANGUAGE plzig AS $$ return 1; $$;
 CREATE FUNCTION sg_lazy_name("bad name" int) RETURNS int LANGUAGE plzig AS $$ return 1; $$;
 RESET check_function_bodies;

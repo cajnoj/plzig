@@ -5,7 +5,8 @@
 # guest of docker/security-checks.sh), interprets a bytea "script" as a
 # sequence of host-import calls with forged pointers, lengths, row/column
 # numbers, handles, kinds and values, memory growth and nested calls, and
-# then returns a result forged from the script (an int, or a row).
+# then returns a result forged from the script (an int, or a row), or the
+# rows the script pushed (a set-returning variant).
 # Batches of random scripts (from setseed, so a batch can be replayed) run
 # in PL/pgSQL loops, one subtransaction per call, as an unprivileged role.
 # Oracles (fuzz/common/sql-lib.sh, fz_check): no backend crash, no
@@ -51,6 +52,11 @@ fz_reload
     cat "$here/driver.zig"
     echo '$fzdriver$;'
     echo 'GRANT EXECUTE ON FUNCTION fuzz_hostabi_row(bytea) TO fuzz_hostabi_user;'
+    # ... and returning a set: the script pushes forged rows (doc/abi.md, "Sets")
+    echo 'CREATE OR REPLACE FUNCTION fuzz_hostabi_set(script bytea) RETURNS SETOF fuzz_hostabi_rt STRICT VOLATILE LANGUAGE plzig AS $fzdriver$'
+    cat "$here/driver.zig"
+    echo '$fzdriver$;'
+    echo 'GRANT EXECUTE ON FUNCTION fuzz_hostabi_set(bytea) TO fuzz_hostabi_user;'
 } >/tmp/fuzz-hostabi-create.sql
 out=$(fz_psql -f /tmp/fuzz-hostabi-create.sql)
 fz_set_conf compiler_sandbox ""
@@ -91,8 +97,10 @@ BEGIN
         SELECT decode(string_agg(lpad(to_hex(least(255, floor(random() * 256)::int)), 2, '0'), ''), 'hex')
           INTO s FROM generate_series(1, 1 + floor(random() * 400)::int);
         BEGIN
-            IF random() < 0.25 THEN
+            IF random() < 0.2 THEN
                 PERFORM fuzz_hostabi_row(s);
+            ELSIF random() < 0.25 THEN
+                PERFORM count(*) FROM fuzz_hostabi_set(s);
             ELSE
                 PERFORM fuzz_hostabi(s);
             END IF;
@@ -152,6 +160,6 @@ if [ -s "$fz_out/messages.jsonl" ]; then
 fi
 summary="$calls calls in $batches batches of 300 random scripts, seeds $fz_seed..$((fz_seed + batches - 1)); outcomes:"
 for k in $(printf '%s\n' "${!states[@]}" | sort); do summary+=" $k=${states[$k]}"; done
-fz_psql -c "DROP FUNCTION fuzz_hostabi(bytea); DROP FUNCTION fuzz_hostabi_row(bytea); DROP TYPE fuzz_hostabi_rt; DROP DOMAIN fuzz_hostabi_pos; DROP TABLE fuzz_hostabi_t, fuzz_hostabi_secret; DROP ROLE fuzz_hostabi_user;" >/dev/null
+fz_psql -c "DROP FUNCTION fuzz_hostabi(bytea); DROP FUNCTION fuzz_hostabi_row(bytea); DROP FUNCTION fuzz_hostabi_set(bytea); DROP TYPE fuzz_hostabi_rt; DROP DOMAIN fuzz_hostabi_pos; DROP TABLE fuzz_hostabi_t, fuzz_hostabi_secret; DROP ROLE fuzz_hostabi_user;" >/dev/null
 fz_check "hostabi cleanup"
 fz_result hostabi "$summary"

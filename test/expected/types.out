@@ -344,7 +344,7 @@ SELECT t_void();
 
 -- unsupported signatures are rejected at CREATE time
 CREATE FUNCTION t_setof() RETURNS SETOF int LANGUAGE plzig AS $$ return 1; $$;
-ERROR:  PL/Zig functions cannot return sets
+ERROR:  PL/Zig compilation failed
 CREATE FUNCTION t_out(x int, OUT y int) LANGUAGE plzig AS $$ return; $$;
 ERROR:  PL/Zig compilation failed
 CREATE FUNCTION t_inout(INOUT x int) LANGUAGE plzig AS $$ return; $$;
@@ -352,11 +352,11 @@ ERROR:  PL/Zig compilation failed
 CREATE FUNCTION t_poly(x anyelement) RETURNS int LANGUAGE plzig AS $$ return 1; $$;
 ERROR:  PL/Zig functions cannot accept type anyelement
 CREATE FUNCTION t_variadic(VARIADIC x int[]) RETURNS int LANGUAGE plzig AS $$ return 1; $$;
-ERROR:  PL/Zig does not support VARIADIC or TABLE parameters
+ERROR:  PL/Zig does not support VARIADIC parameters
 CREATE FUNCTION t_record() RETURNS record LANGUAGE plzig AS $$ return null; $$;
 ERROR:  PL/Zig functions cannot return type record
 CREATE FUNCTION t_table() RETURNS TABLE (a int) LANGUAGE plzig AS $$ return 1; $$;
-ERROR:  PL/Zig functions cannot return sets
+ERROR:  PL/Zig compilation failed
 CREATE FUNCTION t_internal(x internal) RETURNS int LANGUAGE plzig AS $$ return 1; $$;
 ERROR:  PL/Zig functions cannot accept type internal
 CREATE FUNCTION "t_badname"("bad name" int) RETURNS int LANGUAGE plzig AS $$ return 1; $$;

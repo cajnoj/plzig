@@ -108,7 +108,7 @@ DECLARE
     alphabet text[] := ARRAY['a', 'Z', '_', '0', '9', 'x', 'é', ' ', '"', '''', '$', '@', '\', '-', '.', 'ß', chr(128512), '{', '}', ';', chr(9)];
     special text[] := ARRAY['plzig', 'std', 'call', 'arg1', 'arg2', 'return', 'fn', 'comptime', 'anyerror',
                             'usingnamespace', '_', 'a_', 'A', 'x' || repeat('y', 62), 'x' || repeat('y', 80), 'pub', 'u8', 'undefined',
-                            'Result', 'column1', 'column2'];
+                            'Result', 'column1', 'column2', 'returnNext'];
     goodtypes text[] := ARRAY['int', 'int2', 'int8', 'bool', 'float4', 'float8', 'text', 'varchar(3)', 'char(2)', 'bytea',
                               'numeric', 'date', 'jsonb', 'int[]', 'fz_mood', 'fz_posint', 'fz_pair', 'uuid', 'name', 'regclass'];
     badtypes text[] := ARRAY['anyelement', 'anyarray', 'internal', 'cstring', 'record', 'anyrange', 'anycompatible', 'trigger', 'void', 'unknown'];
@@ -169,17 +169,19 @@ BEGIN
         setof := NOT proc AND nout = 0 AND random() < 0.05;
         ret := CASE WHEN random() < 0.1 THEN badtypes[1 + floor(random() * array_length(badtypes, 1))::int]
                     ELSE goodtypes[1 + floor(random() * array_length(goodtypes, 1))::int] END;
-        -- a function with output parameters gets no RETURNS clause (PostgreSQL derives it)
-        IF setof OR (NOT proc AND nout = 0 AND ret = ANY (badtypes) AND ret <> 'void') THEN expect_ok := false; END IF;
-        -- a row result (struct) declares Result
+        -- a function with output parameters gets no RETURNS clause (PostgreSQL derives it);
+        -- a set of any good type is fine (materialize mode), SETOF void is not
+        IF NOT proc AND nout = 0 AND ret = ANY (badtypes) AND (setof OR ret <> 'void') THEN expect_ok := false; END IF;
+        -- a row result (struct) declares Result; a set declares Result and returnNext
         rowres := (proc AND nout > 0) OR (NOT proc AND (nout >= 2 OR (nout = 1 AND outtype = 'fz_pair')
                                                         OR (nout = 0 AND ret = 'fz_pair')));
-        IF rowres AND 'Result' = ANY (effective) THEN expect_ok := false; END IF;
+        IF (rowres OR setof) AND 'Result' = ANY (effective) THEN expect_ok := false; END IF;
         -- a struct made of the outputs: identifiers, unique also with the
         -- made-up columnN names (one composite output: its type's fields)
         IF ((proc AND nout > 0) OR (NOT proc AND nout >= 2)) AND (outbad OR (SELECT count(*) <> count(DISTINCT x) FROM unnest(outnames) x)) THEN
             expect_ok := false;
         END IF;
+        IF setof AND 'returnNext' = ANY (effective) THEN expect_ok := false; END IF;
         nsig := nsig + 1;
         BEGIN
             EXECUTE 'DROP ROUTINE IF EXISTS fz_sig';
@@ -191,7 +193,7 @@ BEGIN
             ELSE
                 EXECUTE format('CREATE FUNCTION fz_sig(%s) RETURNS %s%s LANGUAGE plzig AS $b$ %s $b$',
                                sig, CASE WHEN setof THEN 'SETOF ' ELSE '' END, ret,
-                               CASE WHEN ret = 'void' THEN 'return;' ELSE 'return null;' END);
+                               CASE WHEN ret = 'void' OR setof THEN 'return;' ELSE 'return null;' END);
             END IF;
             got_ok := true;
         EXCEPTION WHEN OTHERS THEN
