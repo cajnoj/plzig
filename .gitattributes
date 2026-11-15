@@ -1,0 +1,8 @@
+# Not part of the source tarball (make dist, packaging/make-dist.sh):
+# CI configuration, and the benchmark suite, whose image installs PL/Python
+# and PL/Perl (benchmark-only languages, PLAN.md section 13 D).  The /** forms
+# make `git check-attr` (used for make dist DIST_WORKTREE=1) see the files.
+/.github export-ignore
+/.github/** export-ignore
+/bench export-ignore
+/bench/** export-ignore

@@ -63,12 +63,18 @@ SELECT plzig_cache_clear();
 ERROR:  permission denied for function plzig_cache_clear
 RESET ROLE;
 -- GUCs exist, and the security-relevant ones cannot be changed by ordinary users
--- (the toolchain paths are site-specific; zig_path must be set for this suite)
+-- (the toolchain paths are site-specific; zig_path must be set for this suite.
+-- A package compiles in its toolchain's compiler as zig_path's default, which
+-- is then also the setting: docker/security-checks.sh checks that a source
+-- build has no default, packaging/test-packages.sh that a package has its own)
 SELECT name,
        CASE WHEN name IN ('plzig.zig_path', 'plzig.zig_lib_dir', 'plzig.zig_sha256')
             THEN CASE WHEN setting = '' THEN '(empty)' ELSE '(set)' END
             ELSE setting END AS setting,
-       unit, context, boot_val
+       unit, context,
+       CASE WHEN name IN ('plzig.zig_path', 'plzig.zig_lib_dir', 'plzig.zig_sha256')
+            THEN CASE WHEN boot_val IN ('', setting) THEN '' ELSE '(other)' END
+            ELSE boot_val END AS boot_val
   FROM pg_settings WHERE name LIKE 'plzig.%' ORDER BY name;
               name               | setting | unit |  context  | boot_val 
 ---------------------------------+---------+------+-----------+----------

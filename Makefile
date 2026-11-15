@@ -15,15 +15,24 @@
 #   make install-zig ZIG_PREFIX=/opt/zig-0.17.1 [ZIG_TARBALL=/path/zig-<arch>-linux-0.17.1.tar.xz]
 #   make fetch-zig [ZIG_TARBALL=...]          (download + verify only)
 #
-# WAMR is fetched at build time if WAMR_SRC is not given (pinned commit);
-# the database server never downloads anything.
+# WAMR is fetched at build time (git, pinned commit) unless WAMR_SRC (a source
+# tree) or WAMR_TARBALL (the tag's source tarball, pinned SHA-256) is given;
+# the database server never downloads anything.  Fully offline build:
+#
+#   make ZIG=/opt/zig-0.17.1/zig WAMR_TARBALL=/path/WAMR-2.4.5.tar.gz
+#
+# Packaging (doc/packaging.md):
+#   make dist                                 reproducible source tarball (build/dist/)
+#   make PLZIG_DEFAULT_ZIG_PATH=/abs/zig ...  compiled-in default of plzig.zig_path
+#   sh packaging/versions.sh                  the versions, for scripts
 
 EXTENSION = plzig
 MODULE_big = plzig
 OBJS = src/plzig.o src/plzig_source.o src/plzig_build.o src/plzig_spawn.o \
        src/plzig_sandbox.o src/plzig_runtime.o src/plzig_host.o src/plzig_types.o \
        src/plzig_row.o src/plzig_use.o
-DATA = sql/plzig--1.0.sql
+# every install and upgrade script (plzig--<v>.sql, plzig--<from>--<to>.sql)
+DATA = $(wildcard sql/plzig--*.sql)
 PGFILEDESC = "PL/Zig - procedural language"
 
 REGRESS = setup basics types types_more types_fixed types_numeric types_calendar types_jsonb rows srf triggers xact signatures usage encoding errors spi spi_prepared spi_cursor uses \
@@ -33,6 +42,23 @@ REGRESS_OPTS = --inputdir=test --load-extension=plzig
 REGRESS_TESTING = testing
 
 PG_CONFIG ?= pg_config
+
+# ---- versions (PLAN.md section 14, doc/packaging.md "Versions") -----------
+# PL/Zig's own semantic version, the single source of the release version
+# (plzig.so's module magic, make dist, the packages).  A pre-release suffix
+# ("-dev") marks a tree that is not a release; make dist then names its
+# tarball <version>.<commit date>.g<commit>.
+PLZIG_VERSION := 1.0.0-dev
+# The SQL-level extension version (default_version in plzig.control, the
+# install script sql/plzig--<EXT_VERSION>.sql) is MAJOR.MINOR: patch
+# releases never change the SQL objects, so they need no upgrade script.
+plzig_semver := $(subst ., ,$(firstword $(subst -, ,$(subst +, ,$(PLZIG_VERSION)))))
+EXT_VERSION := $(word 1,$(plzig_semver)).$(word 2,$(plzig_semver))
+
+# Compiled-in default of plzig.zig_path (empty: no default, the administrator
+# sets it).  For packages whose Zig toolchain package installs the compiler at
+# a fixed place: an absolute path of [A-Za-z0-9._+/-] characters.
+PLZIG_DEFAULT_ZIG_PATH ?=
 
 # ---- pinned third-party inputs -------------------------------------------
 # The Zig pin.  This line is its single source: plzig.so (PLZIG_ZIG_VERSION),
@@ -48,6 +74,11 @@ ZIG_URL := https://ziglang.org/download/$(ZIG_VERSION)/$(ZIG_DIRNAME).tar.xz
 ZIG_TARBALL ?=
 ZIG_PREFIX ?=
 WAMR_SRC ?=
+# offline alternative to WAMR_SRC: the tag's source tarball from GitHub
+# (https://github.com/bytecodealliance/wasm-micro-runtime/archive/refs/tags/WAMR-2.4.5.tar.gz),
+# verified against this SHA-256 (its contents are the pinned commit's tree)
+WAMR_TARBALL ?=
+WAMR_TARBALL_SHA256 := 1ab09d51099f276ca4a1d6629f6b589aab2bd0caa01445e05031a4bed22c199b
 
 # the Zig compiler used to build the validator (absolute path, exactly ZIG_VERSION)
 ZIG ?=
@@ -60,7 +91,14 @@ VALIDATOR := $(BUILD_DIR)/plzig-validate
 
 # The backend refuses any compiler whose `zig version` differs from the one
 # the validator was built with (the validator uses that version's tokenizer).
-PG_CPPFLAGS = -I$(WAMR_BUILD_SRC)/core/iwasm/include -DPLZIG_ZIG_VERSION='"$(ZIG_VERSION)"'
+PG_CPPFLAGS = -I$(WAMR_BUILD_SRC)/core/iwasm/include -DPLZIG_ZIG_VERSION='"$(ZIG_VERSION)"' \
+    -DPLZIG_VERSION_STR='"$(PLZIG_VERSION)"'
+ifneq ($(PLZIG_DEFAULT_ZIG_PATH),)
+ifneq ($(shell printf '%s\n' '$(PLZIG_DEFAULT_ZIG_PATH)' | grep -cxE '/[A-Za-z0-9._+/-]+'),1)
+$(error PLZIG_DEFAULT_ZIG_PATH must be an absolute path of [A-Za-z0-9._+/-] characters)
+endif
+PG_CPPFLAGS += -DPLZIG_DEFAULT_ZIG_PATH='"$(PLZIG_DEFAULT_ZIG_PATH)"'
+endif
 PG_CFLAGS = -Wall -Wmissing-prototypes -Wdeclaration-after-statement
 ifeq ($(WERROR),1)
 PG_CFLAGS += -Werror
@@ -82,7 +120,7 @@ include $(PGXS)
 # ---- third-party build steps ---------------------------------------------
 $(WAMR_BUILD_SRC)/.stamp: third_party/prepare-wamr.sh third_party/wamr-interrupt.patch
 	sh third_party/prepare-wamr.sh "$(WAMR_SRC)" "$(WAMR_BUILD_SRC)" \
-	    "$(CURDIR)/third_party/wamr-interrupt.patch"
+	    "$(CURDIR)/third_party/wamr-interrupt.patch" "$(WAMR_TARBALL)" "$(WAMR_TARBALL_SHA256)"
 	touch $@
 
 $(WAMR_LIB): $(WAMR_BUILD_SRC)/.stamp third_party/wamr/CMakeLists.txt
@@ -105,8 +143,10 @@ $(shlib): $(WAMR_LIB)
 
 # The control file, with the pinned Zig version in its comment (which becomes
 # the extension's comment); PGXS installs it (installcontrol depends on it).
+# default_version is EXT_VERSION, whose install script must exist.
 plzig.control: plzig.control.in Makefile
-	sed 's/@ZIG_VERSION@/$(ZIG_VERSION)/g' plzig.control.in > $@.tmp
+	@test -f sql/plzig--$(EXT_VERSION).sql || { echo "sql/plzig--$(EXT_VERSION).sql (EXT_VERSION of PLZIG_VERSION $(PLZIG_VERSION)) does not exist" >&2; exit 1; }
+	sed -e 's/@ZIG_VERSION@/$(ZIG_VERSION)/g' -e 's/@EXT_VERSION@/$(EXT_VERSION)/g' plzig.control.in > $@.tmp
 	mv $@.tmp $@
 
 all: $(VALIDATOR) plzig.control
@@ -144,6 +184,17 @@ install-zig:
 	sh third_party/fetch-zig.sh "$(ZIG_TARBALL)" "$(ZIG_URL)" "$(ZIG_SHA256)" \
 	    "$(ZIG_DL)" "$(ZIG_PREFIX)" "$(ZIG_DIRNAME)"
 
+# ---- source distribution (doc/packaging.md) ------------------------------
+# Reproducible tarball of the committed tree (git archive of HEAD, honouring
+# .gitattributes export-ignore, re-packed with fixed order, owners, modes and
+# mtime).  DIST_WORKTREE=1 takes the working tree instead (tracked and
+# untracked files that are not ignored) and appends ".dirty.<digest>" to the version
+# if it differs from HEAD.  Output: build/dist/plzig-<version>.tar.gz, .sha256.
+# The versions for scripts: packaging/versions.sh.
+DIST_DIR ?= $(BUILD_DIR)/dist
+dist:
+	sh packaging/make-dist.sh "$(DIST_DIR)" "$(if $(filter 1,$(DIST_WORKTREE)),worktree,head)"
+
 # ---- install: validator, SDK (no compiler) -------------------------------
 install: install-plzig
 
@@ -171,4 +222,4 @@ clean-plzig:
 distclean-plzig: clean-plzig
 	rm -rf $(BUILD_DIR)
 
-.PHONY: install-plzig uninstall-plzig clean-plzig distclean-plzig fetch-zig install-zig check-zig installcheck-testing installcheck-isolation
+.PHONY: install-plzig uninstall-plzig clean-plzig distclean-plzig fetch-zig install-zig check-zig installcheck-testing installcheck-isolation dist

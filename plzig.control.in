@@ -1,7 +1,8 @@
 # plzig extension (template: the Makefile writes plzig.control from it,
-# with the pinned Zig version from ZIG_VERSION)
+# with the pinned Zig version from ZIG_VERSION and the extension version
+# EXT_VERSION, MAJOR.MINOR of PLZIG_VERSION)
 comment = 'PL/Zig procedural language (Zig @ZIG_VERSION@ compiled to sandboxed WebAssembly)'
-default_version = '1.0'
+default_version = '@EXT_VERSION@'
 module_pathname = '$libdir/plzig'
 relocatable = false
 schema = pg_catalog

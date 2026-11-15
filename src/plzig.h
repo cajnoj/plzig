@@ -18,7 +18,15 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 
-#define PLZIG_VERSION_STR		"1.0"
+/*
+ * PL/Zig's release version (PLZIG_VERSION in the Makefile, which passes it;
+ * shown as the module version by PostgreSQL 18+).  Builds outside the
+ * Makefile (fuzz harness, static analysis) do not need it.
+ */
+#ifndef PLZIG_VERSION_STR
+#define PLZIG_VERSION_STR		"unknown"
+#endif
+/* host/guest ABI version (doc/abi.md), independent of the release version */
 #define PLZIG_ABI_VERSION		5
 /*
  * The Zig version the source validator was built with, from the Makefile

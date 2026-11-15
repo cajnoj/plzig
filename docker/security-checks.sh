@@ -980,6 +980,17 @@ noleak "unprivileged: module too large" "the compiled module is too large" \
 expect "works again after repair" "5150" "SELECT leak_probe();"
 psqlq -c "DROP OWNED BY plzig_sec; DROP ROLE plzig_sec;" >/dev/null
 
+# a source build has no compiled-in compiler path (packages set one with
+# PLZIG_DEFAULT_ZIG_PATH; packaging/test-packages.sh checks theirs); the
+# other toolchain settings never have a default
+# (the settings exist in a session once the library is loaded)
+bv=$(psqlq -c "LOAD 'plzig'" -c "SELECT string_agg(name || '=' || boot_val, ',' ORDER BY name) FROM pg_settings WHERE name IN ('plzig.zig_path', 'plzig.zig_lib_dir', 'plzig.zig_sha256')")
+if [ "$bv" = "plzig.zig_lib_dir=,plzig.zig_path=,plzig.zig_sha256=" ]; then
+    pass "source build: no compiled-in default for the toolchain settings"
+else
+    fail "source build: no compiled-in default for the toolchain settings ($bv)"
+fi
+
 # make install puts no Zig files anywhere
 dest=/tmp/plzig-destdir
 rm -rf "$dest"

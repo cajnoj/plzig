@@ -38,6 +38,16 @@ PG_MODULE_MAGIC_EXT(.name = "plzig", .version = PLZIG_VERSION_STR);
 PG_MODULE_MAGIC;
 #endif
 
+/*
+ * Compiled-in default of plzig.zig_path: none in a source build; a package
+ * sets it to its Zig toolchain package's compiler (make
+ * PLZIG_DEFAULT_ZIG_PATH=..., doc/packaging.md).  It gets the same checks
+ * as a configured value before every use (plzig_build.c).
+ */
+#ifndef PLZIG_DEFAULT_ZIG_PATH
+#define PLZIG_DEFAULT_ZIG_PATH ""
+#endif
+
 /* GUCs */
 char	   *plzig_zig_path = NULL;
 char	   *plzig_zig_lib_dir = NULL;
@@ -128,10 +138,10 @@ _PG_init(void)
 	 * value silently in force.  plzig_build.c validates them before use.
 	 */
 	DefineCustomStringVariable("plzig.zig_path",
-							   "Absolute path of the Zig compiler binary (no default; PATH is never searched).",
+							   "Absolute path of the Zig compiler binary (PATH is never searched).",
 							   NULL,
 							   &plzig_zig_path,
-							   "",
+							   PLZIG_DEFAULT_ZIG_PATH,
 							   PGC_SIGHUP,
 							   GUC_SUPERUSER_ONLY | GUC_DISALLOW_IN_AUTO_FILE,
 							   NULL, NULL, NULL);
