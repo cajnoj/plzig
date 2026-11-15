@@ -27,7 +27,7 @@ DATA = sql/plzig--1.0.sql
 PGFILEDESC = "PL/Zig - procedural language"
 
 REGRESS = setup basics types types_more types_fixed types_numeric types_calendar types_jsonb rows srf triggers xact signatures usage encoding errors spi spi_prepared spi_cursor \
-          sandbox adversarial resources leaks lifecycle
+          sandbox adversarial resources leaks check_all lifecycle
 REGRESS_OPTS = --inputdir=test --load-extension=plzig
 # only against a PLZIG_TESTING=1 build: make installcheck-testing
 REGRESS_TESTING = testing

@@ -80,8 +80,16 @@ and how it is tested.
   PUBLIC;` (`sql/plzig--1.0.sql`). Without `USAGE` a role can create no
   function and run no `DO` block. The extension itself requires a superuser
   to install (`superuser = true`, `trusted = false` in `plzig.control`).
-* `plzig_sandbox_status()` and `plzig_cache_clear()` have `EXECUTE` revoked
-  from `PUBLIC`.
+* `plzig_sandbox_status()`, `plzig_cache_clear()` and `plzig_check_all()`
+  have `EXECUTE` revoked from `PUBLIC`. `plzig_check_all()` compiles every
+  PL/Zig function of the database through the same path as the validator
+  (sandbox, limits, compile lock, load check before caching), each in its
+  own subtransaction, and executes none: no `plzig_call`, only the SDK's
+  set-up exports during the trial instantiation, as at `CREATE FUNCTION`.
+  It holds an `AccessShareLock` on one function at a time (no lock-table
+  growth on large databases); class-57 errors (cancel, statement timeout)
+  end the run instead of being reported per function. Tests:
+  `test/sql/check_all.sql`, `test/tap/t/090_check_all.pl`.
 * The validator honours `CheckFunctionValidatorAccess` and
   `check_function_bodies` (`plzig_validator`, `src/plzig.c`); signature
   checks always run.

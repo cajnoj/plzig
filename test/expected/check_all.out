@@ -1,0 +1,307 @@
+--
+-- check_all: plzig_check_all() compiles every PL/Zig function of the current
+-- database with the configured compiler, executes none, and returns those
+-- that fail.  Runs in a database of its own so that only this test's
+-- functions are checked.
+--
+\set VERBOSITY terse
+SELECT current_database() AS regress_db \gset
+CREATE DATABASE regress_plzig_check;
+\c regress_plzig_check
+SET client_min_messages = warning;
+CREATE EXTENSION plzig;
+RESET client_min_messages;
+GRANT USAGE ON LANGUAGE plzig TO regress_plzig_dev;
+-- the result rows without the compiler output (which names Zig internals)
+CREATE VIEW checked AS
+  SELECT function::text AS function, sqlstate, message FROM plzig_check_all() ORDER BY 1;
+-- superuser only: not executable by PUBLIC, nor by a role with USAGE
+SELECT has_function_privilege('regress_plzig_dev', 'plzig_check_all()', 'EXECUTE') AS dev_may_run,
+       has_function_privilege('public', 'plzig_check_all()', 'EXECUTE') AS public_may_run;
+ dev_may_run | public_may_run 
+-------------+----------------
+ f           | f
+(1 row)
+
+SET ROLE regress_plzig_dev;
+SELECT * FROM plzig_check_all();
+ERROR:  permission denied for function plzig_check_all
+RESET ROLE;
+-- nothing to check yet
+SELECT * FROM checked;
+ function | sqlstate | message 
+----------+----------+---------
+(0 rows)
+
+-- functions of every kind that compile, and would leave a trace if run
+CREATE TABLE ran (what text);
+CREATE TYPE ca_pair AS (a int, b text);
+CREATE FUNCTION ca_scalar(x int) RETURNS int STRICT LANGUAGE plzig AS $$
+    _ = try plzig.spi.execute("INSERT INTO ran VALUES ('scalar')", &.{});
+    plzig.notice("ca_scalar ran", .{});
+    return x + 1;
+$$;
+CREATE FUNCTION ca_row(p ca_pair) RETURNS ca_pair LANGUAGE plzig AS $$
+    _ = try plzig.spi.execute("INSERT INTO ran VALUES ('row')", &.{});
+    const v = p orelse return null;
+    return .{ .a = v.a, .b = v.b };
+$$;
+CREATE FUNCTION ca_out(a int, OUT q int, OUT r int) STRICT LANGUAGE plzig AS $$
+    _ = try plzig.spi.execute("INSERT INTO ran VALUES ('out')", &.{});
+    return .{ .q = a, .r = a };
+$$;
+CREATE FUNCTION ca_srf(n int) RETURNS TABLE (i int, label text) STRICT LANGUAGE plzig AS $$
+    _ = try plzig.spi.execute("INSERT INTO ran VALUES ('srf')", &.{});
+    var k: i32 = 0;
+    while (k < n) : (k += 1) returnNext(.{ .i = k, .label = "x" });
+$$;
+CREATE FUNCTION ca_trigger() RETURNS trigger LANGUAGE plzig AS $$
+    _ = try plzig.spi.execute("INSERT INTO ran VALUES ('trigger')", &.{});
+    return .new;
+$$;
+CREATE PROCEDURE ca_proc(INOUT n int) LANGUAGE plzig AS $$
+    _ = try plzig.spi.execute("INSERT INTO ran VALUES ('procedure')", &.{});
+    plzig.commit();
+    return .{ .n = (n orelse 0) + 1 };
+$$;
+CREATE FUNCTION ca_native(d date, n numeric, j jsonb) RETURNS timestamptz LANGUAGE plzig AS $$
+    return null;
+$$;
+-- a set-returning function that would also raise if run
+CREATE FUNCTION ca_raises() RETURNS SETOF int LANGUAGE plzig AS $$
+    plzig.raise("ca_raises ran", .{});
+$$;
+CREATE TABLE ca_t (a int);
+CREATE TRIGGER ca_t_trg BEFORE INSERT ON ca_t FOR EACH ROW EXECUTE FUNCTION ca_trigger();
+DELETE FROM ran;
+SELECT plzig_cache_clear() >= 0 AS cleared;
+ cleared 
+---------
+ t
+(1 row)
+
+SELECT * FROM checked;
+ function | sqlstate | message 
+----------+----------+---------
+(0 rows)
+
+-- nothing ran, and the modules of the good functions are in the cache
+SELECT count(*) AS rows_written FROM ran;
+ rows_written 
+--------------
+            0
+(1 row)
+
+SELECT count(*) AS cached FROM pg_ls_dir('plzig/cache') d WHERE d LIKE '%.wasm';
+ cached 
+--------
+      8
+(1 row)
+
+-- the next run finds them there (and still runs nothing)
+SELECT * FROM checked;
+ function | sqlstate | message 
+----------+----------+---------
+(0 rows)
+
+SELECT count(*) AS cached FROM pg_ls_dir('plzig/cache') d WHERE d LIKE '%.wasm';
+ cached 
+--------
+      8
+(1 row)
+
+-- they still work
+SELECT ca_scalar(1);
+NOTICE:  ca_scalar ran
+ ca_scalar 
+-----------
+         2
+(1 row)
+
+INSERT INTO ca_t VALUES (1);
+SELECT what FROM ran ORDER BY what;
+  what   
+---------
+ scalar
+ trigger
+(2 rows)
+
+-- functions that fail, created with check_function_bodies = off (as by a
+-- dump/restore); each kind fails in a different stage
+SET check_function_bodies = off;
+-- compile errors of every kind of function
+CREATE FUNCTION cb_scalar() RETURNS int LANGUAGE plzig AS $$ return "text"; $$;
+CREATE FUNCTION cb_row(p ca_pair) RETURNS ca_pair LANGUAGE plzig AS $$ return .{ .nope = 1 }; $$;
+CREATE FUNCTION cb_out(OUT q int, OUT r int) LANGUAGE plzig AS $$ return .{ .q = 1 }; $$;
+CREATE FUNCTION cb_srf() RETURNS SETOF text LANGUAGE plzig AS $$ returnNext(42); $$;
+CREATE FUNCTION cb_trigger() RETURNS trigger LANGUAGE plzig AS $$ return 1; $$;
+CREATE PROCEDURE cb_proc() LANGUAGE plzig AS $$ return 1; $$;
+-- policy violation (the validator)
+CREATE FUNCTION cb_policy() RETURNS int LANGUAGE plzig AS $$ return @embedFile("/etc/passwd").len; $$;
+-- compiles, but the module is refused when loaded: it needs more memory than
+-- plzig.max_memory allows (the trial instantiation fails before caching)
+CREATE FUNCTION cb_load(i int) RETURNS int STRICT LANGUAGE plzig AS $$
+    big[@intCast(i)] = 1;
+    return big[0];
+}
+var big: [3 << 20]u8 = @splat(0);
+fn unused() void {
+$$;
+RESET check_function_bodies;
+SELECT plzig_cache_clear() >= 0 AS cleared;
+ cleared 
+---------
+ t
+(1 row)
+
+SET plzig.max_memory = '2MB';
+SELECT * FROM checked;
+     function     | sqlstate |                                               message                                               
+------------------+----------+-----------------------------------------------------------------------------------------------------
+ cb_load(integer) | 53200    | PL/Zig: could not instantiate module: WASM module instantiate failed: allocate linear memory failed
+ cb_out()         | 42P13    | PL/Zig compilation failed
+ cb_policy()      | 42501    | PL/Zig source rejected by policy
+ cb_proc()        | 42P13    | PL/Zig compilation failed
+ cb_row(ca_pair)  | 42P13    | PL/Zig compilation failed
+ cb_scalar()      | 42P13    | PL/Zig compilation failed
+ cb_srf()         | 42P13    | PL/Zig compilation failed
+ cb_trigger()     | 42P13    | PL/Zig compilation failed
+(8 rows)
+
+-- the compiler output is in detail
+SELECT function, detail ~ 'expected type' AS detail_has_compiler_error
+  FROM plzig_check_all() WHERE function = 'cb_scalar()'::regprocedure;
+  function   | detail_has_compiler_error 
+-------------+---------------------------
+ cb_scalar() | t
+(1 row)
+
+RESET plzig.max_memory;
+-- failing functions left nothing in the cache; the good ones are there
+SELECT count(*) AS cached FROM pg_ls_dir('plzig/cache') d WHERE d LIKE '%.wasm';
+ cached 
+--------
+      8
+(1 row)
+
+SELECT count(*) AS rows_written FROM ran WHERE what <> 'scalar' AND what <> 'trigger';
+ rows_written 
+--------------
+            0
+(1 row)
+
+-- no build directory or temporary file is left behind
+SELECT count(*) AS leftover_build_dirs
+  FROM pg_ls_dir('plzig') AS d WHERE d LIKE 'pgsql_tmp.build.%';
+ leftover_build_dirs 
+---------------------
+                   0
+(1 row)
+
+SELECT count(*) AS temp_files FROM pg_ls_dir('plzig/cache') AS d WHERE d LIKE '%.tmp.%';
+ temp_files 
+------------
+          0
+(1 row)
+
+-- with the default plzig.max_memory, cb_load loads (and is cached)
+SELECT * FROM checked WHERE function = 'cb_load(integer)';
+ function | sqlstate | message 
+----------+----------+---------
+(0 rows)
+
+DROP FUNCTION cb_load(int);
+-- a composite type changed after the function was created: the source is
+-- generated from the type as it is now, so the function fails to compile
+CREATE TYPE ca_ab AS (a int, b int);
+CREATE FUNCTION ca_sum(p ca_ab) RETURNS int LANGUAGE plzig AS $$
+    const v = p orelse return null;
+    return (v.a orelse 0) + (v.b orelse 0);
+$$;
+SELECT * FROM checked WHERE function = 'ca_sum(ca_ab)';
+ function | sqlstate | message 
+----------+----------+---------
+(0 rows)
+
+ALTER TYPE ca_ab DROP ATTRIBUTE b;
+SELECT * FROM checked WHERE function = 'ca_sum(ca_ab)';
+   function    | sqlstate |          message          
+---------------+----------+---------------------------
+ ca_sum(ca_ab) | 42P13    | PL/Zig compilation failed
+(1 row)
+
+DROP FUNCTION ca_sum(ca_ab);
+DROP TYPE ca_ab;
+-- functions of other languages are not looked at
+CREATE FUNCTION cs_sql() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;
+SELECT count(*) AS reported FROM plzig_check_all() WHERE function = 'cs_sql()'::regprocedure;
+ reported 
+----------
+        0
+(1 row)
+
+-- the result can be used in queries and as a set in the target list
+SELECT count(*) AS failing FROM plzig_check_all();
+ failing 
+---------
+       7
+(1 row)
+
+SELECT (plzig_check_all()).sqlstate ORDER BY 1 LIMIT 1;
+ sqlstate 
+----------
+ 42501
+(1 row)
+
+-- statement_timeout cancels the run (it is not recorded as a failure of
+-- the function being compiled); nothing is left behind
+SET check_function_bodies = off;
+DO $d$
+DECLARE body text;
+BEGIN
+  -- ~12000 chained functions: takes seconds to compile, never cached
+  SELECT 'return g1(' || (random() * 1000000)::int || ');' || chr(10) || '}' || chr(10) ||
+         string_agg(format('noinline fn g%s(x: i32) i32 { return g%s(x *%% %s +%% 7) +%% 1; }', i, i + 1, i), chr(10)) ||
+         chr(10) || 'fn g12001(x: i32) i32 { return x; }' || chr(10) || 'fn unused() void {'
+    INTO body FROM generate_series(1, 12000) i;
+  EXECUTE format('CREATE FUNCTION cz_slow() RETURNS int LANGUAGE plzig AS %L', body);
+END $d$;
+RESET check_function_bodies;
+SELECT count(*) AS cached_before FROM pg_ls_dir('plzig/cache') d WHERE d LIKE '%.wasm' \gset
+SET statement_timeout = '1s';
+SELECT * FROM checked;
+ERROR:  canceling statement due to statement timeout
+RESET statement_timeout;
+SELECT count(*) - :cached_before AS new_cache_files FROM pg_ls_dir('plzig/cache') d WHERE d LIKE '%.wasm';
+ new_cache_files 
+-----------------
+               0
+(1 row)
+
+SELECT count(*) AS leftover_build_dirs
+  FROM pg_ls_dir('plzig') AS d WHERE d LIKE 'pgsql_tmp.build.%';
+ leftover_build_dirs 
+---------------------
+                   0
+(1 row)
+
+-- plzig.compile_timeout, on the other hand, is a limit the function exceeds
+SET plzig.compile_timeout = '100ms';
+SELECT * FROM checked WHERE function = 'cz_slow()';
+ function  | sqlstate |           message            
+-----------+----------+------------------------------
+ cz_slow() | 57014    | PL/Zig compilation timed out
+(1 row)
+
+RESET plzig.compile_timeout;
+DROP FUNCTION cz_slow();
+-- still nothing ran
+SELECT what FROM ran ORDER BY what;
+  what   
+---------
+ scalar
+ trigger
+(2 rows)
+
+\c :regress_db
+DROP DATABASE regress_plzig_check;

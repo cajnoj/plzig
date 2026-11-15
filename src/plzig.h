@@ -318,6 +318,7 @@ extern void plzig_spawn(const char *prog, char *const argv[], char *const envp[]
 						const PlzigSandbox *sb, int timeout_ms,
 						PlzigSpawnResult *res);
 extern void plzig_spawn_atexit(void);
+extern bool plzig_spawn_timed_out;
 
 /* Landlock ABI that plzig.compiler_sandbox = require insists on */
 #define PLZIG_LANDLOCK_MIN_REQUIRED_ABI 6

@@ -696,6 +696,56 @@ removes every compiled module from the cache under the compile lock and
 returns the number of files removed. Functions already loaded in a backend
 keep running; everything else is recompiled on next use.
 
+### Checking every function: `plzig_check_all()`
+
+Function bodies are stored as source, so a function that compiled once can
+stop compiling: after a Zig upgrade (a new PL/Zig major), after a composite
+type it uses was altered, or after a dump/restore (which restores with
+`check_function_bodies = off`). Such a failure would otherwise show only
+at the first call. `plzig_check_all()` finds them in advance:
+
+```sql
+SELECT function, sqlstate, message, detail FROM plzig_check_all();
+```
+
+* It compiles every PL/Zig function, procedure and trigger function of the
+  **current database** with the configured compiler, exactly as `CREATE
+  FUNCTION` does with `check_function_bodies = on` (signature checks,
+  policy validator, compiler, load check of the module), under the normal
+  sandbox and the session's limits (`plzig.compile_timeout`,
+  `plzig.max_module_size`, `plzig.max_memory`, ...).
+* It **executes no function**. Loading a module instantiates it and calls
+  only the SDK's two set-up exports (ABI version, argument buffer), never
+  the function body.
+* It returns one row per failing function (`function regprocedure,
+  sqlstate, message, detail`; `detail` holds the compiler's output), none
+  if everything compiles.
+* Each function is compiled in its own subtransaction and through the
+  normal compile lock, one after another, so other sessions' compilations
+  interleave with the run. A function dropped during the run is skipped;
+  one replaced during the run is checked as it is now (each function is
+  locked against `DROP` while it is compiled).
+* A query cancel or `statement_timeout` ends the whole run with that error
+  (it is not reported as a failing function); a function that exceeds
+  `plzig.compile_timeout` is reported (`57014`, `PL/Zig compilation timed
+  out`).
+* **The module cache is used as by a call.** A function whose module is
+  already cached is not recompiled: the cache key covers the PL/Zig ABI,
+  the pinned Zig version, the compiler flags, the SDK and the whole
+  generated source (including the structs generated from composite types),
+  so a cached module is exactly what this compiler would produce. A module
+  compiled during the run is stored only after it passed the load check:
+  functions that fail leave nothing in the cache, functions that succeed
+  are ready for their first call. On a large database the run may evict
+  older modules (`plzig.cache_size_limit`).
+* Superuser only: `EXECUTE` is revoked from `PUBLIC` (it runs the
+  compiler on every function body). A superuser may delegate it with
+  `GRANT EXECUTE ON FUNCTION plzig_check_all() TO ...`; function bodies are
+  readable by everyone in `pg_proc` anyway.
+
+Run it in each database that has PL/Zig functions, e.g. on a staging copy
+before upgrading PL/Zig, and again after the upgrade.
+
 ## Security model
 
 This section is the operator's summary. The threat model, every defence

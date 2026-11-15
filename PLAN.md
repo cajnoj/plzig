@@ -958,7 +958,7 @@ the validator, SDK and flag sets that need review and fuzzing.
 - *Zig minor release:* function bodies are stored as source and may stop
   compiling; failures surface at first call (also after dump/restore, which
   restores with `check_function_bodies = off`). Therefore:
-  1. **`plzig_check_all()`** (to do; useful before any Zig upgrade too): a
+  1. **`plzig_check_all()`** (done 2026-11-15, Deviation 36; useful before any Zig upgrade too): a
      superuser-only function that compiles every PL/Zig function with the
      configured compiler, under the normal sandbox and limits, and returns
      the ones that fail with their error. It must not execute any function,
@@ -1922,3 +1922,49 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       function in `docker/security-checks.sh`, `hostabi` (commit/rollback
       operations in every driver variant, and a procedure variant called
       by top-level, non-atomic `CALL`s), loader stubs for the new imports.
+36. **§14 item 1: `plzig_check_all()` (2026-11-15).** `plzig_check_all(OUT
+    function regprocedure, OUT sqlstate text, OUT message text, OUT detail
+    text) RETURNS SETOF record`, `EXECUTE` revoked from `PUBLIC` (no
+    hard-coded superuser check: as for `plzig_cache_clear()`, delegation by
+    `GRANT` is the PostgreSQL practice, and function bodies are public in
+    `pg_proc` anyway). Points the plan left open:
+    - *What is compiled*: every function of the current database whose
+      `prolang` is `plzig`, in OID order, through exactly the validator's
+      path with `check_function_bodies = on` (signature checks, source
+      generation from the types as they are now, `plzig_get_wasm` with the
+      cache, load check). Nothing is executed: the trial instantiation calls
+      only the SDK's `plzig_abi_version` and `plzig_init`, as at `CREATE
+      FUNCTION`; never `plzig_call`.
+    - *Successful functions use the cache normally*: a cached module is not
+      recompiled (its key covers ABI, pinned Zig version, flags, SDK and the
+      whole generated source, so it is what this compiler would produce);
+      a newly compiled module is cached after the load check, so the first
+      call after the run does not compile. Failing functions leave nothing
+      in the cache (the existing pipeline caches only after the load
+      check; tested with a module that compiles but fails to instantiate).
+    - *Isolation*: one internal subtransaction per function (errors are
+      collected with `CopyErrorData`; build directory, compile-lock file
+      and catalog references are released by the existing cleanup and the
+      subtransaction abort). The compile lock is taken per compilation, so
+      other sessions interleave.
+    - *Concurrent DDL*: the OID list is taken first; each function is then
+      locked with `AccessShareLock` (as `DROP` takes `AccessExclusiveLock`,
+      a function cannot disappear while it is compiled, and taking the lock
+      makes the catalog caches current), looked up again, and skipped if it
+      is gone or no longer PL/Zig. The lock is released after the function,
+      so a run over many functions does not fill the lock table.
+    - *Cancellation*: any error of class 57 (query cancel, statement
+      timeout, shutdown) is re-thrown and ends the run. The compiler
+      exceeding `plzig.compile_timeout` is also reported with `57014`
+      (unchanged); a flag set by `plzig_spawn` tells the two apart, so a
+      compile timeout is reported as the function's failure.
+    - *Tests*: `test/sql/check_all.sql` (own database: privileges, every
+      kind of function -- scalar, composite argument and result, `OUT`,
+      `TABLE`, trigger, procedure with `INOUT` and commit, native types --
+      compiling and failing, nothing executed, cache contents before and
+      after, policy and load failures, a composite type altered after
+      creation, statement timeout vs. `plzig.compile_timeout`, leftovers),
+      `test/tap/t/090_check_all.pl` (waits for the compile lock; a
+      function dropped and one replaced during the run; a function whose
+      `DROP` is in progress; cancel while compiling and while waiting for
+      the compile lock).

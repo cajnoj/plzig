@@ -8,23 +8,29 @@
  */
 #include "plzig.h"
 
+#include "access/genam.h"
 #include "access/htup_details.h"
+#include "access/table.h"
 #include "access/xact.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "commands/event_trigger.h"
+#include "commands/proclang.h"
 #include "commands/trigger.h"
 #include "funcapi.h"
 #include "lib/ilist.h"
 #include "miscadmin.h"
 #include "nodes/parsenodes.h"
+#include "storage/lmgr.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/hsearch.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/regproc.h"
+#include "utils/resowner.h"
 #include "utils/syscache.h"
+#include "utils/tuplestore.h"
 
 #if PG_VERSION_NUM >= 180000
 PG_MODULE_MAGIC_EXT(.name = "plzig", .version = PLZIG_VERSION_STR);
@@ -93,6 +99,7 @@ PG_FUNCTION_INFO_V1(plzig_inline_handler);
 PG_FUNCTION_INFO_V1(plzig_validator);
 PG_FUNCTION_INFO_V1(plzig_sandbox_status);
 PG_FUNCTION_INFO_V1(plzig_cache_clear);
+PG_FUNCTION_INFO_V1(plzig_check_all);
 
 void
 _PG_init(void)
@@ -741,4 +748,226 @@ Datum
 plzig_cache_clear(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT64(plzig_cache_clear_files());
+}
+
+/* ---------------------------------------------------------------------
+ * plzig_check_all()
+ * ---------------------------------------------------------------------
+ */
+
+/* OIDs of the functions of language langoid in this database, ascending */
+static int
+plzig_oid_cmp(const void *a, const void *b)
+{
+	Oid			x = *(const Oid *) a;
+	Oid			y = *(const Oid *) b;
+
+	return (x > y) - (x < y);
+}
+
+static Oid *
+plzig_language_functions(Oid langoid, int *n)
+{
+	Relation	rel;
+	SysScanDesc scan;
+	HeapTuple	tup;
+	int			size = 64;
+	Oid		   *oids = palloc(sizeof(Oid) * size);
+
+	*n = 0;
+	/* no index on prolang: a sequential scan of pg_proc */
+	rel = table_open(ProcedureRelationId, AccessShareLock);
+	scan = systable_beginscan(rel, InvalidOid, false, NULL, 0, NULL);
+	while (HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_proc p = (Form_pg_proc) GETSTRUCT(tup);
+
+		if (p->prolang != langoid)
+			continue;
+		if (*n == size)
+		{
+			size *= 2;
+			oids = repalloc(oids, sizeof(Oid) * size);
+		}
+		oids[(*n)++] = p->oid;
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+	if (*n > 1)
+		qsort(oids, *n, sizeof(Oid), plzig_oid_cmp);
+	return oids;
+}
+
+/*
+ * Compile one function exactly as its validator does with
+ * check_function_bodies = on: signature checks, source generation, the
+ * compile pipeline with the module cache (lookup, compile under the compile
+ * lock, load-check before caching), load-check of the result.  Nothing of
+ * the function is executed: loading instantiates the module and calls only
+ * the SDK's plzig_abi_version and plzig_init, never plzig_call.
+ *
+ * Returns false if the function no longer exists or is no longer PL/Zig
+ * (dropped or replaced since the list was taken).  The function is locked
+ * against DROP while it is compiled; the lock is released again so a
+ * long run does not accumulate one lock per function.
+ */
+static bool
+plzig_check_one(Oid fn_oid, Oid langoid)
+{
+	HeapTuple	proctup;
+	PlzigSignature sig;
+	char	   *body;
+	char	   *src;
+	size_t		srclen;
+	char	   *wasm;
+	uint32		wasm_len;
+
+	/* also makes the catalog caches current (AcceptInvalidationMessages) */
+	LockDatabaseObject(ProcedureRelationId, fn_oid, 0, AccessShareLock);
+	proctup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn_oid));
+	if (!HeapTupleIsValid(proctup))
+	{
+		UnlockDatabaseObject(ProcedureRelationId, fn_oid, 0, AccessShareLock);
+		return false;
+	}
+	if (((Form_pg_proc) GETSTRUCT(proctup))->prolang != langoid)
+	{
+		ReleaseSysCache(proctup);
+		UnlockDatabaseObject(ProcedureRelationId, fn_oid, 0, AccessShareLock);
+		return false;
+	}
+
+	plzig_check_signature(proctup, &sig);
+	body = plzig_get_body(proctup);
+	src = plzig_generate_source(&sig, body, &srclen);
+	wasm = plzig_get_wasm(src, srclen, &wasm_len, true);
+	plzig_module_unload(plzig_module_load(wasm, wasm_len));
+
+	ReleaseSysCache(proctup);
+	UnlockDatabaseObject(ProcedureRelationId, fn_oid, 0, AccessShareLock);
+	return true;
+}
+
+/*
+ * plzig_check_one in an internal subtransaction (its own function, so that
+ * no local of the caller's loop lives across the setjmp).  Returns NULL on
+ * success (or if the function is gone), else the error, copied into cxt.
+ * Errors of class 57 (cancel, statement timeout, shutdown) are re-thrown:
+ * they end the whole run.  The compiler exceeding plzig.compile_timeout is
+ * reported with 57014 too, but that is a limit the function exceeded.
+ */
+static ErrorData *
+plzig_check_one_caught(Oid fn_oid, Oid langoid, MemoryContext cxt)
+{
+	ResourceOwner oldowner = CurrentResourceOwner;
+	ErrorData  *volatile edata = NULL;	/* set in PG_CATCH, read after */
+
+	plzig_spawn_timed_out = false;
+	BeginInternalSubTransaction(NULL);
+	MemoryContextSwitchTo(cxt);
+	PG_TRY();
+	{
+		(void) plzig_check_one(fn_oid, langoid);
+		ReleaseCurrentSubTransaction();
+		MemoryContextSwitchTo(cxt);
+		CurrentResourceOwner = oldowner;
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(cxt);
+		edata = CopyErrorData();
+		FlushErrorState();
+		RollbackAndReleaseCurrentSubTransaction();
+		MemoryContextSwitchTo(cxt);
+		CurrentResourceOwner = oldowner;
+		if (ERRCODE_TO_CATEGORY(edata->sqlerrcode) ==
+			ERRCODE_TO_CATEGORY(ERRCODE_QUERY_CANCELED) &&
+			!(edata->sqlerrcode == ERRCODE_QUERY_CANCELED && plzig_spawn_timed_out))
+			ReThrowError(edata);
+	}
+	PG_END_TRY();
+	return edata;
+}
+
+/*
+ * plzig_check_all(): compile every PL/Zig function of the current database
+ * with the configured compiler, under the session's sandbox and limits, and
+ * return those that fail with their error (EXECUTE revoked from PUBLIC).
+ *
+ * Each function is compiled in its own subtransaction, so one failure does
+ * not stop the run and leaves nothing behind (build directory, compile
+ * lock, catalog references).  A query cancel or statement timeout (any
+ * SQLSTATE of class 57, operator intervention) is not a property of a
+ * function: it ends the whole run with that error, as usual.
+ *
+ * The module cache is used as by a call: a function whose module is cached
+ * is not recompiled (the cache key covers the PL/Zig ABI, the pinned Zig
+ * version, the flags, the SDK and the whole generated source, so the cached
+ * module is what this compiler would produce); a module compiled here is
+ * cached only after it passed the load check, so failing functions leave
+ * nothing in the cache.
+ */
+Datum
+plzig_check_all(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	TupleDesc	tupdesc;
+	Tuplestorestate *tupstore;
+	MemoryContext oldcxt;
+	MemoryContext loopcxt;
+	Oid			langoid;
+	Oid		   *oids;
+	int			n;
+	int			i;
+
+	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo) ||
+		(rsinfo->allowedModes & SFRM_Materialize) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("set-valued function called in context that cannot accept a set")));
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+
+	oldcxt = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
+	tupdesc = CreateTupleDescCopy(tupdesc);
+	tupstore = tuplestore_begin_heap((rsinfo->allowedModes & SFRM_Materialize_Random) != 0,
+									 false, work_mem);
+	MemoryContextSwitchTo(oldcxt);
+
+	langoid = get_language_oid("plzig", false);
+	oids = plzig_language_functions(langoid, &n);
+
+	loopcxt = AllocSetContextCreate(CurrentMemoryContext, "plzig_check_all",
+									ALLOCSET_DEFAULT_SIZES);
+	for (i = 0; i < n; i++)
+	{
+		ErrorData  *edata;
+
+		CHECK_FOR_INTERRUPTS();
+		MemoryContextSwitchTo(loopcxt);
+		edata = plzig_check_one_caught(oids[i], langoid, loopcxt);
+
+		if (edata)
+		{
+			Datum		values[4];
+			bool		nulls[4] = {false, false, false, false};
+
+			values[0] = ObjectIdGetDatum(oids[i]);
+			values[1] = CStringGetTextDatum(unpack_sql_state(edata->sqlerrcode));
+			values[2] = CStringGetTextDatum(edata->message ? edata->message : "");
+			if (edata->detail)
+				values[3] = CStringGetTextDatum(edata->detail);
+			else
+				nulls[3] = true;
+			tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+		}
+		MemoryContextSwitchTo(oldcxt);
+		MemoryContextReset(loopcxt);
+	}
+	MemoryContextDelete(loopcxt);
+
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult = tupstore;
+	rsinfo->setDesc = tupdesc;
+	return (Datum) 0;
 }

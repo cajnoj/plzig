@@ -228,6 +228,12 @@ set_nonblock(int fd)
  * opened by the parent with O_NOFOLLOW.  Fills *res; raises ERROR on setup
  * failure, sandbox failure in 'require' mode, cancel, or timeout.
  */
+/*
+ * Set when the last plzig_spawn ended in plzig.compile_timeout (reported as
+ * 57014 like a cancel); plzig_check_all() tells the two apart with it.
+ */
+bool		plzig_spawn_timed_out = false;
+
 void
 plzig_spawn(const char *prog, char *const argv[], char *const envp[],
 			const char *cwd, const char *stdin_path,
@@ -252,6 +258,7 @@ plzig_spawn(const char *prog, char *const argv[], char *const envp[],
 	memset(res, 0, sizeof(*res));
 	initStringInfo(&res->output);
 	res->exit_status = -1;
+	plzig_spawn_timed_out = false;
 
 	if (plzig_child_pid != 0)
 		elog(ERROR, "PL/Zig: a child process is already running");
@@ -435,10 +442,13 @@ plzig_spawn(const char *prog, char *const argv[], char *const envp[],
 		res->term_signal = WTERMSIG(wstatus);
 
 	if (res->timed_out)
+	{
+		plzig_spawn_timed_out = true;
 		ereport(ERROR,
 				(errcode(ERRCODE_QUERY_CANCELED),
 				 errmsg("PL/Zig compilation timed out"),
 				 errdetail("plzig.compile_timeout is %d ms.", timeout_ms)));
+	}
 
 	/* status protocol: "S<abi>,<seccomp>;" then optionally "E<message>" */
 	if (status_buf[0] == 'S')

@@ -160,7 +160,7 @@ hardening() {
     # the WAMR objects are inside plzig.so with hidden visibility: only the
     # PostgreSQL entry points are exported
     local exported
-    exported=$(nm -D --defined-only "$so" | awk '{ print $3 }' | grep -vE '^(_init|_fini|Pg_magic_func|_PG_init|pg_finfo_plzig_.*|plzig_(call_handler|inline_handler|validator|sandbox_status|cache_clear))$')
+    exported=$(nm -D --defined-only "$so" | awk '{ print $3 }' | grep -vE '^(_init|_fini|Pg_magic_func|_PG_init|pg_finfo_plzig_.*|plzig_(call_handler|inline_handler|validator|sandbox_status|cache_clear|check_all))$')
     if [ -z "$exported" ]; then pass "plzig.so: exports only the PostgreSQL entry points"; else fail "plzig.so: exports more: $(echo $exported | head -c 300)"; fi
 }
 
