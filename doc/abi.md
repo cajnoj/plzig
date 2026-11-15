@@ -1,4 +1,4 @@
-# PL/Zig host/guest ABI (version 4)
+# PL/Zig host/guest ABI (version 5)
 
 This describes the interface between the PostgreSQL backend (host, `src/`)
 and a compiled PL/Zig function (guest, a `wasm32-freestanding` module built
@@ -36,7 +36,7 @@ A module is accepted by the loader (`plzig_module_load`) only if
 * it instantiates under the current `plzig.max_memory`;
 * it exports a linear memory and the four functions below with exactly the
   listed parameter and result types;
-* `plzig_abi_version()` returns `4` (`PLZIG_ABI_VERSION`; the version is
+* `plzig_abi_version()` returns `5` (`PLZIG_ABI_VERSION`; the version is
   part of the module cache key, so modules built for earlier versions are
   recompiled, never loaded);
 * `plzig_init()` reports a valid argument buffer (below).
@@ -47,7 +47,7 @@ Size limit for the module file: 16 MB.
 
 | Export | Signature | Meaning |
 |--------|-----------|---------|
-| `plzig_abi_version` | `() -> i32` | Returns 4. |
+| `plzig_abi_version` | `() -> i32` | Returns 5. |
 | `plzig_init` | `() -> i64` | Called once per instance, right after `plzig_abi_version`: the guest's argument buffer as `capacity << 32 \| address`. The SDK returns a 4096-byte static buffer outside the arena. |
 | `plzig_alloc_args` | `(len: i32) -> i32` | Fallback for argument blocks larger than the buffer: start a call (reset the per-call arena: everything allocated by the previous call is released), then allocate `len` bytes, 8-byte aligned, in the arena. 0 on failure. |
 | `plzig_call` | `(args: i32, nargs: i32, result: i32, begin: i32) -> i32` | Run the user function. `args` points to `nargs` slots, `result` to one slot. `begin` ≠ 0: start the call first (reset the arena); `begin` = 0: `plzig_alloc_args` has already done that. Returns a status. |
@@ -84,6 +84,7 @@ these types is a text-I/O type):
 | `numeric` | `plzig.Numeric` | `val` = pointer, `len` = byte length of the binary wire format (*numeric*) |
 | `jsonb` | `plzig.Jsonb` / `plzig.JsonText` | argument: `val` = pointer, `len` = length of the detoasted value's on-disk layout (*jsonb*); result: JSON text |
 | `text`, `varchar`, `bpchar`, `bytea`, everything else | `[]const u8` | `val` = pointer, `len` = byte length |
+| a named composite type (not a domain over one) | a generated struct | argument: `val` = pointer to the row's values, `len` = their number; result: the same, written by the guest (*Rows*) |
 
 For non-`bytea` byte types the bytes are: the detoasted value for
 `text`/`varchar`/`bpchar` (database encoding, not NUL-terminated); the
@@ -105,6 +106,57 @@ range-checked (*Range checks*); `numeric` goes through `numeric_recv`
 the typmod of a function result (`pg_proc` has none), for any language; the
 typmod of a domain is applied by the domain's input function, since domains
 are text-I/O types.
+
+### Rows
+
+Composite arguments and results (a named composite type, or `record`
+described by `OUT`/`INOUT` parameters) are structs with one optional field
+per **live** attribute (dropped attributes are left out), in attribute
+order. A row crosses the boundary as one *Value* (below) per field, in that
+order, in the slot as `val` = guest address of the first value, `len` =
+number of values; `is_null` = 1 is a NULL row.
+
+* **Argument** (host → guest): the host converts the composite datum like
+  a typed SPI row (*Rows* of the SPI interface: kinds from the attribute
+  types, byte-kind payloads 8-byte aligned after the values, with absolute
+  guest addresses) but writes only the live attributes, into the argument
+  block. The SDK checks the number and the kind of every value against the
+  struct (`plzig.decodeRow`).
+* **Result** (guest → host): the SDK encodes the struct
+  (`plzig.encodeRow`, the field types of SPI parameters: kinds 1–8 and
+  10–19, `Jsonb` fields re-serialised to JSON text) into a static buffer per
+  row type and puts its address and the number of fields into the result
+  slot. The host (`plzig_row_result`, `src/plzig_row.c`) first checks that
+  the row type has not changed since the function was loaded, then
+  requires `len` to equal the number of live attributes (else `42804`),
+  copies the values out of guest memory (range validated; nothing is read
+  when `len` is 0) and converts each one against its attribute
+  (`plzig_field_from_guest`):
+  * `is_null` must be 0 or 1; the kind must be the attribute's kind
+    (`plzig_value_kind` of its type), except that kinds 7, 8 and 9 (text,
+    bytea, other) are interchangeable — the bytes are interpreted by the
+    attribute's type, never by the kind — and a NULL may have kind 0.
+    Otherwise `42804 ... is of type <type>, but a value of kind <k> was
+    passed`.
+  * The value is checked as a prepared-statement parameter of that type is
+    (*Range checks*, `numeric_recv`, encoding checks); text-like
+    attributes other than `text` (`varchar(n)`, `char(n)`, every
+    text-represented type, `jsonb`) go through the type's input function
+    **with the attribute's typmod**, and the native types with a typmod
+    (`time(p)`, `timestamp(p)`, `interval` fields, `numeric(p,s)`) through
+    the type's length coercion function (implicit: too long or too large is
+    an error, as for an assignment); a NULL of a domain type goes through
+    the domain's input function (its `NOT NULL` and `CHECK` constraints).
+  * The tuple is built by the host with the row type's own descriptor
+    (`heap_form_tuple`; dropped attributes NULL; blessed for `record`).
+* **Staleness**: the struct is generated from the type cache's descriptor
+  of the composite type when the function is loaded (`tupDesc_identifier`
+  is kept). At every call the identifier is compared (and, when it
+  changed, the attributes); a changed type rebuilds the function from the
+  new type before it runs, and a type changed during the call makes the
+  result an error (`55000 the row type ... changed during the call`).
+  `record` results are described by the function's own `pg_proc` row: a
+  change replaces the function.
 
 ### Range checks
 
@@ -455,6 +507,9 @@ grows only through the `memory.grow` instruction, bounded by
   `JsonNumber.numeric/toI64/toF64`, `toJsonText()` (jsonb_out's text);
   `plzig.JsonText{ .text }` / `plzig.jsonText(t)` for jsonb results and
   parameters.
+* Rows (*Rows*): `plzig.rowFieldCount(T)`, `rowFixedCount(T)`,
+  `encodeRow(T, row, values, fixed)`, `decodeRow(T, values)` — used by the
+  SDK root for composite arguments and results.
 * `plzig.std` (also predeclared as `std`): `mem`, `fmt`, `math`, `ascii`,
   `unicode`, `sort`, `hash`, `hash_map`, `meta`, `base64`, `enums`,
   `bit_set`, `ArrayList`, the hash maps, `StaticStringMap`,
@@ -469,9 +524,22 @@ const plzig = @import("plzig"); const std = plzig.std; pub fn call(@"a": i32, @"
 ```
 
 * One header line, so compiler line N is body line N-1 (the host rewrites
-  `src/user.zig:N:C:` to `line N-1, column C:` in diagnostics).
+  `src/user.zig:N:C:` to `line N-1, column C:` in diagnostics). Struct
+  declarations for rows are on the same line.
 * `STRICT` → plain parameter types, otherwise optionals.
 * Return type `anyerror!?T`, or `anyerror!void` for `void` and procedures.
+* Rows (*Rows*): each composite argument type is declared once as
+  `const @"plzig.RowN" = struct { @"field": ?T, ... };` (N = 1, 2, ... in
+  order of first use; a name no parameter can have); a row result is
+  `const Result = ...;` (an alias of the argument struct of the same type
+  unless it has a `jsonb` attribute; else its own struct, as for output
+  parameters) and the return type is `anyerror!?Result`, or
+  `anyerror!Result` for a procedure (PostgreSQL refuses a NULL output
+  row). Field names are attribute or output-parameter names (unnamed
+  outputs: `column1`, ...), restricted to `[A-Za-z_][A-Za-z0-9_]*` (at most
+  63 bytes) and unique, so they never need escaping; a parameter may not
+  be called `Result` then.
+* Input parameters are `IN` and `INOUT`; `argN` counts input parameters.
 * Parameter names must match `[A-Za-z_][A-Za-z0-9_]*` and must not be
   `plzig`, `std` or `call` (the generated file's own declarations);
   unnamed parameters are `arg1..argN`.

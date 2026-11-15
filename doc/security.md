@@ -249,7 +249,28 @@ wrong-mode cache files), `test/tap/t/060_environment.pl`, fuzz target
 * arguments and columns of these types carry no host data beyond the value
   itself: fixed-width values are passed by value, `numeric` as
   `numeric_send` output, `jsonb` as the detoasted value's bytes (one copy,
-  never a host pointer).
+  never a host pointer);
+* **rows from the guest** (composite results, `doc/abi.md` *Rows*;
+  `src/plzig_row.c`) are never a datum or tuple the guest built: the guest
+  hands over one value per live attribute, the host requires the exact
+  count, checks every value's NULL flag and kind against the attribute
+  (the kind comes from the attribute's type in the host's descriptor, the
+  guest's tag is only compared with it), converts it with the same checks
+  as a prepared-statement parameter or through the type's input function,
+  **applies the attribute's typmod** (input function or length coercion
+  function, as an assignment would) and a domain's constraints (also for
+  NULL), and forms the tuple with the row type's descriptor. The
+  descriptor is the one the generated struct was made from: a composite
+  type changed since then (detected through the type cache's
+  `tupDesc_identifier` and a comparison of the attributes) causes a rebuild
+  before the call, or an error if it changed during the call, so a stale
+  layout is never trusted. The values array is copied out of guest memory
+  before any conversion runs, and every payload is copied with a fresh,
+  validated pointer: input functions (which can run SQL, e.g. a domain's
+  `CHECK`) never run while a native pointer into guest memory is held.
+  Composite arguments are converted by the host (like typed SPI rows) into
+  a per-call buffer (never shared with a recursive call that may run while
+  the arguments are placed) and written into the validated argument block.
 
 Tests: `test/sql/spi*.sql`, `test/sql/adversarial.sql` (row-level security
 and column privileges through `spi.execute`, prepared statements and
@@ -257,7 +278,10 @@ cursors; a kept plan re-checked after `SET ROLE`; definer/invoker nesting;
 refused identity changes; read-only transactions and data-modifying CTEs),
 `docker/security-checks.sh` (73 hostile-guest calls, among them forged
 fixed-width, numeric and jsonb parameters and forged `numeric_op` and
-`tz_convert` calls; forged argument buffers), `test/sql/types_fixed.sql`,
+`tz_convert` calls; forged argument buffers; 20 forged row results: wrong
+field count, kinds, NULL flags, pointers, lengths, out-of-range values,
+binary jsonb, misaligned value arrays), `test/sql/rows.sql` (typmods,
+domains, changed row types), `test/sql/types_fixed.sql`,
 `types_numeric.sql`, `types_calendar.sql`, `types_jsonb.sql` (every range
 limit, malformed numerics as results and parameters), fuzz targets
 `hostabi`, `marshal` and `jsonb` (§7), TAP `040_standby.pl` (read-only on a

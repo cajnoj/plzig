@@ -258,3 +258,34 @@ plzig_numeric_to_wire(Datum num)
 	stub_value_error();
 	return NULL;
 }
+
+/*
+ * Rows (src/plzig_row.c, the typed-row encoding of src/plzig_host.c): the
+ * harness declares no composite arguments or results, so these are never
+ * reached; if they were, they fail like a rejected value.
+ */
+PlzigRowBuf *
+plzig_row_arg_load(PlzigRowDesc *rd, Datum value, MemoryContext cxt, uint64 *size)
+{
+	stub_value_error();
+	return NULL;
+}
+
+int32
+plzig_rowbuf_encode(PlzigRowBuf *rb, uint8 *base, uint32 guest, bool live_only)
+{
+	stub_value_error();
+	return 0;
+}
+
+void
+plzig_rowbuf_forget_row(PlzigRowBuf *rb)
+{
+}
+
+Datum
+plzig_row_result(void *module_inst, PlzigRowDesc *rd, const PlzigSlot *slot, bool *isnull)
+{
+	stub_value_error();
+	return (Datum) 0;
+}

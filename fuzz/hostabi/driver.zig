@@ -1,12 +1,104 @@
     // fuzz/hostabi/driver.zig: body of
     //   fuzz_hostabi(script bytea) RETURNS int STRICT VOLATILE LANGUAGE plzig
+    //   fuzz_hostabi_row(script bytea) RETURNS fuzz_hostabi_rt ...
     // compiled through docker/fake/hostilezig.c (which makes the SDK's host
-    // import table public and adds rawPtr/addrOf/memSize helpers), so that
-    // it can call every host import directly with whatever the script says:
-    // forged pointers, lengths, row/column numbers, handles, kinds, values,
-    // memory growth between calls, and re-entry through SQL.  See
-    // fuzz/README.md, target "hostabi".  Returns the number of operations run.
-    return run(script);
+    // import table public, adds rawPtr/addrOf/memSize helpers and lets
+    // hostileCall below replace the SDK's plzig_call), so that it can call
+    // every host import directly with whatever the script says: forged
+    // pointers, lengths, row/column numbers, handles, kinds, values, memory
+    // growth between calls, and re-entry through SQL; and then hand back a
+    // result forged from the script (an int: the number of operations run;
+    // a row: values with forged kinds, NULL flags, pointers and lengths).
+    // See fuzz/README.md, target "hostabi".
+    unreachable; // never called: hostileCall replaces plzig_call
+}
+
+const Fn = @TypeOf(call);
+const Ret = @typeInfo(@typeInfo(Fn).@"fn".return_type.?).error_union.payload;
+
+/// plzig_call, as the hostile wrapper lets a function replace it: run the
+/// script, then write the result slot (doc/abi.md, "Call sequence").
+pub fn hostileCall(args: [*]const Slot, nargs: u32, result: *Slot, begin: u32) u32 {
+    if (begin != 0) plzig.resetArena();
+    if (nargs != 1 or args[0].is_null != 0) plzig.raiseMsg("fuzz: one script argument expected");
+    const p = plzig.rawPtr([*]const u8, if (args[0].len == 0) gbase() else @as(usize, @intCast(args[0].val)));
+    const script = p[0..args[0].len];
+    const ops = run(script);
+    if (Ret == ?i32) {
+        result.* = .{ .val = @bitCast(@as(i64, ops)), .len = 0, .is_null = 0 };
+    } else {
+        // a row (struct): forged from the script again
+        var sc: Script = .{ .s = script };
+        forgeRow(@typeInfo(Ret).optional.child, &sc, result);
+    }
+    return 0;
+}
+
+/// the values of a forged row, and the 16-byte payloads they may point to
+var row_vals: [64]Value align(8) = undefined;
+var row_fixed: [64][16]u8 align(8) = undefined;
+
+/// a row result: mostly the right number of values with the right kinds
+/// (taken from encoding an all-NULL row of the real struct), with values
+/// chosen like SPI parameters (typedParams), sometimes forged throughout
+fn forgeRow(comptime R: type, sc: *Script, result: *Slot) void {
+    const n = comptime plzig.rowFieldCount(R);
+    if (sc.byte() < 10) {
+        result.* = .{ .val = 0, .len = 0, .is_null = 1 };
+        return;
+    }
+    const nulls: R = plzig.std.mem.zeroes(R);
+    plzig.encodeRow(R, nulls, row_vals[0..n], row_fixed[0..plzig.rowFixedCount(R)]) catch unreachable;
+    for (row_vals[0..n], 0..) |*v, k| {
+        const how = sc.byte();
+        if (how < 60) continue; // NULL of the right kind
+        if (how < 200) {
+            v.is_null = 0;
+            v.val = switch (v.kind) {
+                1 => sc.byte() % 2,
+                2, 3, 4 => @bitCast(@as(i64, sc.int(i16))),
+                5, 6 => sc.int(u32),
+                10 => @bitCast(@as(i64, sc.int(i32) >> 8)),
+                11, 13, 14 => @bitCast(@as(i64, sc.int(i32)) * 1000),
+                12 => sc.int(u64) % 86_400_000_000,
+                15, 16 => blk: {
+                    for (&row_fixed[k]) |*b| b.* = sc.byte();
+                    break :blk plzig.addrOf(&row_fixed[k]);
+                },
+                18 => blk: {
+                    const num = numerics[sc.byte() % numerics.len];
+                    v.len = @intCast(num.len);
+                    break :blk plzig.addrOf(num.ptr);
+                },
+                else => blk: {
+                    const strs = [_][]const u8{ "1", "abc", "{1,2}", "[1, {\"a\": null}]", "(1,x)", "", "\u{e9}", "toolongvalue", "\xff", "a\x00b" };
+                    const str = strs[sc.byte() % strs.len];
+                    v.len = @intCast(str.len);
+                    break :blk plzig.addrOf(str.ptr);
+                },
+            };
+            if (v.kind == 15 or v.kind == 16) v.len = 16;
+            if (v.kind == 12) v.len = sc.int(u16) % 50000;
+            continue;
+        }
+        // forged throughout
+        v.kind = if (how < 230) sc.byte() % 21 else sc.int(u16);
+        v.val = if (sc.byte() < 128) ptrArg(sc) else sc.int(u64);
+        v.len = lenArg(sc);
+        v.is_null = if (sc.byte() < 240) sc.byte() % 2 else sc.int(u16);
+    }
+    const count: u32 = if (sc.byte() < 230) @intCast(n) else switch (sc.byte() % 4) {
+        0 => @intCast(n -| 1),
+        1 => @intCast(n + 1),
+        2 => 0,
+        else => sc.int(u32),
+    };
+    const where: u64 = if (sc.byte() < 240) plzig.addrOf(&row_vals) else switch (sc.byte() % 3) {
+        0 => ptrArg(sc),
+        1 => sc.int(u64),
+        else => plzig.addrOf(&row_vals) + 1 + sc.byte() % 7,
+    };
+    result.* = .{ .val = where, .len = count, .is_null = 0 };
 }
 
 const h = plzig.host;

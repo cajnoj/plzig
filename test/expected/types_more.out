@@ -130,8 +130,9 @@ SELECT tm_comp_arr(ARRAY[ROW(1, 2, 'x')::tm_point, NULL]);
 CREATE FUNCTION tm_badcomp() RETURNS tm_point LANGUAGE plzig AS $$
     return "(1,2,3,4)";
 $$;
+ERROR:  PL/Zig compilation failed
 SELECT tm_badcomp();
-ERROR:  malformed record literal: "(1,2,3,4)"
+ERROR:  function tm_badcomp() does not exist at character 8
 CREATE TYPE tm_color AS ENUM ('red', 'green', 'blue');
 CREATE FUNCTION tm_next_color(c tm_color) RETURNS tm_color STRICT LANGUAGE plzig AS $$
     if (std.mem.eql(u8, c, "red")) return "green";

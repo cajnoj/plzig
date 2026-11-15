@@ -4,7 +4,8 @@
 # compiler wrapper (docker/fake/hostilezig.c, unconfined, like the hostile
 # guest of docker/security-checks.sh), interprets a bytea "script" as a
 # sequence of host-import calls with forged pointers, lengths, row/column
-# numbers, handles, kinds and values, memory growth and nested calls.
+# numbers, handles, kinds and values, memory growth and nested calls, and
+# then returns a result forged from the script (an int, or a row).
 # Batches of random scripts (from setseed, so a batch can be replayed) run
 # in PL/pgSQL loops, one subtransaction per call, as an unprivileged role.
 # Oracles (fuzz/common/sql-lib.sh, fz_check): no backend crash, no
@@ -26,6 +27,11 @@ DROP ROLE IF EXISTS fuzz_hostabi_user;
 CREATE ROLE fuzz_hostabi_user;
 CREATE TABLE IF NOT EXISTS fuzz_hostabi_t (n int);
 CREATE TABLE IF NOT EXISTS fuzz_hostabi_secret (s text);
+DROP TYPE IF EXISTS fuzz_hostabi_rt CASCADE;
+DROP DOMAIN IF EXISTS fuzz_hostabi_pos CASCADE;
+CREATE DOMAIN fuzz_hostabi_pos AS int CHECK (VALUE > 0);
+CREATE TYPE fuzz_hostabi_rt AS (a int, b text, n numeric(6,2), d date, j jsonb, u uuid,
+    vc varchar(4), arr int[], ts timestamp(0), f float4, p fuzz_hostabi_pos, by bytea, tz timetz);
 GRANT SELECT, INSERT, UPDATE, DELETE ON fuzz_hostabi_t TO fuzz_hostabi_user;
 REVOKE ALL ON fuzz_hostabi_secret FROM PUBLIC;
 SQL
@@ -40,6 +46,11 @@ fz_reload
     cat "$here/driver.zig"
     echo '$fzdriver$;'
     echo 'GRANT EXECUTE ON FUNCTION fuzz_hostabi(bytea) TO fuzz_hostabi_user;'
+    # the same driver returning a row: the result is forged (doc/abi.md, "Rows")
+    echo 'CREATE OR REPLACE FUNCTION fuzz_hostabi_row(script bytea) RETURNS fuzz_hostabi_rt STRICT VOLATILE LANGUAGE plzig AS $fzdriver$'
+    cat "$here/driver.zig"
+    echo '$fzdriver$;'
+    echo 'GRANT EXECUTE ON FUNCTION fuzz_hostabi_row(bytea) TO fuzz_hostabi_user;'
 } >/tmp/fuzz-hostabi-create.sql
 out=$(fz_psql -f /tmp/fuzz-hostabi-create.sql)
 fz_set_conf compiler_sandbox ""
@@ -80,7 +91,11 @@ BEGIN
         SELECT decode(string_agg(lpad(to_hex(least(255, floor(random() * 256)::int)), 2, '0'), ''), 'hex')
           INTO s FROM generate_series(1, 1 + floor(random() * 400)::int);
         BEGIN
-            PERFORM fuzz_hostabi(s);
+            IF random() < 0.25 THEN
+                PERFORM fuzz_hostabi_row(s);
+            ELSE
+                PERFORM fuzz_hostabi(s);
+            END IF;
             st := 'ok';
         EXCEPTION WHEN OTHERS THEN
             GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE;
@@ -137,6 +152,6 @@ if [ -s "$fz_out/messages.jsonl" ]; then
 fi
 summary="$calls calls in $batches batches of 300 random scripts, seeds $fz_seed..$((fz_seed + batches - 1)); outcomes:"
 for k in $(printf '%s\n' "${!states[@]}" | sort); do summary+=" $k=${states[$k]}"; done
-fz_psql -c "DROP FUNCTION fuzz_hostabi(bytea); DROP TABLE fuzz_hostabi_t, fuzz_hostabi_secret; DROP ROLE fuzz_hostabi_user;" >/dev/null
+fz_psql -c "DROP FUNCTION fuzz_hostabi(bytea); DROP FUNCTION fuzz_hostabi_row(bytea); DROP TYPE fuzz_hostabi_rt; DROP DOMAIN fuzz_hostabi_pos; DROP TABLE fuzz_hostabi_t, fuzz_hostabi_secret; DROP ROLE fuzz_hostabi_user;" >/dev/null
 fz_check "hostabi cleanup"
 fz_result hostabi "$summary"

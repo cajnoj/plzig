@@ -52,7 +52,7 @@ fn top() usize {
 // Arena allocator
 
 test "abi version" {
-    try testing.expectEqual(@as(u32, 4), plzig_abi_version());
+    try testing.expectEqual(@as(u32, 5), plzig_abi_version());
     try testing.expectEqual(plzig.abi_version, plzig_abi_version());
 }
 
@@ -883,6 +883,82 @@ test "plzig_call: arguments in, result or error out" {
     try testing.expectEqual(@as(u32, 1), try callUser(&.{ null, null, null, null, null, null, null, .{ .bytes = "x" }, .{ .int = 1 } }, &res));
     const e: [*]const u8 = @ptrFromInt(@as(usize, @intCast(res.val)));
     try testing.expectEqualStrings("SomethingFailed", e[0..res.len]);
+}
+
+// ---------------------------------------------------------------------------
+// rows (composite arguments and results)
+
+const TestRow = struct { a: ?i32, b: ?[]const u8, c: ?plzig.Interval, d: ?bool };
+
+test "rows: encode writes one value per field, kinds from the field types" {
+    try setup(64);
+    var out: Slot = undefined;
+    const iv: plzig.Interval = .{ .usecs = 5, .days = 6, .months = 7 };
+    sdk_root.encode(TestRow, .{ .a = -3, .b = "xy", .c = iv, .d = null }, &out);
+    try testing.expectEqual(@as(u32, 4), out.len);
+    try testing.expectEqual(@as(u32, 0), out.is_null);
+    const v: [*]const Value = @ptrFromInt(@as(usize, @intCast(out.val)));
+    try testing.expectEqual(@as(u16, 3), v[0].kind);
+    try testing.expectEqual(@as(u64, @bitCast(@as(i64, -3))), v[0].val);
+    try testing.expectEqual(@as(u16, 7), v[1].kind);
+    try testing.expectEqual(@as(u32, 2), v[1].len);
+    try testing.expectEqual(@as(u16, 15), v[2].kind);
+    try testing.expectEqual(@as(u32, 16), v[2].len);
+    const ivp: *align(1) const plzig.Interval = @ptrFromInt(@as(usize, @intCast(v[2].val)));
+    try testing.expectEqual(iv, ivp.*);
+    // a NULL field keeps its kind
+    try testing.expectEqual(@as(u16, 1), v[3].kind);
+    try testing.expectEqual(@as(u16, 1), v[3].is_null);
+}
+
+test "rows: decode checks the number and the kinds of the values" {
+    const txt = "hello";
+    const vals = [_]Value{
+        .{ .val = 9, .len = 0, .kind = 3, .is_null = 0 },
+        .{ .val = @intFromPtr(txt.ptr), .len = 5, .kind = 9, .is_null = 0 },
+        .{ .val = 0, .len = 0, .kind = 15, .is_null = 1 },
+        .{ .val = 1, .len = 0, .kind = 1, .is_null = 0 },
+    };
+    const r = try plzig.decodeRow(TestRow, &vals);
+    try testing.expectEqual(@as(?i32, 9), r.a);
+    try testing.expectEqualStrings("hello", r.b.?);
+    try testing.expectEqual(@as(?plzig.Interval, null), r.c);
+    try testing.expectEqual(@as(?bool, true), r.d);
+    try testing.expectError(error.ColumnOutOfRange, plzig.decodeRow(TestRow, vals[0..3]));
+    var bad = vals;
+    bad[0].kind = 4;
+    try testing.expectError(error.TypeMismatch, plzig.decodeRow(TestRow, &bad));
+    const Strict = struct { a: i32 };
+    try testing.expectError(error.UnexpectedNull, plzig.decodeRow(Strict, &.{.{ .val = 0, .len = 0, .kind = 3, .is_null = 1 }}));
+}
+
+test "rows: root.decode of a composite argument" {
+    const vals = [_]Value{
+        .{ .val = 1, .len = 0, .kind = 3, .is_null = 0 },
+        .{ .val = 0, .len = 0, .kind = 7, .is_null = 1 },
+        .{ .val = 0, .len = 0, .kind = 15, .is_null = 1 },
+        .{ .val = 0, .len = 0, .kind = 1, .is_null = 0 },
+    };
+    const s: Slot = .{ .val = @intFromPtr(&vals), .len = 4, .is_null = 0 };
+    const r = sdk_root.decode(?TestRow, &s).?;
+    try testing.expectEqual(@as(?i32, 1), r.a);
+    try testing.expectEqual(@as(?bool, false), r.d);
+    const n: Slot = .{ .val = 0, .len = 0, .is_null = 1 };
+    try testing.expectEqual(@as(?TestRow, null), sdk_root.decode(?TestRow, &n));
+}
+
+test "rows: a jsonb field is passed back as JSON text" {
+    try setup(64);
+    const J = struct { j: ?plzig.Jsonb, t: ?plzig.JsonText };
+    // the jsonb `true` (a raw scalar: one-element array container)
+    const bytes = [_]u8{ 0x01, 0x00, 0x00, 0x50, 0x00, 0x00, 0x00, 0x30 };
+    var vals: [2]Value = undefined;
+    var fixed: [0][16]u8 = .{};
+    try plzig.encodeRow(J, .{ .j = .{ .bytes = &bytes }, .t = plzig.jsonText("[1]") }, &vals, &fixed);
+    try testing.expectEqual(@as(u16, 19), vals[0].kind);
+    const p: [*]const u8 = @ptrFromInt(@as(usize, @intCast(vals[0].val)));
+    try testing.expectEqualStrings("true", p[0..vals[0].len]);
+    try testing.expectEqual(@as(u16, 19), vals[1].kind);
 }
 
 // ---------------------------------------------------------------------------

@@ -14,7 +14,10 @@
  * The SDK root (sdk/root.zig) is patched too: if the user module declares
  * `pub fn hostileInit() u64` or `pub fn hostileAllocArgs(len: u32) u32`,
  * plzig_init / plzig_alloc_args return what those return, so that a test
- * can hand the host forged argument-buffer addresses and capacities.
+ * can hand the host forged argument-buffer addresses and capacities, and
+ * if it declares `pub fn hostileCall(args, nargs, result, begin) u32`,
+ * plzig_call is replaced by it: the test writes the result slot (and the
+ * rows and trigger results it points to) itself.
  * The module is then compiled as usual and must still pass the loader's
  * import allowlist.  Also used by the host-ABI fuzz target (fuzz/hostabi).
  */
@@ -49,6 +52,8 @@ static const char *const root_patch[][2] = {
 	"    if (@hasDecl(user, \"hostileInit\")) return user.hostileInit();\n"},
 	{"export fn plzig_alloc_args(len: u32) u32 {\n",
 	"    if (@hasDecl(user, \"hostileAllocArgs\")) return user.hostileAllocArgs(len);\n"},
+	{"export fn plzig_call(args: [*]const Slot, nargs: u32, result: *Slot, begin: u32) u32 {\n",
+	"    if (@hasDecl(user, \"hostileCall\")) return user.hostileCall(args, nargs, result, begin);\n"},
 };
 
 static char *

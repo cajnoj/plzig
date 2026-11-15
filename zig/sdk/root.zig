@@ -88,7 +88,31 @@ pub fn decode(comptime T: type, slot: *const Slot) T {
         const p: *align(1) const T = @ptrFromInt(@as(usize, @intCast(slot.val)));
         return p.*;
     }
+    if (@typeInfo(T) == .@"struct") {
+        // a composite argument: val = its values, len = their number
+        const n = plzig.rowFieldCount(T);
+        if (slot.len != n) plzig.raiseMsg("plzig: composite argument has the wrong number of fields");
+        if (n == 0) return plzig.decodeRow(T, &.{}) catch unreachable;
+        const p: [*]const plzig.Value = @ptrFromInt(@as(usize, @intCast(slot.val)));
+        return plzig.decodeRow(T, p[0..n]) catch plzig.raiseMsg("plzig: composite argument does not match its struct");
+    }
     @compileError("plzig: unsupported parameter type " ++ @typeName(T));
+}
+
+/// Where a row result is placed for the host to read after plzig_call has
+/// returned (outside the stack and the arena): one set of buffers per row
+/// type.  Static, so `undefined` costs nothing at run time.
+fn RowResult(comptime T: type) type {
+    return struct {
+        var values: [plzig.rowFieldCount(T)]plzig.Value = undefined;
+        var fixed: [plzig.rowFixedCount(T)][16]u8 align(8) = undefined;
+    };
+}
+
+fn isRow(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and T != plzig.Numeric and T != plzig.JsonText and
+        T != plzig.Date and T != plzig.Time and T != plzig.TimeTz and T != plzig.Timestamp and
+        T != plzig.TimestampTz and T != plzig.Interval and T != plzig.Uuid and T != plzig.Oid;
 }
 
 /// Where a 16-byte result (interval, uuid) is placed for the host to copy
@@ -129,6 +153,12 @@ pub fn encode(comptime T: type, v: T, out: *Slot) void {
         @memcpy(&fixed_result, s.mem.asBytes(&v));
         out.val = @intFromPtr(&fixed_result);
         out.len = 16;
+    } else if (comptime isRow(T)) {
+        // a row: val = its values, len = their number (doc/abi.md, "Rows")
+        const B = RowResult(T);
+        plzig.encodeRow(T, v, &B.values, &B.fixed) catch |err| plzig.raise("plzig: could not encode the result row: {s}", .{@errorName(err)});
+        out.val = @intFromPtr(&B.values);
+        out.len = @intCast(B.values.len);
     } else {
         @compileError("plzig: unsupported return type " ++ @typeName(T));
     }

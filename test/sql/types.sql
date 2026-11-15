@@ -192,8 +192,9 @@ SELECT t_enum('sad'), t_enum('ok');
 SELECT t_enum('ok') = 'happy'::mood AS eq;
 
 CREATE TYPE pair AS (a int, b text);
+-- (a composite type is a struct: doc/abi.md, "Rows"; test/sql/rows.sql)
 CREATE FUNCTION t_comp(p pair) RETURNS pair STRICT LANGUAGE plzig AS $$
-    return try std.fmt.allocPrint(plzig.allocator, "(99,\"was {s}\")", .{p});
+    return .{ .a = 99, .b = try std.fmt.allocPrint(plzig.allocator, "was ({?d},{?s})", .{ p.a, p.b }) };
 $$;
 SELECT * FROM t_comp(ROW(1, 'x')::pair);
 

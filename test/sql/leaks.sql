@@ -39,6 +39,17 @@ $$;
 CREATE FUNCTION lk_jsonb_arg(j jsonb) RETURNS int STRICT LANGUAGE plzig AS $$
     return @intCast((try (try j.root()).object.get("k")).?.string.len);
 $$;
+-- rows: a composite result built by the host from checked fields, and a
+-- composite argument converted per call
+CREATE TYPE lk_pair AS (a int, t text, n numeric(8,2), v varchar(10));
+CREATE FUNCTION lk_row(x int) RETURNS lk_pair STRICT LANGUAGE plzig AS $$
+    return .{ .a = x, .t = try std.fmt.allocPrint(plzig.allocator, "row {d}", .{x}),
+              .n = try plzig.Numeric.fromI64(x), .v = "abc" };
+$$;
+CREATE FUNCTION lk_rowarg(p lk_pair) RETURNS int STRICT LANGUAGE plzig AS $$
+    const t: []const u8 = p.t orelse "";
+    return (p.a orelse 0) + @as(i32, @intCast(t.len));
+$$;
 CREATE FUNCTION lk_spi(x int) RETURNS bigint STRICT LANGUAGE plzig AS $$
     var buf: [16]u8 = undefined;
     const r = try plzig.spi.execute("SELECT count(*), max(t) FROM lk_t WHERE x <= $1::int",
@@ -83,7 +94,8 @@ BEGIN
 END $d$;
 
 -- warm up every shape (modules loaded, instances cached, plans prepared)
-SELECT lk_run(f, 200) FROM unnest(ARRAY['lk_scalar', 'lk_text', 'lk_numeric', 'lk_tz', 'lk_jsonb', 'lk_spi', 'lk_cursor', 'lk_prepared', 'lk_fail']) f;
+SELECT lk_run(f, 200) FROM unnest(ARRAY['lk_scalar', 'lk_text', 'lk_numeric', 'lk_tz', 'lk_jsonb', 'lk_row', 'lk_spi', 'lk_cursor', 'lk_prepared', 'lk_fail']) f;
+SELECT sum(lk_rowarg(lk_row(g))) FROM generate_series(1, 200) g;
 SELECT lk_text(NULL), lk_text(41), lk_numeric(NULL), lk_numeric(41);
 
 SELECT lk_mem() AS m0 \gset
@@ -101,6 +113,12 @@ SELECT lk_mem() - :m0 AS growth_tz;
 SELECT lk_mem() AS m0 \gset
 SELECT lk_run('lk_jsonb', 10000);
 SELECT lk_mem() - :m0 AS growth_jsonb;
+SELECT lk_mem() AS m0 \gset
+SELECT lk_run('lk_row', 10000);
+SELECT lk_mem() - :m0 AS growth_row;
+SELECT lk_mem() AS m0 \gset
+SELECT sum(lk_rowarg(lk_row(g))) FROM generate_series(1, 10000) g;
+SELECT lk_mem() - :m0 AS growth_rowarg;
 -- a jsonb argument that is compressed and stored out of line, read 2000 times
 CREATE TABLE lk_jdoc AS SELECT jsonb_build_object('k', repeat('x', 100000), 'pad', (SELECT jsonb_agg(g) FROM generate_series(1, 5000) g)) AS j;
 SELECT sum(lk_jsonb_arg(j)) FROM lk_jdoc;

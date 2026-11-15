@@ -9,7 +9,7 @@
 const s = @import("std");
 
 /// ABI version implemented by this SDK. Checked by the host at load time.
-pub const abi_version: u32 = 4;
+pub const abi_version: u32 = 5;
 
 /// Size of the argument buffer (root.zig, plzig_init): argument blocks up to
 /// this size need no allocation and no extra guest entry.
@@ -2475,6 +2475,80 @@ fn encodeParam(v: anytype, fixed: *[16]u8) Value {
     if (T == f64) return .{ .val = @bitCast(v), .len = 0, .kind = k, .is_null = 0 };
     const b: []const u8 = if (T == Bytea) v.bytes else v;
     return .{ .val = @intFromPtr(b.ptr), .len = @intCast(b.len), .kind = k, .is_null = 0 };
+}
+
+// ---------------------------------------------------------------------------
+// Rows: structs for composite arguments and results (doc/abi.md, "Rows").
+//
+// A row crosses the boundary as one Value per struct field, in field order;
+// the host checks every value against the row type's attribute (kind, NULL
+// flag, range, typmod) and builds the tuple itself.
+
+/// Number of fields of a row struct.
+pub fn rowFieldCount(comptime T: type) usize {
+    const ti = @typeInfo(T);
+    if (ti != .@"struct" or ti.@"struct".is_tuple)
+        @compileError("plzig: a row must be a struct, not " ++ @typeName(T));
+    return ti.@"struct".field_names.len;
+}
+
+/// Number of 16-byte fields (interval, uuid) of a row struct.
+pub fn rowFixedCount(comptime T: type) usize {
+    return comptime blk: {
+        // up to 1664 fields (MaxTupleAttributeNumber)
+        @setEvalBranchQuota(100_000);
+        var n: usize = 0;
+        for (@typeInfo(T).@"struct".field_types) |FT| {
+            if (isFixed16Param(FT)) n += 1;
+        }
+        break :blk n;
+    };
+}
+
+fn isJsonbField(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .optional => |o| o.child == Jsonb,
+        else => T == Jsonb,
+    };
+}
+
+/// Encode the fields of `row` into `out` (rowFieldCount(T) values); the
+/// 16-byte fields are copied to `fixed` (rowFixedCount(T) entries), which
+/// the caller keeps until the host has read the row.  Field types: those
+/// of SPI parameters (bool, i16, i32, i64, f32, f64, byte slices, Date ...
+/// Oid, Numeric, JsonText, optionals of these); a `Jsonb` field is turned
+/// back into JSON text (allocated in the arena).
+pub fn encodeRow(comptime T: type, row: T, out: []Value, fixed: [][16]u8) error{ OutOfMemory, InvalidJsonb }!void {
+    @setEvalBranchQuota(100_000);
+    const si = @typeInfo(T).@"struct";
+    comptime var k: usize = 0;
+    inline for (si.field_names, si.field_types, 0..) |name, FT, i| {
+        const v = @field(row, name);
+        if (comptime isJsonbField(FT)) {
+            const opt: ?Jsonb = v;
+            out[i] = if (opt) |j| encodeParam(try j.toJsonText(), undefined) else encodeParam(@as(?JsonText, null), undefined);
+        } else if (comptime isFixed16Param(FT)) {
+            out[i] = encodeParam(v, &fixed[k]);
+            k += 1;
+        } else {
+            out[i] = encodeParam(v, undefined);
+        }
+    }
+}
+
+/// A row struct from the host's values (composite arguments): the values
+/// must match the fields exactly (number, kind; NULL only for optional
+/// fields).  Slices point into the values' bytes.
+pub fn decodeRow(comptime T: type, values: []const Value) GetError!T {
+    @setEvalBranchQuota(100_000);
+    const si = @typeInfo(T).@"struct";
+    if (values.len != si.field_names.len) return error.ColumnOutOfRange;
+    const r: Row = .{ .values = values };
+    var out: T = undefined;
+    inline for (si.field_names, si.field_types, 0..) |name, FT, i| {
+        @field(out, name) = try r.get(FT, i);
+    }
+    return out;
 }
 
 fn textSlots(params: []const ?[]const u8) error{OutOfMemory}![]Slot {

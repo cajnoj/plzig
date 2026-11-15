@@ -81,7 +81,7 @@ SELECT cache_key('abc') = cache_key('abc') AS deterministic,
        cache_key('abc') <> cache_key('abc ') AS length_sensitive,
        cache_key('') <> cache_key('\x00') AS empty_vs_nul;
 -- independent computation: SHA-256 over length-prefixed parts (8-byte little
--- endian length, the bytes, a 0 byte): "abi4", the Zig version, the compiler
+-- endian length, the bytes, a 0 byte): "abi5", the Zig version, the compiler
 -- flags, the SDK digest (same construction over plzig.zig and root.zig), the source
 -- (the length is the host's uint64, little endian on x86_64 and aarch64)
 CREATE FUNCTION plzig_testing.le8(n int8) RETURNS bytea LANGUAGE sql AS $$
@@ -94,7 +94,7 @@ SELECT setting AS sharedir FROM pg_config WHERE name = 'SHAREDIR' \gset
 SELECT encode(sha256(plzig_testing.part(pg_read_binary_file(:'sharedir' || '/plzig/sdk/plzig.zig')) ||
                      plzig_testing.part(pg_read_binary_file(:'sharedir' || '/plzig/sdk/root.zig'))), 'hex') AS sdk \gset
 SELECT cache_key('pub fn call() anyerror!void {}') =
-       encode(sha256(plzig_testing.part('abi4') ||
+       encode(sha256(plzig_testing.part('abi5') ||
                      plzig_testing.part('0.17.1') ||
                      plzig_testing.part(convert_to(zig_flags(), 'UTF8')) ||
                      plzig_testing.part(convert_to(:'sdk', 'UTF8')) ||

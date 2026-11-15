@@ -15,7 +15,7 @@
 #     hostile alphabet (quotes, spaces, '@', '$', backslashes, non-ASCII,
 #     keywords, the reserved plzig/std/call, argN clashes, 63-byte names),
 #     random parameter and result types including pseudo types, argument
-#     modes, SETOF, up to 100 parameters -- created with
+#     modes (OUT/INOUT: struct results), SETOF, up to 100 parameters -- created with
 #     check_function_bodies = off: the validator must accept exactly the
 #     signatures the rules allow (doc/abi.md), and a sample of the accepted
 #     ones must then compile and run (the generated user.zig is well formed
@@ -107,7 +107,8 @@ DO $$
 DECLARE
     alphabet text[] := ARRAY['a', 'Z', '_', '0', '9', 'x', 'é', ' ', '"', '''', '$', '@', '\', '-', '.', 'ß', chr(128512), '{', '}', ';', chr(9)];
     special text[] := ARRAY['plzig', 'std', 'call', 'arg1', 'arg2', 'return', 'fn', 'comptime', 'anyerror',
-                            'usingnamespace', '_', 'a_', 'A', 'x' || repeat('y', 62), 'x' || repeat('y', 80), 'pub', 'u8', 'undefined'];
+                            'usingnamespace', '_', 'a_', 'A', 'x' || repeat('y', 62), 'x' || repeat('y', 80), 'pub', 'u8', 'undefined',
+                            'Result', 'column1', 'column2'];
     goodtypes text[] := ARRAY['int', 'int2', 'int8', 'bool', 'float4', 'float8', 'text', 'varchar(3)', 'char(2)', 'bytea',
                               'numeric', 'date', 'jsonb', 'int[]', 'fz_mood', 'fz_posint', 'fz_pair', 'uuid', 'name', 'regclass'];
     badtypes text[] := ARRAY['anyelement', 'anyarray', 'internal', 'cstring', 'record', 'anyrange', 'anycompatible', 'trigger', 'void', 'unknown'];
@@ -117,10 +118,13 @@ DECLARE
     expect_ok bool; got_ok bool; msg text; st text;
     nsig int := 0; nacc int := 0; ncomp int := 0;
     effective text[];
+    -- output parameters (doc/abi.md, "Rows"): the fields of the result
+    outnames text[]; outexplicit text[]; outbad bool; outtype text; nin int; nout int; rowres bool;
 BEGIN
     FOR i IN 1..60 LOOP
         n := CASE WHEN random() < 0.05 THEN 90 + floor(random() * 11)::int ELSE floor(random() * 6)::int END;
         names := '{}'; types := '{}'; modes := '{}'; effective := '{}';
+        outnames := '{}'; outexplicit := '{}'; outbad := false; outtype := NULL; nin := 0; nout := 0;
         expect_ok := true;
         sig := '';
         FOR k IN 1..n LOOP
@@ -139,23 +143,51 @@ BEGIN
             names := names || nm; types := types || ty; modes := modes || md;
             sig := sig || CASE WHEN k > 1 THEN ', ' ELSE '' END || md || ' ' ||
                    CASE WHEN nm IS NULL THEN '' ELSE quote_ident(nm) || ' ' END || ty;
-            effective := effective || coalesce(nm, 'arg' || k);
-            IF md <> 'IN' OR ty = ANY (badtypes) THEN expect_ok := false; END IF;
-            IF nm IS NOT NULL AND (nm !~ '^[A-Za-z_][A-Za-z0-9_]*$' OR nm IN ('plzig', 'std', 'call')) THEN
-                expect_ok := false;
+            IF md = 'VARIADIC' OR ty = ANY (badtypes) THEN expect_ok := false; END IF;
+            -- inputs (IN, INOUT, VARIADIC) are parameters: argN counts inputs only
+            IF md IN ('IN', 'INOUT', 'VARIADIC') THEN
+                nin := nin + 1;
+                effective := effective || coalesce(nm, 'arg' || nin);
+                IF nm IS NOT NULL AND (nm !~ '^[A-Za-z_][A-Za-z0-9_]*$' OR nm IN ('plzig', 'std', 'call')) THEN
+                    expect_ok := false;
+                END IF;
+            END IF;
+            -- outputs (OUT, INOUT) are the fields of a row result: columnN counts
+            -- outputs; their names matter only when there is a struct (below)
+            IF md IN ('OUT', 'INOUT') THEN
+                nout := nout + 1;
+                outnames := outnames || coalesce(nm, 'column' || nout);
+                IF nm IS NOT NULL THEN outexplicit := outexplicit || nm; END IF;
+                outtype := ty;
+                IF nm IS NOT NULL AND nm !~ '^[A-Za-z_][A-Za-z0-9_]*$' THEN outbad := true; END IF;
             END IF;
         END LOOP;
         IF (SELECT count(*) <> count(DISTINCT x) FROM unnest(effective) x) THEN expect_ok := false; END IF;
+        -- PostgreSQL refuses duplicate output names itself
+        IF (SELECT count(*) <> count(DISTINCT x) FROM unnest(outexplicit) x) THEN expect_ok := false; END IF;
         proc := random() < 0.1;
-        setof := NOT proc AND random() < 0.05;
+        setof := NOT proc AND nout = 0 AND random() < 0.05;
         ret := CASE WHEN random() < 0.1 THEN badtypes[1 + floor(random() * array_length(badtypes, 1))::int]
                     ELSE goodtypes[1 + floor(random() * array_length(goodtypes, 1))::int] END;
-        IF setof OR (NOT proc AND ret = ANY (badtypes) AND ret <> 'void') THEN expect_ok := false; END IF;
+        -- a function with output parameters gets no RETURNS clause (PostgreSQL derives it)
+        IF setof OR (NOT proc AND nout = 0 AND ret = ANY (badtypes) AND ret <> 'void') THEN expect_ok := false; END IF;
+        -- a row result (struct) declares Result
+        rowres := (proc AND nout > 0) OR (NOT proc AND (nout >= 2 OR (nout = 1 AND outtype = 'fz_pair')
+                                                        OR (nout = 0 AND ret = 'fz_pair')));
+        IF rowres AND 'Result' = ANY (effective) THEN expect_ok := false; END IF;
+        -- a struct made of the outputs: identifiers, unique also with the
+        -- made-up columnN names (one composite output: its type's fields)
+        IF ((proc AND nout > 0) OR (NOT proc AND nout >= 2)) AND (outbad OR (SELECT count(*) <> count(DISTINCT x) FROM unnest(outnames) x)) THEN
+            expect_ok := false;
+        END IF;
         nsig := nsig + 1;
         BEGIN
             EXECUTE 'DROP ROUTINE IF EXISTS fz_sig';
             IF proc THEN
-                EXECUTE format('CREATE PROCEDURE fz_sig(%s) LANGUAGE plzig AS $b$ return; $b$', sig);
+                EXECUTE format('CREATE PROCEDURE fz_sig(%s) LANGUAGE plzig AS $b$ %s $b$', sig,
+                               CASE WHEN nout > 0 THEN 'return std.mem.zeroes(Result);' ELSE 'return;' END);
+            ELSIF nout > 0 THEN
+                EXECUTE format('CREATE FUNCTION fz_sig(%s) LANGUAGE plzig AS $b$ return null; $b$', sig);
             ELSE
                 EXECUTE format('CREATE FUNCTION fz_sig(%s) RETURNS %s%s LANGUAGE plzig AS $b$ %s $b$',
                                sig, CASE WHEN setof THEN 'SETOF ' ELSE '' END, ret,
@@ -181,7 +213,8 @@ BEGIN
                     IF proc THEN
                         EXECUTE format('CALL fz_sig(%s)', (SELECT coalesce(string_agg('NULL', ', '), '') FROM generate_series(1, n)));
                     ELSE
-                        EXECUTE format('SELECT fz_sig(%s)', (SELECT coalesce(string_agg('NULL', ', '), '') FROM generate_series(1, n)));
+                        -- a function takes its inputs only
+                        EXECUTE format('SELECT fz_sig(%s)', (SELECT coalesce(string_agg('NULL', ', '), '') FROM generate_series(1, nin)));
                     END IF;
                     ncomp := ncomp + 1;
                 EXCEPTION WHEN OTHERS THEN

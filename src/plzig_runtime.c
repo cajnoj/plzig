@@ -1013,6 +1013,7 @@ plzig_decode_result(PlzigInstance *pi, PlzigSlot *slot, PlzigTypeInfo *rt,
 				return plzig_numeric_from_wire(b, slot->len, "its result");
 			}
 		case PLZIG_T_VOID:
+		case PLZIG_T_ROW:		/* plzig_row_result */
 			break;
 	}
 	return (Datum) 0;
@@ -1027,14 +1028,16 @@ plzig_decode_result(PlzigInstance *pi, PlzigSlot *slot, PlzigTypeInfo *rt,
  * was stashed in ctx->edata and is re-thrown here, after WAMR unwound.
  */
 Datum
-plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
-					NullableDatum *args, PlzigTypeInfo *rettype, bool read_only,
-					bool *isnull)
+plzig_instance_call(PlzigInstance *pi, const PlzigCallSpec *spec, bool *isnull)
 {
+	PlzigTypeInfo *argtypes = spec->argtypes;
+	int			nargs = spec->nargs;
+	NullableDatum *args = spec->args;
 	PlzigCallCtx ctx;
 	MemoryContext oldcxt;
 	const char **bytes;
 	uint32	   *lens;
+	PlzigRowBuf **rows;
 	uint64		total;
 	uint32		guest_base;
 	uint32		begin;
@@ -1062,7 +1065,7 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 	ctx.cxt = pi->call_cxt;
 	ctx.scratch = pi->scratch_cxt;
 	ctx.errcxt = oldcxt;
-	ctx.read_only = read_only;
+	ctx.read_only = spec->read_only;
 	ctx.cached_row = -1;
 	ctx.cached_col = -1;
 	ctx.cached_name_col = -1;
@@ -1079,6 +1082,7 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 		/* prepare argument bytes on the host side first */
 		bytes = palloc0(sizeof(char *) * (nargs + 1));
 		lens = palloc0(sizeof(uint32) * (nargs + 1));
+		rows = palloc0(sizeof(PlzigRowBuf *) * (nargs + 1));
 		total = (uint64) (nargs + 1) * sizeof(PlzigSlot);
 		for (i = 0; i < nargs; i++)
 		{
@@ -1114,6 +1118,18 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 
 				bytes[i] = VARDATA_ANY(w);
 				lens[i] = VARSIZE_ANY_EXHDR(w);
+			}
+			else if (k == PLZIG_T_ROW)
+			{
+				/* a struct: the encoded live attributes (doc/abi.md, "Rows") */
+				uint64		size;
+
+				rows[i] = plzig_row_arg_load(argtypes[i].row, args[i].value, pi->call_cxt, &size);
+				if (size > PG_UINT32_MAX - 16)
+					ereport(ERROR,
+							(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+							 errmsg("PL/Zig: arguments too large")));
+				lens[i] = (uint32) size;
 			}
 			total += TYPEALIGN(8, (uint64) lens[i]);
 		}
@@ -1223,6 +1239,13 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 					case PLZIG_T_JSONB:
 						plzig_put_bytes(base, &off, &s, guest_base, bytes[i], lens[i]);
 						break;
+					case PLZIG_T_ROW:
+						/* val = the values, len = their number */
+						s.val = (uint64) (guest_base + off);
+						s.len = (uint32) plzig_rowbuf_encode(rows[i], base + off, guest_base + off, true);
+						plzig_rowbuf_forget_row(rows[i]);
+						off += TYPEALIGN(8, lens[i]);
+						break;
 					case PLZIG_T_VOID:
 						break;
 				}
@@ -1278,7 +1301,10 @@ plzig_instance_call(PlzigInstance *pi, PlzigTypeInfo *argtypes, int nargs,
 					 errmsg("PL/Zig: invalid status %u from guest", status)));
 
 		MemoryContextSwitchTo(oldcxt);
-		ret = plzig_decode_result(pi, &result, rettype, isnull);
+		if (spec->retrow)
+			ret = plzig_row_result(pi->inst, spec->retrow, &result, isnull);
+		else
+			ret = plzig_decode_result(pi, &result, spec->rettype, isnull);
 		/* pass-by-reference results were allocated in the caller's context */
 	}
 	PG_FINALLY();

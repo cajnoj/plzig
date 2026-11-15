@@ -67,6 +67,7 @@ typedef struct PlzigFunction
 	int			nargs;
 	PlzigTypeInfo *argtypes;
 	PlzigTypeInfo rettype;
+	PlzigRowDesc *retrow;		/* row result (struct), or NULL */
 	bool		read_only;
 	char	   *signature;		/* for error context */
 } PlzigFunction;
@@ -317,8 +318,33 @@ plzig_function_build(Oid fn_oid, HeapTuple proctup)
 		fn->nargs = sig.nargs;
 		fn->argtypes = palloc0(sizeof(PlzigTypeInfo) * (sig.nargs > 0 ? sig.nargs : 1));
 		for (i = 0; i < sig.nargs; i++)
-			plzig_type_info_init(&fn->argtypes[i], sig.argtypes[i], false, cxt);
-		plzig_type_info_init(&fn->rettype, sig.rettype, true, cxt);
+		{
+			if (plzig_type_is_row(sig.argtypes[i]))
+			{
+				fn->argtypes[i].typid = sig.argtypes[i];
+				fn->argtypes[i].kind = PLZIG_T_ROW;
+				fn->argtypes[i].row = plzig_rowdesc_for_type(sig.argtypes[i], false, cxt);
+			}
+			else
+				plzig_type_info_init(&fn->argtypes[i], sig.argtypes[i], false, cxt);
+		}
+		if (sig.rettupdesc)
+		{
+			/*
+			 * The descriptor the generated struct was made from: of a named
+			 * composite type now (as the type cache has it), or of the
+			 * output parameters.
+			 */
+			if (sig.rettype == RECORDOID)
+				fn->retrow = plzig_rowdesc_for_tupdesc(sig.rettupdesc, cxt);
+			else
+				fn->retrow = plzig_rowdesc_for_type(sig.rettype, true, cxt);
+			fn->rettype.typid = sig.rettype;
+			fn->rettype.kind = PLZIG_T_ROW;
+			fn->rettype.row = fn->retrow;
+		}
+		else
+			plzig_type_info_init(&fn->rettype, sig.rettype, true, cxt);
 		fn->read_only = (sig.volatility != PROVOLATILE_VOLATILE);
 		fn->signature = format_procedure(fn_oid);
 		MemoryContextSwitchTo(old);
@@ -385,6 +411,22 @@ plzig_function_sweep(void)
 	list_free(stale);
 }
 
+/*
+ * Are the composite types of the arguments and of the result still those
+ * the function was generated for (plzig_rowdesc_current)?  If not, the
+ * function is rebuilt: its generated structs must match the types.
+ */
+static bool
+plzig_function_rows_current(PlzigFunction *fn)
+{
+	int			i;
+
+	for (i = 0; i < fn->nargs; i++)
+		if (fn->argtypes[i].row && !plzig_rowdesc_current(fn->argtypes[i].row))
+			return false;
+	return fn->retrow == NULL || plzig_rowdesc_current(fn->retrow);
+}
+
 static PlzigFunction *
 plzig_function_lookup(Oid fn_oid)
 {
@@ -420,7 +462,8 @@ plzig_function_lookup(Oid fn_oid)
 	{
 		fn = ent->fn;
 		if (fn->fn_xmin != HeapTupleHeaderGetRawXmin(proctup->t_data) ||
-			!ItemPointerEquals(&fn->fn_tid, &proctup->t_self))
+			!ItemPointerEquals(&fn->fn_tid, &proctup->t_self) ||
+			!plzig_function_rows_current(fn))
 		{
 			plzig_function_invalidate(fn);
 			fn = NULL;
@@ -452,6 +495,7 @@ plzig_function_execute(PlzigFunction *fn, FunctionCallInfo fcinfo)
 	bool		isnull = false;
 	ErrorContextCallback errcb;
 	MemoryContext oldcxt = CurrentMemoryContext;
+	PlzigCallSpec spec;
 
 	errcb.callback = plzig_error_context;
 	errcb.arg = fn->signature;
@@ -481,8 +525,17 @@ plzig_function_execute(PlzigFunction *fn, FunctionCallInfo fcinfo)
 		if (inst == NULL)
 			inst = plzig_instance_create(fn->module);	/* recursion: temporary instance */
 
-		result = plzig_instance_call(inst, fn->argtypes, fn->nargs, fcinfo->args,
-									 &fn->rettype, fn->read_only, &isnull);
+		memset(&spec, 0, sizeof(spec));
+		spec.argtypes = fn->argtypes;
+		spec.nargs = fn->nargs;
+		spec.args = fcinfo->args;
+		spec.rettype = &fn->rettype;
+		spec.retrow = fn->retrow;
+		spec.read_only = fn->read_only;
+		if (fcinfo->nargs != fn->nargs)	/* cannot happen */
+			elog(ERROR, "PL/Zig: function called with %d arguments, expected %d",
+				 fcinfo->nargs, fn->nargs);
+		result = plzig_instance_call(inst, &spec, &isnull);
 	}
 	PG_CATCH();
 	{
@@ -557,6 +610,7 @@ plzig_inline_handler(PG_FUNCTION_ARGS)
 	bool		isnull;
 	ErrorContextCallback errcb;
 	MemoryContext oldcxt = CurrentMemoryContext;
+	PlzigCallSpec spec;
 
 	src = plzig_generate_inline_source(codeblock->source_text, &srclen);
 	/* DO blocks are never cached: compiled, run once, discarded */
@@ -575,7 +629,9 @@ plzig_inline_handler(PG_FUNCTION_ARGS)
 	{
 		mod = plzig_module_load(wasm, wasm_len);
 		inst = plzig_instance_create(mod);
-		(void) plzig_instance_call(inst, NULL, 0, NULL, &rettype, false, &isnull);
+		memset(&spec, 0, sizeof(spec));
+		spec.rettype = &rettype;
+		(void) plzig_instance_call(inst, &spec, &isnull);
 	}
 	PG_FINALLY();
 	{

@@ -133,6 +133,8 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	NullableDatum targ;
 	struct varlena *big;
 	bool		isnull;
+	PlzigCallSpec spec;
+	PlzigCallSpec tspec;
 	Size		bytes;
 	Size		chunks;
 	Size		children;
@@ -179,17 +181,26 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	memset(VARDATA(big), 'a' + sel % 26, 5000);
 	targ.value = PointerGetDatum(big);
 	targ.isnull = false;
+	memset(&spec, 0, sizeof(spec));
+	spec.argtypes = &argt;
+	spec.nargs = 1;
+	spec.args = &arg;
+	spec.rettype = &rett;
+	spec.read_only = true;
+	tspec = spec;
+	tspec.argtypes = &targt;
+	tspec.args = &targ;
 
 	arm_timer();
 	PG_TRY();
 	{
 		mod = plzig_module_load((const char *) data, (uint32) size);
 		inst = plzig_instance_create(mod);
-		(void) plzig_instance_call(inst, &argt, 1, &arg, &rett, true, &isnull);
+		(void) plzig_instance_call(inst, &spec, &isnull);
 		/* a second call reuses the instance, like a cached one */
-		(void) plzig_instance_call(inst, &argt, 1, &arg, &rett, true, &isnull);
+		(void) plzig_instance_call(inst, &spec, &isnull);
 		/* the allocating path for arguments that do not fit the buffer */
-		(void) plzig_instance_call(inst, &targt, 1, &targ, &rett, true, &isnull);
+		(void) plzig_instance_call(inst, &tspec, &isnull);
 	}
 	PG_CATCH();
 	{

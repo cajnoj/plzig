@@ -17,6 +17,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
+#include "utils/typcache.h"
 
 static bool
 plzig_valid_identifier(const char *s)
@@ -44,8 +45,80 @@ plzig_valid_identifier(const char *s)
 }
 
 /*
+ * Every live attribute of a row type that becomes a generated struct must
+ * have a name that can be emitted as a struct field (plzig_field_name_ok).
+ */
+static void
+plzig_check_row_fields(TupleDesc td, const char *what)
+{
+	int			i;
+	int			j;
+
+	for (i = 0; i < td->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(td, i);
+
+		if (att->attisdropped)
+			continue;
+		if (!plzig_field_name_ok(NameStr(att->attname)))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("PL/Zig cannot map the field \"%s\" of %s to a struct field",
+							NameStr(att->attname), what),
+					 errhint("Field names of composite arguments and results must match [A-Za-z_][A-Za-z0-9_]*.")));
+		/*
+		 * unique (always so in a composite type; output parameters can
+		 * clash with the names PostgreSQL makes up for unnamed ones)
+		 */
+		for (j = 0; j < i; j++)
+			if (!TupleDescAttr(td, j)->attisdropped &&
+				strcmp(NameStr(TupleDescAttr(td, j)->attname), NameStr(att->attname)) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+						 errmsg("duplicate PL/Zig field name \"%s\" in %s",
+								NameStr(att->attname), what)));
+	}
+}
+
+/* plzig_check_row_fields for the named composite type typid (an argument type) */
+static void
+plzig_check_row_type(Oid typid)
+{
+	TupleDesc	td = lookup_rowtype_tupdesc(typid, -1);
+
+	PG_TRY();
+	{
+		plzig_check_row_fields(td, format_type_be(typid));
+	}
+	PG_FINALLY();
+	{
+		ReleaseTupleDesc(td);
+	}
+	PG_END_TRY();
+}
+
+/* The type of an argument or result must be a real type (no pseudo or shell type). */
+static void
+plzig_check_type(Oid typid, bool result)
+{
+	char		typtype = get_typtype(typid);
+
+	if (typtype == TYPTYPE_PSEUDO || typtype == '\0')
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 result ? errmsg("PL/Zig functions cannot return type %s", format_type_be(typid)) :
+				 errmsg("PL/Zig functions cannot accept type %s", format_type_be(typid))));
+	if (!get_typisdefined(typid))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 result ? errmsg("PL/Zig functions cannot return shell type %s", format_type_be(typid)) :
+				 errmsg("PL/Zig functions cannot accept type %s", format_type_be(typid))));
+}
+
+/*
  * Check that a function's signature is supported and fill *sig.
- * Raises feature_not_supported for everything cut in PLAN.md D10.
+ * Raises feature_not_supported for everything still cut (PLAN.md D10 and
+ * §12 item 14).
  */
 void
 plzig_check_signature(HeapTuple proctup, PlzigSignature *sig)
@@ -54,7 +127,8 @@ plzig_check_signature(HeapTuple proctup, PlzigSignature *sig)
 	Oid		   *argtypes;
 	char	  **argnames;
 	char	   *argmodes;
-	int			nargs;
+	int			nall;
+	int			nout = 0;
 	int			i;
 
 	memset(sig, 0, sizeof(*sig));
@@ -69,50 +143,39 @@ plzig_check_signature(HeapTuple proctup, PlzigSignature *sig)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("PL/Zig functions cannot return sets")));
 
-	/* result type */
-	if (proc->prorettype != VOIDOID)
-	{
-		char		typtype = get_typtype(proc->prorettype);
-
-		if (typtype == TYPTYPE_PSEUDO || typtype == '\0')
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("PL/Zig functions cannot return type %s",
-							format_type_be(proc->prorettype))));
-		if (!get_typisdefined(proc->prorettype))
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("PL/Zig functions cannot return shell type %s",
-							format_type_be(proc->prorettype))));
-	}
-
-	nargs = get_func_arg_info(proctup, &argtypes, &argnames, &argmodes);
-	if (nargs > FUNC_MAX_ARGS)
+	nall = get_func_arg_info(proctup, &argtypes, &argnames, &argmodes);
+	if (nall > FUNC_MAX_ARGS)
 		elog(ERROR, "too many arguments");
+	for (i = 0; i < nall; i++)
+		if (argmodes && (argmodes[i] == PROARGMODE_OUT || argmodes[i] == PROARGMODE_INOUT))
+			nout++;
 
-	sig->nargs = nargs;
-	sig->argtypes = palloc0(sizeof(Oid) * (nargs > 0 ? nargs : 1));
-	sig->argnames = palloc0(sizeof(char *) * (nargs > 0 ? nargs : 1));
+	/* the declared result type first (RECORD is checked with the outputs below) */
+	if (proc->prorettype != VOIDOID && !(nout > 0 && proc->prorettype == RECORDOID))
+		plzig_check_type(proc->prorettype, true);
 
-	for (i = 0; i < nargs; i++)
+	sig->argtypes = palloc0(sizeof(Oid) * (nall > 0 ? nall : 1));
+	sig->argnames = palloc0(sizeof(char *) * (nall > 0 ? nall : 1));
+
+	for (i = 0; i < nall; i++)
 	{
-		char		typtype;
+		char		mode = argmodes ? argmodes[i] : PROARGMODE_IN;
+		int			n;
 
-		if (argmodes && argmodes[i] != PROARGMODE_IN)
+		if (mode == PROARGMODE_VARIADIC || mode == PROARGMODE_TABLE)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("PL/Zig supports only IN parameters"),
-					 errdetail("OUT, INOUT, VARIADIC and TABLE parameters are not supported.")));
+					 errmsg("PL/Zig does not support VARIADIC or TABLE parameters")));
 
-		typtype = get_typtype(argtypes[i]);
-		if (typtype == TYPTYPE_PSEUDO || typtype == '\0' ||
-			!get_typisdefined(argtypes[i]))
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("PL/Zig functions cannot accept type %s",
-							format_type_be(argtypes[i]))));
+		if (mode == PROARGMODE_OUT || mode == PROARGMODE_INOUT)
+			plzig_check_type(argtypes[i], true);
+		if (mode == PROARGMODE_OUT)
+			continue;			/* a field of the result, checked with the row type */
 
-		sig->argtypes[i] = argtypes[i];
+		/* an input argument (IN, INOUT) */
+		plzig_check_type(argtypes[i], false);
+		n = sig->nargs++;
+		sig->argtypes[n] = argtypes[i];
 
 		if (argnames && argnames[i] && argnames[i][0] != '\0')
 		{
@@ -121,23 +184,57 @@ plzig_check_signature(HeapTuple proctup, PlzigSignature *sig)
 						(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
 						 errmsg("invalid PL/Zig parameter name \"%s\"", argnames[i]),
 						 errhint("Parameter names must match [A-Za-z_][A-Za-z0-9_]* and must not be \"plzig\", \"std\" or \"call\".")));
-			sig->argnames[i] = pstrdup(argnames[i]);
+			sig->argnames[n] = pstrdup(argnames[i]);
 		}
 		else
-			sig->argnames[i] = psprintf("arg%d", i + 1);
+			sig->argnames[n] = psprintf("arg%d", n + 1);
+
+		if (plzig_type_is_row(argtypes[i]))
+			plzig_check_row_type(argtypes[i]);
 	}
 
 	/* reject duplicates (possible between explicit names and argN) */
-	for (i = 0; i < nargs; i++)
+	for (i = 0; i < sig->nargs; i++)
 	{
 		int			j;
 
-		for (j = i + 1; j < nargs; j++)
+		for (j = i + 1; j < sig->nargs; j++)
 			if (strcmp(sig->argnames[i], sig->argnames[j]) == 0)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
 						 errmsg("duplicate PL/Zig parameter name \"%s\"", sig->argnames[i])));
 	}
+
+	/*
+	 * The result: void, a scalar, or a row.  A row is either a named
+	 * composite type or, with output parameters, RECORD described by them
+	 * (a function with exactly one output parameter returns that
+	 * parameter's type; a procedure with any returns RECORD).
+	 */
+	if (nout > 0 && proc->prorettype == RECORDOID)
+	{
+		sig->rettupdesc = build_function_result_tupdesc_t(proctup);
+		if (sig->rettupdesc == NULL)	/* cannot happen */
+			elog(ERROR, "could not build the result row type of function %u", proc->oid);
+		plzig_check_row_fields(sig->rettupdesc, "the output parameters");
+	}
+	else if (proc->prorettype != VOIDOID)
+	{
+		if (plzig_type_is_row(proc->prorettype))
+		{
+			sig->rettupdesc = lookup_rowtype_tupdesc_copy(proc->prorettype, -1);
+			plzig_check_row_fields(sig->rettupdesc, format_type_be(proc->prorettype));
+		}
+	}
+
+	/* the generated file declares the row type as Result */
+	if (sig->rettupdesc)
+		for (i = 0; i < sig->nargs; i++)
+			if (strcmp(sig->argnames[i], "Result") == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+						 errmsg("invalid PL/Zig parameter name \"%s\"", sig->argnames[i]),
+						 errdetail("In a function returning a row, the generated code declares the row type as Result.")));
 
 	sig->rettype = proc->prorettype;
 	sig->strict = proc->proisstrict;
@@ -172,25 +269,118 @@ plzig_get_body(HeapTuple proctup)
  */
 #define PLZIG_SRC_PRELUDE "const plzig = @import(\"plzig\"); const std = plzig.std; "
 
+/* Does a row type have a jsonb field (whose Zig type differs between argument and result)? */
+static bool
+plzig_row_has_jsonb(TupleDesc td)
+{
+	int			i;
+
+	for (i = 0; i < td->natts; i++)
+		if (!TupleDescAttr(td, i)->attisdropped &&
+			plzig_value_kind(TupleDescAttr(td, i)->atttypid) == PLZIG_KIND_JSONB)
+			return true;
+	return false;
+}
+
+/*
+ * const <name> = struct { @"field": ?T, ... };  one optional field per live
+ * attribute, in order (the order the host passes and expects the values
+ * in); names were checked by plzig_check_row_fields.
+ */
+static void
+plzig_emit_struct(StringInfo buf, const char *name, TupleDesc td, bool for_result)
+{
+	int			i;
+	bool		first = true;
+
+	appendStringInfo(buf, "const %s = struct {", name);
+	for (i = 0; i < td->natts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(td, i);
+
+		if (att->attisdropped)
+			continue;
+		Assert(plzig_field_name_ok(NameStr(att->attname)));
+		appendStringInfo(buf, "%s @\"%s\": ?%s", first ? "" : ",", NameStr(att->attname),
+						 plzig_field_zig_type(plzig_value_kind(att->atttypid), for_result));
+		first = false;
+	}
+	appendStringInfoString(buf, " }; ");
+}
+
+/*
+ * The struct types of the composite argument types, in order of first use:
+ * @"plzig.Row1", @"plzig.Row2", ...  (names no parameter can have).  Returns
+ * the index (1-based) of typid, emitting its declaration first if needed.
+ */
+static int
+plzig_row_type_index(StringInfo buf, Oid *seen, int *nseen, Oid typid)
+{
+	TupleDesc	td;
+	char		name[32];
+	int			i;
+
+	for (i = 0; i < *nseen; i++)
+		if (seen[i] == typid)
+			return i + 1;
+	seen[*nseen] = typid;
+	(*nseen)++;
+	snprintf(name, sizeof(name), "@\"plzig.Row%d\"", *nseen);
+	td = lookup_rowtype_tupdesc(typid, -1);
+	plzig_emit_struct(buf, name, td, false);
+	ReleaseTupleDesc(td);
+	return *nseen;
+}
+
 char *
 plzig_generate_source(const PlzigSignature *sig, const char *body, size_t *srclen)
 {
 	StringInfoData buf;
 	int			i;
+	Oid		   *seen = palloc(sizeof(Oid) * (sig->nargs + 1));
+	int			nseen = 0;
+	int		   *rowidx = palloc0(sizeof(int) * (sig->nargs + 1));
 
 	initStringInfo(&buf);
-	appendStringInfoString(&buf, PLZIG_SRC_PRELUDE "pub fn call(");
+	appendStringInfoString(&buf, PLZIG_SRC_PRELUDE);
+
+	/*
+	 * Declarations of the row types, all on the header line (so that
+	 * compiler line N is still body line N-1).
+	 */
+	for (i = 0; i < sig->nargs; i++)
+		if (plzig_type_is_row(sig->argtypes[i]))
+			rowidx[i] = plzig_row_type_index(&buf, seen, &nseen, sig->argtypes[i]);
+	if (sig->rettupdesc)
+	{
+		if (sig->rettype != RECORDOID && plzig_type_is_row(sig->rettype) &&
+			!plzig_row_has_jsonb(sig->rettupdesc))
+		{
+			/* the same struct as an argument of this type: `return p;` works */
+			int			idx = plzig_row_type_index(&buf, seen, &nseen, sig->rettype);
+
+			appendStringInfo(&buf, "const Result = @\"plzig.Row%d\"; ", idx);
+		}
+		else
+			plzig_emit_struct(&buf, "Result", sig->rettupdesc, true);
+	}
+
+	appendStringInfoString(&buf, "pub fn call(");
 	for (i = 0; i < sig->nargs; i++)
 	{
-		PlzigTypeKind k = plzig_type_kind(sig->argtypes[i]);
-
-		appendStringInfo(&buf, "%s@\"%s\": %s%s",
+		appendStringInfo(&buf, "%s@\"%s\": %s",
 						 i > 0 ? ", " : "",
 						 sig->argnames[i],
-						 sig->strict ? "" : "?",
-						 plzig_zig_type_name(k, false));
+						 sig->strict ? "" : "?");
+		if (rowidx[i] > 0)
+			appendStringInfo(&buf, "@\"plzig.Row%d\"", rowidx[i]);
+		else
+			appendStringInfoString(&buf, plzig_zig_type_name(plzig_type_kind(sig->argtypes[i]), false));
 	}
-	if (sig->rettype == VOIDOID)
+	if (sig->rettupdesc)
+		/* a procedure must return its output row (PostgreSQL refuses NULL) */
+		appendStringInfoString(&buf, sig->is_procedure ? ") anyerror!Result {" : ") anyerror!?Result {");
+	else if (sig->rettype == VOIDOID)
 		appendStringInfoString(&buf, ") anyerror!void {");
 	else
 		appendStringInfo(&buf, ") anyerror!?%s {",
@@ -285,6 +475,8 @@ plzig_test_generate_source(PG_FUNCTION_ARGS)
 			TextDatumGetCString(nvals[i]);
 	}
 	sig.rettype = PG_GETARG_OID(2);
+	if (plzig_type_is_row(sig.rettype))
+		sig.rettupdesc = lookup_rowtype_tupdesc_copy(sig.rettype, -1);
 	sig.strict = PG_GETARG_BOOL(3);
 	src = plzig_generate_source(&sig, text_to_cstring(PG_GETARG_TEXT_PP(4)), &len);
 	if (len != strlen(src))

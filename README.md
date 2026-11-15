@@ -228,7 +228,8 @@ library, also `plzig.std`).
 | `oid` | `plzig.Oid` (`.value`) |
 | `numeric` | `plzig.Numeric` (PostgreSQL's binary format; text, comparison, conversions, arithmetic) |
 | `jsonb` | argument: `plzig.Jsonb` (read in place); result: `plzig.JsonText` (JSON text) |
-| anything else (arrays, enums, domains, ranges, composites, json, inet…) | `[]const u8` holding the type's text representation |
+| a composite type (`CREATE TYPE ... AS (...)`, a table's row type) | a struct with one optional field per attribute (see *Rows*) |
+| anything else (arrays, enums, domains, ranges, json, inet…) | `[]const u8` holding the type's text representation |
 | `void` | `void` |
 
 * `STRICT` functions get plain parameter types; otherwise parameters are
@@ -254,6 +255,52 @@ library, also `plzig.std`).
 * Unnamed parameters are called `arg1`, `arg2`, …; parameter names must
   be ASCII identifiers (`[A-Za-z_][A-Za-z0-9_]*`) other than `plzig`, `std`
   and `call`. Zig keywords are fine as names: refer to them as `@"return"`.
+
+### Rows: composite types, OUT and INOUT parameters
+
+A composite argument or result is a struct with one optional field per
+attribute, named and ordered like the attributes (`?T` with the mapping
+above; a nested composite, an array of composites or a domain over a
+composite stays text). Output parameters (`OUT`, `INOUT`) are the fields
+of the result: with two or more (or in a procedure) the function returns
+the generated struct `Result`, with one it returns that parameter's type.
+`INOUT` parameters are also ordinary arguments.
+
+```sql
+CREATE FUNCTION divmod(a int, b int, OUT q int, OUT r int) STRICT LANGUAGE plzig AS $$
+    if (b == 0) return null;                      -- a NULL row
+    return .{ .q = @divTrunc(a, b), .r = @rem(a, b) };
+$$;
+SELECT * FROM divmod(17, 5);                      -- 3 | 2
+
+CREATE TYPE pair AS (a int, b text);
+CREATE FUNCTION swap_sign(p pair) RETURNS pair STRICT LANGUAGE plzig AS $$
+    var q = p;                                    -- the same struct type
+    q.a = if (p.a) |v| -v else null;
+    return q;
+$$;
+
+CREATE PROCEDURE bump(INOUT n int) LANGUAGE plzig AS $$
+    return .{ .n = (n orelse 0) + 1 };            -- a procedure returns its row
+$$;
+```
+
+* Every field must be given (a missing one is a compile error, not a
+  silent NULL). `Result` is a reserved parameter name in functions that
+  return a row.
+* The host checks every field like a result of that type and applies the
+  attribute's typmod (`varchar(3)`, `numeric(5,2)`, `timestamp(0)` as in
+  `CREATE TYPE ... AS (...)`), and a domain's constraints; then it builds
+  the row itself.
+* A `jsonb` field is `plzig.Jsonb` in an argument and `plzig.JsonText` in a
+  result, so for a type with a `jsonb` attribute the two structs differ.
+* Field names must be ASCII identifiers (`[A-Za-z_][A-Za-z0-9_]*`; Zig
+  keywords are fine: `.@"type"`): a composite type with other attribute
+  names cannot be used as an argument or result type of a PL/Zig function.
+* If a composite type (or table) changes after a function was compiled, the
+  function is regenerated from the new type at its next call (and may then
+  no longer compile); a row type changed during a call (`ALTER TYPE` through
+  SPI) makes the call fail. A stale struct is never used.
 
 You can define helper functions and globals after the body by closing the
 function yourself (the generated wrapper adds the final `}`):
@@ -513,11 +560,12 @@ start over.
 
 ### Not supported (by design, see PLAN.md D10)
 
-Triggers, event triggers, set-returning functions, `OUT`/`INOUT`/`VARIADIC`/
-`TABLE` parameters, polymorphic and other pseudo-types (except `void`
-results), aggregates/window functions, transaction control, catching SQL
-errors, and any access to the clock, randomness, environment, files or
-network from guest code (use SQL through SPI: `SELECT now()`).
+Triggers, event triggers, set-returning functions, `VARIADIC` and `TABLE`
+parameters, polymorphic and other pseudo-types (except `void` results and
+`record` described by output parameters), aggregates/window functions,
+transaction control, catching SQL errors, and any access to the clock,
+randomness, environment, files or network from guest code (use SQL through
+SPI: `SELECT now()`).
 
 ## Configuration (GUCs)
 

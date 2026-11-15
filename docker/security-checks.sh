@@ -490,6 +490,106 @@ expect "hostile entry points: misaligned plzig_alloc_args block works" "5001" "S
 expect "hostile entry points: backend still healthy" "4242" "SELECT 4242;"
 if grep -qE "terminated by signal|server process .* was terminated" /tmp/server.log; then fail "hostile entry points: no backend crash in the server log"; else pass "hostile entry points: no backend crash in the server log"; fi
 psqlq -c "DROP FUNCTION IF EXISTS he_misaligned(int, text), he_alloc0(int, text), he_allocbad(int, text), he_alloctail(int, text), he_allocodd(int, text); SELECT plzig_cache_clear();" >/dev/null
+
+# 9c: forged rows (doc/abi.md, "Rows"): a function returning a composite
+# writes the result slot and the values it points to itself (hostileCall
+# replaces plzig_call).  Every field is checked by the host.
+echo "--- hostile rows"
+cat > /tmp/plzig-hostile-rows.sql <<'SQL'
+CREATE TYPE hr_t AS (a int, b text, n numeric(5,2), d date, j jsonb);
+CREATE OR REPLACE FUNCTION hrow(what int) RETURNS hr_t STRICT LANGUAGE plzig AS $$
+    return null;
+}
+var vals: [8]plzig.Value align(8) = undefined;
+var mis: [8 * 16 + 8]u8 align(8) = undefined;
+pub fn hostileCall(args: [*]const plzig.Slot, nargs: u32, result: *plzig.Slot, begin: u32) u32 {
+    _ = nargs;
+    if (begin != 0) plzig.resetArena();
+    const what: i64 = @bitCast(args[0].val);
+    const txt = "hello";
+    const one = "\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01"; // 1
+    const big = "\x00\x02\x00\x00\x00\x00\x00\x01\x04\xd2\x13\x88"; // 1234.5
+    const bad = "\xff\xfe";
+    const bin = "\x01\x00\x00\x20\x00\x00\x00\x00";
+    vals[0] = .{ .val = 1, .len = 0, .kind = 3, .is_null = 0 };
+    vals[1] = .{ .val = plzig.addrOf(txt.ptr), .len = txt.len, .kind = 7, .is_null = 0 };
+    vals[2] = .{ .val = plzig.addrOf(one.ptr), .len = one.len, .kind = 18, .is_null = 0 };
+    vals[3] = .{ .val = 0, .len = 0, .kind = 10, .is_null = 0 };
+    vals[4] = .{ .val = 0, .len = 0, .kind = 19, .is_null = 1 };
+    var n: u32 = 5;
+    var p: u64 = plzig.addrOf(&vals);
+    switch (what) {
+        1 => n = 4,
+        2 => vals[0].kind = 7,
+        3 => vals[1].is_null = 7,
+        4 => p = 0x7fff_ff00,
+        5 => vals[1].val = 0x7fff_ff00,
+        6 => vals[0].val = 1 << 40,
+        7 => vals[1] = .{ .val = plzig.addrOf(bad.ptr), .len = bad.len, .kind = 7, .is_null = 0 },
+        8 => vals[2].len = 9,
+        9 => vals[3].val = 1 << 40,
+        10 => vals[4] = .{ .val = plzig.addrOf(bin.ptr), .len = bin.len, .kind = 19, .is_null = 0 },
+        11 => p = 1 << 33,
+        12 => n = 0xffff_ffff,
+        13 => { result.* = .{ .val = 0, .len = 0, .is_null = 1 }; return 0; },
+        14 => vals[0] = .{ .val = 1, .len = 0, .kind = 0, .is_null = 0 },
+        15 => vals[1].kind = 8,
+        16 => vals[2] = .{ .val = plzig.addrOf(big.ptr), .len = big.len, .kind = 18, .is_null = 0 },
+        17 => vals[1].val = 1 << 33,
+        18 => vals[1].len = 0xffff_ffff,
+        19 => {
+            const src = plzig.rawPtr([*]const u8, plzig.addrOf(&vals));
+            for (0..5 * 16) |k| mis[3 + k] = src[k];
+            p = plzig.addrOf(&mis) + 3;
+        },
+        20 => vals[2].kind = 7,
+        else => {},
+    }
+    result.* = .{ .val = p, .len = n, .is_null = 0 };
+    return 0;
+}
+fn unused() void {
+$$;
+SQL
+out=$(psqlq -f /tmp/plzig-hostile-rows.sql)
+if grep -q ERROR <<<"$out"; then fail "hostile rows: module loads"; echo "$out" | sed 's/^/         /'; else pass "hostile rows: module loads"; fi
+n=0
+while IFS='|' read -r what needle; do
+    [ -z "$what" ] && continue
+    out=$(psqlq -c "SELECT hrow($what);")
+    if grep -qF -- "$needle" <<<"$out"; then
+        n=$((n + 1))
+    else
+        fail "hostile rows case $what: expected \"$needle\""; echo "$out" | sed 's/^/         /'
+    fi
+done <<'CASES'
+0|(1,hello,1.00,2000-01-01,)
+1|the result has 4 field(s), but its row type has 5
+2|field "a" of the result is of type integer, but a value of kind text was passed
+3|invalid NULL flag in field "b" of the result
+4|guest passed an invalid memory range
+5|guest passed an invalid memory range
+6|value of field "a" of the result is out of range for type integer
+7|invalid byte sequence for encoding
+8|invalid length 9 of numeric value
+9|date out of range
+10|invalid byte sequence for encoding "UTF8": 0x00
+11|invalid pointer to the result
+12|the result has 4294967295 field(s), but its row type has 5
+14|field "a" of the result is of type integer, but a value of kind null was passed
+15|(1,hello,1.00,2000-01-01,)
+16|numeric field overflow
+17|invalid pointer in field "b"
+18|field "b" is too long
+19|(1,hello,1.00,2000-01-01,)
+20|field "n" of the result is of type numeric(5,2), but a value of kind text was passed
+CASES
+# 13: a NULL row (no ERROR at all)
+expect "hostile rows: a NULL row is NULL" "t" "SELECT hrow(13) IS NULL;"
+if [ "$n" -eq 20 ]; then pass "hostile rows: 20 forged rows end in a clean ERROR or are accepted as valid"; fi
+expect "hostile rows: backend still healthy" "4242" "SELECT 4242;"
+if grep -qE "terminated by signal|server process .* was terminated" /tmp/server.log; then fail "hostile rows: no backend crash in the server log"; else pass "hostile rows: no backend crash in the server log"; fi
+psqlq -c "DROP FUNCTION hrow(int); DROP TYPE hr_t; SELECT plzig_cache_clear();" >/dev/null
 set_conf compiler_sandbox ""
 set_real
 

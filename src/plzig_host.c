@@ -869,8 +869,8 @@ bad_pointer:
  * Typed rows
  * ---------------------------------------------------------------------
  */
-static PlzigRowBuf *
-rowbuf_create(MemoryContext parent)
+PlzigRowBuf *
+plzig_rowbuf_create(MemoryContext parent)
 {
 	PlzigRowBuf *rb = MemoryContextAllocZero(parent, sizeof(PlzigRowBuf));
 
@@ -882,8 +882,8 @@ rowbuf_create(MemoryContext parent)
 	return rb;
 }
 
-static void
-rowbuf_forget_row(PlzigRowBuf *rb)
+void
+plzig_rowbuf_forget_row(PlzigRowBuf *rb)
 {
 	rb->have_row = false;
 	rb->rowno = -1;
@@ -895,7 +895,7 @@ rowbuf_forget_row(PlzigRowBuf *rb)
 static void
 rowbuf_forget_desc(PlzigRowBuf *rb)
 {
-	rowbuf_forget_row(rb);
+	plzig_rowbuf_forget_row(rb);
 	rb->have_desc = false;
 	rb->natts = 0;
 	rb->cols = NULL;
@@ -906,8 +906,8 @@ rowbuf_forget_desc(PlzigRowBuf *rb)
 }
 
 /* Derive every column's kind from the actual tuple descriptor. */
-static void
-rowbuf_set_desc(PlzigRowBuf *rb, TupleDesc td)
+void
+plzig_rowbuf_set_desc(PlzigRowBuf *rb, TupleDesc td)
 {
 	MemoryContext old;
 	int			i;
@@ -952,8 +952,8 @@ align8(uint64 n)
  * (natts entries) and are overwritten; detoasted values and output function
  * results are allocated in the row context.
  */
-static void
-rowbuf_load(PlzigRowBuf *rb, HeapTuple tup, TupleDesc td)
+void
+plzig_rowbuf_load(PlzigRowBuf *rb, HeapTuple tup, TupleDesc td)
 {
 	MemoryContext old;
 	Datum	   *values = rb->values;
@@ -966,7 +966,7 @@ rowbuf_load(PlzigRowBuf *rb, HeapTuple tup, TupleDesc td)
 	Assert(rb->have_desc);
 	if (td->natts != natts)		/* cannot happen: same portal/result */
 		elog(ERROR, "PL/Zig: row descriptor changed");
-	rowbuf_forget_row(rb);
+	plzig_rowbuf_forget_row(rb);
 	old = MemoryContextSwitchTo(rb->row_cxt);
 	if (natts > 0)
 		heap_deform_tuple(tup, td, values, nulls);
@@ -1086,6 +1086,81 @@ too_large:
 }
 
 /*
+ * Size of the current row's encoding: rb->size, or, with live_only, without
+ * the values of dropped columns (composite arguments: the generated struct
+ * has a field per live attribute only).
+ */
+uint64
+plzig_rowbuf_size(PlzigRowBuf *rb, bool live_only)
+{
+	uint64		size = rb->size;
+	int			i;
+
+	if (live_only)
+		for (i = 0; i < rb->natts; i++)
+			if (rb->cols[i].dropped)
+				size -= sizeof(PlzigValue);
+	return size;
+}
+
+/*
+ * Encode the current row at native address base, which is guest address
+ * guest: the values (natts, or only the live ones), then the bytes of the
+ * byte-kind values (8-byte aligned), whose val fields hold their guest
+ * addresses.  The caller has validated [guest, guest + size) and computed
+ * size with plzig_rowbuf_size(rb, live_only).  Returns the number of
+ * values written.
+ */
+int32
+plzig_rowbuf_encode(PlzigRowBuf *rb, uint8 *base, uint32 guest, bool live_only)
+{
+	uint64		size = plzig_rowbuf_size(rb, live_only);
+	uint64		off;
+	int			nvals = rb->natts;
+	int			i;
+
+	if (live_only)
+		for (i = 0; i < rb->natts; i++)
+			if (rb->cols[i].dropped)
+				nvals--;
+	off = (uint64) nvals * sizeof(PlzigValue);
+	nvals = 0;
+	for (i = 0; i < rb->natts; i++)
+	{
+		PlzigRowCol *c = &rb->row[i];
+		PlzigValue	v;
+
+		if (live_only && rb->cols[i].dropped)
+			continue;
+		memset(&v, 0, sizeof(v));
+		v.kind = c->kind;
+		v.is_null = c->isnull ? 1 : 0;
+		if (!c->isnull)
+		{
+			if (plzig_kind_is_bytes(c->kind))
+			{
+				if (off + c->len > size)	/* cannot happen: size counts it */
+					elog(ERROR, "PL/Zig: row encoding overflow");
+				v.len = c->len;
+				v.val = (uint64) guest + off;
+				if (c->len > 0)
+					memcpy(base + off, c->data, c->len);
+				off += align8(c->len);
+			}
+			else
+			{
+				v.val = c->val;
+				if (c->kind == PLZIG_KIND_TIMETZ)
+					v.len = (uint32) c->zone;
+			}
+		}
+		memcpy(base + (Size) nvals * sizeof(PlzigValue), &v, sizeof(v));
+		nvals++;
+	}
+	return nvals;
+}
+
+/*
  * Copy the current row into guest memory at [buf, buf + buf_len): natts
  * values, then the bytes of the byte-kind values (8-byte aligned), whose
  * val fields hold their guest addresses.  Returns the number of columns.
@@ -1094,8 +1169,6 @@ static int32
 rowbuf_write(wasm_exec_env_t env, PlzigRowBuf *rb, uint32 buf, uint32 buf_len)
 {
 	uint8	   *base;
-	uint64		off;
-	int			i;
 
 	if (!rb->have_row)
 		ereport(ERROR,
@@ -1109,36 +1182,7 @@ rowbuf_write(wasm_exec_env_t env, PlzigRowBuf *rb, uint32 buf, uint32 buf_len)
 		return 0;
 	/* validates [buf, buf + size); size <= MaxAllocSize */
 	base = plzig_guest_ptr(wasm_runtime_get_module_inst(env), buf, (uint32) rb->size);
-	off = (uint64) rb->natts * sizeof(PlzigValue);
-	for (i = 0; i < rb->natts; i++)
-	{
-		PlzigRowCol *c = &rb->row[i];
-		PlzigValue	v;
-
-		memset(&v, 0, sizeof(v));
-		v.kind = c->kind;
-		v.is_null = c->isnull ? 1 : 0;
-		if (!c->isnull)
-		{
-			if (plzig_kind_is_bytes(c->kind))
-			{
-				Assert(off + c->len <= rb->size);
-				v.len = c->len;
-				v.val = (uint64) buf + off;
-				if (c->len > 0)
-					memcpy(base + off, c->data, c->len);
-				off += align8(c->len);
-			}
-			else
-			{
-				v.val = c->val;
-				if (c->kind == PLZIG_KIND_TIMETZ)
-					v.len = (uint32) c->zone;
-			}
-		}
-		memcpy(base + (Size) i * sizeof(PlzigValue), &v, sizeof(v));
-	}
-	return (int32) rb->natts;
+	return plzig_rowbuf_encode(rb, base, buf, false);
 }
 
 /* ---------------------------------------------------------------------
@@ -1434,14 +1478,14 @@ spi_select_result_row(PlzigCallCtx *ctx, uint32 row)
 	PlzigRowBuf *rb;
 
 	if (ctx->result_row == NULL)
-		ctx->result_row = rowbuf_create(ctx->cxt);
+		ctx->result_row = plzig_rowbuf_create(ctx->cxt);
 	rb = ctx->result_row;
 	/* spi_reset_result forgets the descriptor whenever the result changes */
 	if (!rb->have_desc)
-		rowbuf_set_desc(rb, tt->tupdesc);
+		plzig_rowbuf_set_desc(rb, tt->tupdesc);
 	if (!rb->have_row || rb->rowno != (int64) row)
 	{
-		rowbuf_load(rb, tt->vals[row], tt->tupdesc);
+		plzig_rowbuf_load(rb, tt->vals[row], tt->tupdesc);
 		rb->rowno = row;
 	}
 	return rb;
@@ -1759,7 +1803,7 @@ cursor_finish(PlzigCursor *c)
 {
 	Portal		p;
 
-	rowbuf_forget_row(c->rb);
+	plzig_rowbuf_forget_row(c->rb);
 	if (c->batch)
 	{
 		SPI_freetuptable(c->batch);
@@ -1844,7 +1888,7 @@ cursor_attach(PlzigCallCtx *ctx, PlzigCursor *c, int idx, Portal portal)
 				 errmsg("PL/Zig: SPI_cursor_open failed: %s",
 						SPI_result_code_string(SPI_result))));
 	c->portal_name = MemoryContextStrdup(c->cxt, portal->name);
-	c->rb = rowbuf_create(c->cxt);
+	c->rb = plzig_rowbuf_create(c->cxt);
 	c->portal = portal;
 	/* nobody else (CLOSE, CLOSE ALL in nested SQL) can drop it now */
 	PinPortal(portal);
@@ -1984,13 +2028,13 @@ host_spi_cursor_fetch(wasm_exec_env_t env, uint64 handle, uint32 buf, uint32 buf
 				SPI_tuptable = NULL;
 				c->batch_pos = 0;
 				if (c->batch && !c->rb->have_desc)
-					rowbuf_set_desc(c->rb, c->batch->tupdesc);
+					plzig_rowbuf_set_desc(c->rb, c->batch->tupdesc);
 			}
 			if (c->batch == NULL || c->batch_pos >= c->batch->numvals)
 				cursor_finish(c);
 			else
 			{
-				rowbuf_load(rb, c->batch->vals[c->batch_pos], c->batch->tupdesc);
+				plzig_rowbuf_load(rb, c->batch->vals[c->batch_pos], c->batch->tupdesc);
 				c->batch_pos++;
 			}
 		}
@@ -2002,7 +2046,7 @@ host_spi_cursor_fetch(wasm_exec_env_t env, uint64 handle, uint32 buf, uint32 buf
 			{
 				(void) rowbuf_write(env, rb, buf, buf_len);
 				/* consumed; the row may point into the batch, which stays */
-				rowbuf_forget_row(rb);
+				plzig_rowbuf_forget_row(rb);
 			}
 		}
 		else

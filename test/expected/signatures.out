@@ -12,17 +12,17 @@ CREATE FUNCTION sg_table() RETURNS TABLE (a int, b text) LANGUAGE plzig AS $$ re
 ERROR:  PL/Zig functions cannot return sets
 -- parameter modes
 CREATE FUNCTION sg_out(x int, OUT y int) LANGUAGE plzig AS $$ return; $$;
-ERROR:  PL/Zig supports only IN parameters
+ERROR:  PL/Zig compilation failed
 CREATE FUNCTION sg_out2(x int, OUT a int, OUT b int) LANGUAGE plzig AS $$ return; $$;
-ERROR:  PL/Zig functions cannot return type record
+ERROR:  PL/Zig compilation failed
 CREATE FUNCTION sg_inout(INOUT x int) LANGUAGE plzig AS $$ return; $$;
-ERROR:  PL/Zig supports only IN parameters
+ERROR:  PL/Zig compilation failed
 CREATE PROCEDURE sg_proc_inout(INOUT x int) LANGUAGE plzig AS $$ return; $$;
-ERROR:  PL/Zig functions cannot return type record
+ERROR:  PL/Zig compilation failed
 CREATE FUNCTION sg_variadic(VARIADIC x int[]) RETURNS int LANGUAGE plzig AS $$ return 1; $$;
-ERROR:  PL/Zig supports only IN parameters
+ERROR:  PL/Zig does not support VARIADIC or TABLE parameters
 CREATE FUNCTION sg_variadic2(a text, VARIADIC x text[]) RETURNS int LANGUAGE plzig AS $$ return 1; $$;
-ERROR:  PL/Zig supports only IN parameters
+ERROR:  PL/Zig does not support VARIADIC or TABLE parameters
 -- polymorphic types, as arguments and as result
 CREATE FUNCTION sg_poly1(x anyelement) RETURNS int LANGUAGE plzig AS $$ return 1; $$;
 ERROR:  PL/Zig functions cannot accept type anyelement

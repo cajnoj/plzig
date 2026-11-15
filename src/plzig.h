@@ -13,11 +13,12 @@
 #include "postgres.h"
 
 #include "access/htup.h"
+#include "access/tupdesc.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 
 #define PLZIG_VERSION_STR		"1.0"
-#define PLZIG_ABI_VERSION		4
+#define PLZIG_ABI_VERSION		5
 /*
  * The Zig version the source validator was built with, from the Makefile
  * (ZIG_VERSION).  The backend runs only a compiler reporting exactly this.
@@ -92,8 +93,12 @@ typedef enum PlzigTypeKind
 	PLZIG_T_NUMERIC,			/* numeric_send wire format, out of line */
 	PLZIG_T_JSONB,				/* in: on-disk JsonbContainer; out: JSON text
 								 * through jsonb_in (little-endian hosts) */
-	PLZIG_T_IO					/* anything else: text I/O representation */
+	PLZIG_T_IO,					/* anything else: text I/O representation */
+	PLZIG_T_ROW					/* a named composite type: a struct (function
+								 * arguments and results only, see PlzigRowDesc) */
 } PlzigTypeKind;
+
+typedef struct PlzigRowDesc PlzigRowDesc;
 
 typedef struct PlzigTypeInfo
 {
@@ -102,6 +107,7 @@ typedef struct PlzigTypeInfo
 	FmgrInfo	out_func;		/* for arguments (PLZIG_T_IO) */
 	FmgrInfo	in_func;		/* for results (PLZIG_T_IO, PLZIG_T_TEXTIO) */
 	Oid			ioparam;
+	PlzigRowDesc *row;			/* PLZIG_T_ROW: the composite type's fields */
 } PlzigTypeInfo;
 
 /* Guest argument/result slot, 16 bytes, little endian (doc/abi.md) */
@@ -175,6 +181,42 @@ typedef struct PlzigValue
 	uint16		is_null;
 } PlzigValue;
 
+/*
+ * Rows (doc/abi.md, "Rows from the guest"): the fields of a composite
+ * function result, of the rows of a set-returning function, and of
+ * composite arguments.  Built from a tuple descriptor (a named composite
+ * type, or the OUT/INOUT/TABLE parameters of a function) when the function
+ * is loaded; the generated Zig struct has one field per live attribute, in
+ * order, so the guest passes exactly nlive values.
+ */
+typedef struct PlzigField
+{
+	Oid			typid;
+	int32		typmod;			/* the attribute's typmod, applied to results */
+	uint16		kind;			/* PLZIG_KIND_*, plzig_value_kind(typid) */
+	bool		dropped;
+	FmgrInfo	in_func;		/* input function (kinds text, other, jsonb) */
+	Oid			ioparam;
+	bool		have_in;
+	FmgrInfo	coerce;			/* length coercion function for a typmod
+								 * (native kinds), see plzig_field_init */
+	bool		have_coerce;
+	const char *name;
+	const char *where;			/* "field \"name\"", for messages */
+} PlzigField;
+
+struct PlzigRowDesc
+{
+	TupleDesc	tupdesc;		/* own copy; blessed when the type is RECORD */
+	Oid			typid;			/* composite type, or RECORDOID */
+	uint64		tupdesc_id;		/* typcache tupDesc_identifier of a named
+								 * composite type when the copy was made, 0
+								 * for RECORD */
+	int			natts;
+	int			nlive;			/* attributes that are not dropped */
+	PlzigField *fields;			/* natts entries */
+};
+
 extern PlzigTypeKind plzig_type_kind(Oid typid);
 extern uint16 plzig_value_kind(Oid typid);
 extern bool plzig_kind_is_bytes(uint16 kind);
@@ -192,6 +234,9 @@ extern uint16 plzig_param_oid_kind(Oid typid);
 extern const char *plzig_zig_type_name(PlzigTypeKind kind, bool for_result);
 extern void plzig_type_info_init(PlzigTypeInfo *ti, Oid typid, bool for_result,
 								 MemoryContext mcxt);
+extern bool plzig_type_is_row(Oid typid);
+extern bool plzig_field_name_ok(const char *name);
+extern const char *plzig_field_zig_type(uint16 kind, bool for_result);
 
 /* ---------------------------------------------------------------------
  * Source generation (plzig_source.c)
@@ -199,10 +244,18 @@ extern void plzig_type_info_init(PlzigTypeInfo *ti, Oid typid, bool for_result,
  */
 typedef struct PlzigSignature
 {
-	int			nargs;
+	int			nargs;			/* input arguments (IN, INOUT) */
 	Oid		   *argtypes;
 	char	  **argnames;		/* validated identifiers, never NULL entries */
 	Oid			rettype;
+	/*
+	 * Row result (a named composite type, or OUT/INOUT/TABLE parameters):
+	 * the tuple descriptor, with validated attribute names.  NULL for a
+	 * scalar or void result.
+	 */
+	TupleDesc	rettupdesc;
+	bool		retset;			/* RETURNS SETOF / TABLE */
+	bool		is_trigger;		/* RETURNS trigger */
 	bool		strict;
 	bool		is_procedure;
 	char		volatility;
@@ -301,9 +354,23 @@ extern void plzig_instance_destroy(PlzigInstance *inst);
 extern bool plzig_instance_current(PlzigInstance *inst);
 extern uint64 plzig_instance_memory_size(PlzigInstance *inst);
 
-extern Datum plzig_instance_call(PlzigInstance *inst, PlzigTypeInfo *argtypes,
-								 int nargs, NullableDatum *args,
-								 PlzigTypeInfo *rettype, bool read_only,
+/* What one call of a guest function is given and must produce. */
+typedef struct PlzigCallSpec
+{
+	PlzigTypeInfo *argtypes;
+	int			nargs;
+	NullableDatum *args;
+	PlzigTypeInfo *rettype;		/* scalar or void result */
+	PlzigRowDesc *retrow;		/* row result, or the rows of a set */
+	bool		retset;			/* set-returning: the guest pushes rows */
+	struct ReturnSetInfo *rsinfo;	/* retset: from the caller */
+	struct TriggerData *trigdata;	/* called as a trigger */
+	bool		read_only;
+	bool		nonatomic;		/* SPI may end the transaction (procedures and
+								 * DO outside a transaction block) */
+} PlzigCallSpec;
+
+extern Datum plzig_instance_call(PlzigInstance *inst, const PlzigCallSpec *spec,
 								 bool *isnull);
 
 /* ---------------------------------------------------------------------
@@ -343,6 +410,33 @@ struct PlzigCallCtx
 };
 
 extern void *plzig_host_symbols(int *n);
+
+/* typed rows (plzig_host.c): conversion of a tuple, encoding into guest memory */
+extern PlzigRowBuf *plzig_rowbuf_create(MemoryContext parent);
+extern void plzig_rowbuf_set_desc(PlzigRowBuf *rb, TupleDesc td);
+extern void plzig_rowbuf_load(PlzigRowBuf *rb, HeapTuple tup, TupleDesc td);
+extern void plzig_rowbuf_forget_row(PlzigRowBuf *rb);
+extern uint64 plzig_rowbuf_size(PlzigRowBuf *rb, bool live_only);
+extern int32 plzig_rowbuf_encode(PlzigRowBuf *rb, uint8 *base, uint32 guest, bool live_only);
+
+/* ---------------------------------------------------------------------
+ * Rows: composite arguments and results (plzig_row.c)
+ * ---------------------------------------------------------------------
+ */
+extern PlzigRowDesc *plzig_rowdesc_for_type(Oid typid, bool for_result, MemoryContext cxt);
+extern PlzigRowDesc *plzig_rowdesc_for_tupdesc(TupleDesc td, MemoryContext cxt);
+extern bool plzig_rowdesc_current(PlzigRowDesc *rd);
+extern void plzig_field_init(PlzigField *f, Form_pg_attribute att, bool for_result,
+							 MemoryContext cxt);
+extern Datum plzig_field_from_guest(void *module_inst, PlzigField *f, const PlzigValue *v,
+									const char *what, bool *isnull);
+extern PlzigRowBuf *plzig_row_arg_load(PlzigRowDesc *rd, Datum value, MemoryContext cxt,
+									   uint64 *size);
+extern void plzig_row_values_from_guest(void *module_inst, PlzigRowDesc *rd,
+										uint64 ptr, uint32 n, Datum *values,
+										bool *nulls, const char *what);
+extern Datum plzig_row_result(void *module_inst, PlzigRowDesc *rd, const PlzigSlot *slot,
+							  bool *isnull);
 extern void plzig_host_finish_call(PlzigCallCtx *ctx);
 extern void plzig_host_free_plans(PlzigPlanTable *plans);
 

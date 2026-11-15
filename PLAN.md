@@ -660,7 +660,9 @@ v1 is expected to be slower than PL/pgSQL; neither weakens the sandbox.
 14. **Features cut from v1 (D10) that are now planned** (owner decision,
     2026-11-15; after item 12, which reworks the same marshalling code, and
     before packaging, so that 1.0.0 ships with them). In this order:
-    1. *`OUT`/`INOUT`/`TABLE` parameters and composite results.* The
+    1. **Done (2026-11-15), see Deviations from plan, 32 (`TABLE`
+       parameters with step 2: they make a set).**
+       *`OUT`/`INOUT`/`TABLE` parameters and composite results.* The
        function returns a Zig struct; the host builds the row
        (`heap_form_tuple`) from fields it has type-checked one by one, as it
        does for a scalar result. Foundation for the next two.
@@ -1698,3 +1700,74 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
     which also runs its body -- an oracle gap unrelated to this change,
     left as it is for the owner (replay: `perl fuzz/pipeline/gen.pl
     690590262 50 fuzz/validator/corpus <dir>`, body 00030.zig).
+32. **§12 item 14, step 1: `OUT`/`INOUT` parameters and composite results
+    (2026-11-15).** SDK ABI version 5 (part of the cache key: every module
+    is recompiled once; the loader fuzz seeds were regenerated). No new
+    host import, no new GUC. Design (`doc/abi.md`, *Rows*):
+    - *Structs for composite types, arguments included.* A named composite
+      type (a table's row type, `CREATE TYPE ... AS (...)`) is a generated
+      struct both as argument and as result -- one optional field per live
+      attribute, `?T` with the SPI column mapping (nested composites,
+      arrays of composites and domains over composite types stay text) --
+      so that `return p;` of an argument works and the same machinery
+      serves the rows of set-returning functions and triggers. §12 item 12
+      had kept composites as text; that remains true for SPI columns and
+      parameters. *Changed behaviour*: a body that returned a composite as
+      text (`"(1,x)"`) no longer compiles; `test/sql/types.sql`'s `t_comp`
+      was rewritten to the struct form (same output), `types_more.sql`'s
+      `tm_badcomp` now fails at compile time instead of in `record_in` (its
+      expected output changed), and the rejection tests of `OUT`/`INOUT`
+      signatures in `types.sql` and `signatures.sql` now show compile errors
+      of their (`return;`) bodies.
+    - *Output parameters.* Two or more outputs (or any in a procedure) make
+      the generated struct `Result`; one output in a function is its type,
+      as PostgreSQL defines the result type. A procedure returns `Result`
+      non-optionally (PostgreSQL refuses a NULL output row). `INOUT`
+      parameters are also inputs; `argN` counts inputs only; unnamed
+      outputs are `columnN` as PostgreSQL names them. `Result` is refused
+      as a parameter name in functions returning a row.
+    - *Field names* are emitted as `@"name"` into the generated source, so
+      only `[A-Za-z_][A-Za-z0-9_]*` (≤ 63 bytes) and unique names are
+      allowed; a composite type with other attribute names cannot be an
+      argument or result type of a PL/Zig function (refused at `CREATE
+      FUNCTION`, and at the rebuild after an `ALTER TYPE`). Escaping
+      arbitrary names into the source was possible but would put
+      user-chosen bytes into generated code; the restriction is the safer
+      choice (security over functionality). Output parameters can collide
+      with PostgreSQL's names for unnamed ones (`OUT int, OUT column1 int`):
+      refused as a duplicate.
+    - *The host builds every row* (`src/plzig_row.c`): exact field count,
+      each value's NULL flag and kind checked against the attribute (kinds
+      7/8/9 interchangeable: the attribute's type decides how the bytes
+      are read), values checked like prepared-statement parameters or by
+      the type's input function, NULLs of domains through the domain's
+      input function, `heap_form_tuple` with the type's own descriptor.
+      *Typmods are applied* to row fields (input function with the
+      attribute's typmod; the length coercion function for `time(p)`,
+      `timestamp(p)`, `interval` fields, `numeric(p,s)`), unlike scalar
+      results (Deviation 29: `pg_proc` keeps no typmod for those, but a
+      composite type's attributes do, and a trigger's row will need it).
+    - *Stale row types are not trusted.* The function keeps the type
+      cache's `tupDesc_identifier` of every composite type it was generated
+      for; at every call a changed identifier (then a changed descriptor:
+      `equalTupleDescs`) rebuilds the function from the current type before
+      it runs (the body may then fail to compile, with the compiler's
+      message), and a type changed during the call (DDL through SPI) makes
+      the row result an error. `record` results come from `pg_proc`, whose
+      change replaces the function anyway.
+    - *Composite arguments* are converted by the host like typed SPI rows
+      (live attributes only) into a buffer of the call's context -- not of
+      the function: `plzig_alloc_args` runs guest code that could recurse
+      into the same function before the arguments are written, and a shared
+      buffer would let the recursive call change the row (and its size)
+      between sizing and writing. The encoder re-checks the size anyway.
+    - *Tests*: `test/sql/rows.sql` (new: outputs, procedures, NULL rows and
+      fields, every native type as a field, typmods, domains, input
+      functions, field names, dropped attributes, row types changed before
+      and during a call, 500 fields), SDK unit tests for the row encoding,
+      20 forged row results in `docker/security-checks.sh` (through a new
+      `hostileCall` hook of `docker/fake/hostilezig.c` that replaces
+      `plzig_call`), fuzz target `hostabi` (a second driver function
+      returning a row forged from the script), `marshal` (output parameters
+      in random signatures; its acceptance rules follow the new ones), the
+      loader harness (new call interface, stand-ins for the row functions).

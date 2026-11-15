@@ -128,6 +128,8 @@ plzig_zig_type_name(PlzigTypeKind kind, bool for_result)
 		case PLZIG_T_BYTEA:
 		case PLZIG_T_IO:
 			return "[]const u8";
+		case PLZIG_T_ROW:
+			break;				/* generated per type, see plzig_source.c */
 	}
 	return NULL;				/* keep compiler quiet */
 }
@@ -160,6 +162,55 @@ plzig_type_info_init(PlzigTypeInfo *ti, Oid typid, bool for_result,
 		getTypeOutputInfo(typid, &outfunc, &isvarlena);
 		fmgr_info_cxt(outfunc, &ti->out_func, mcxt);
 	}
+}
+
+/*
+ * Is typid a named composite type (a table's row type or CREATE TYPE ... AS
+ * (...))?  Such arguments and results are structs.  RECORD (a pseudo-type)
+ * and domains over composite types are not: a domain stays a text-I/O type,
+ * so that its constraints are checked by domain_in.
+ */
+bool
+plzig_type_is_row(Oid typid)
+{
+	return typid != RECORDOID && get_typtype(typid) == TYPTYPE_COMPOSITE;
+}
+
+/*
+ * Can name be a field of a generated struct?  The same characters as a
+ * parameter name ([A-Za-z_][A-Za-z0-9_]*, at most NAMEDATALEN): it is
+ * emitted as @"name" into the generated source, which must never need
+ * escaping (doc/abi.md, "Generated user.zig").  Unlike parameters, fields
+ * cannot shadow anything, so plzig, std and call are fine.
+ */
+bool
+plzig_field_name_ok(const char *name)
+{
+	const char *p;
+
+	if (name == NULL || name[0] == '\0')
+		return false;
+	if (!((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z') ||
+		  name[0] == '_'))
+		return false;
+	for (p = name + 1; *p; p++)
+		if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+			  (*p >= '0' && *p <= '9') || *p == '_'))
+			return false;
+	return (p - name) <= NAMEDATALEN;
+}
+
+/*
+ * The Zig type of a struct field of value kind `kind` (plzig_value_kind):
+ * the same mapping as for SPI result columns.  jsonb is read in place as an
+ * argument and passed back as JSON text.
+ */
+const char *
+plzig_field_zig_type(uint16 kind, bool for_result)
+{
+	if (kind == PLZIG_KIND_OTHER)
+		return "[]const u8";
+	return plzig_zig_type_name(plzig_kind_type(kind), for_result);
 }
 
 /*
@@ -211,6 +262,7 @@ plzig_value_kind(Oid typid)
 			return PLZIG_KIND_JSONB;
 		case PLZIG_T_VOID:
 		case PLZIG_T_IO:
+		case PLZIG_T_ROW:
 			break;
 	}
 	return PLZIG_KIND_OTHER;
