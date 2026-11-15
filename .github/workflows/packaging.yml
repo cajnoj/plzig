@@ -1,0 +1,77 @@
+# PL/Zig packages: the full matrix of packaging/test-matrix.sh, one job per
+# target distribution (builds release 0 and release 1 of every package for
+# every PostgreSQL major PGDG provides there, offline, then the
+# installed-package test of each major, including the upgrade from release 0).
+# Started manually only: it takes an hour or more per distribution.  ci.yml
+# runs one RPM and one Debian package on every push.
+#
+# GitHub-hosted runners only (owner's decision).  x86_64 only: the scripts
+# take the architecture from the runner, and aarch64 has not been run.
+# Nothing is published: packages and logs are uploaded as workflow
+# artifacts of the run.
+#
+# The compiler sandbox's default (plzig.compiler_sandbox = require) needs
+# Landlock ABI >= 6 (Linux 6.12) and seccomp on the runner's kernel; the
+# package tests do not weaken it, so they fail on an older runner kernel.
+name: Packages (full matrix)
+
+on:
+  workflow_dispatch:
+    inputs:
+      distros:
+        description: "Distributions, space-separated (default: all of packaging/distros.sh)"
+        required: false
+        default: "el8 el9 el10 fedora45 debian12 debian13 ubuntu22.04 ubuntu24.04 ubuntu26.04"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packaging-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  distros:
+    name: Select distributions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      list: ${{ steps.sel.outputs.list }}
+    steps:
+      - id: sel
+        env:
+          WANT: ${{ github.event.inputs.distros }}
+        run: |
+          list=$(echo "$WANT" | tr -s ' ' '\n' | grep -xE 'el8|el9|el10|fedora45|debian12|debian13|ubuntu22\.04|ubuntu24\.04|ubuntu26\.04' |
+                 python3 -c 'import json, sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+
+  matrix:
+    name: ${{ matrix.distro }}
+    needs: distros
+    if: needs.distros.outputs.list != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: ${{ fromJSON(needs.distros.outputs.list) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build and test every PostgreSQL major
+        env:
+          PLZIG_JOBS: "3"
+        run: packaging/test-matrix.sh "${{ matrix.distro }}"
+
+      - name: Upload packages and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: packages-${{ matrix.distro }}
+          path: |
+            build/package-tests/
+            build/packages/
+          if-no-files-found: ignore

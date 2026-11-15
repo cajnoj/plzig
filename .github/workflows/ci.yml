@@ -78,6 +78,48 @@ jobs:
           path: build/test-logs/
           if-no-files-found: ignore
 
+  # One RPM and one Debian package build (offline: the build container has
+  # no network) and the installed-package test for one PostgreSQL major
+  # each.  The full distribution x major matrix is packaging.yml (manual).
+  packages:
+    name: Packages (${{ matrix.distro }}, PostgreSQL ${{ matrix.pg }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: el9
+            pg: "17"
+          - distro: debian13
+            pg: "18"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build the packages (PostgreSQL ${{ matrix.pg }} only)
+        env:
+          PLZIG_MAJORS: ${{ matrix.pg }}
+        run: packaging/build-packages.sh "${{ matrix.distro }}"
+
+      - name: Install and test the packages
+        env:
+          PLZIG_PREV_DIR: ""
+        run: packaging/test-packages.sh "${{ matrix.distro }}" "${{ matrix.pg }}"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: packages-${{ matrix.distro }}-${{ matrix.pg }}
+          path: |
+            build/package-tests/
+            build/packages/*/r1/build.log
+            build/packages/*/r1/rpmlint.txt
+            build/packages/*/r1/lintian.txt
+          if-no-files-found: ignore
+
   fuzz-smoke:
     name: Fuzz smoke (every target, 60 s)
     runs-on: ubuntu-24.04
