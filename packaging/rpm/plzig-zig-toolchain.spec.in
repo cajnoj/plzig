@@ -1,0 +1,75 @@
+# plzig-zig-toolchain: the Zig compiler for PL/Zig, as a version-locked,
+# PostgreSQL-independent package (doc/packaging.md).  Generated from
+# packaging/rpm/plzig-zig-toolchain.spec.in by packaging/rpm/gen-specs.sh;
+# the version and checksums come from the Makefile (ZIG_VERSION, ZIG_SHA256_*).
+#
+# The official ziglang.org build is repackaged: the compiler binary unchanged
+# (statically linked, which the default Landlock sandbox of PL/Zig requires),
+# lib/ pruned to the MIT-licensed parts PL/Zig needs (NOTICE).
+
+%global zig_dir %{_libexecdir}/plzig-zig-toolchain/%{version}
+%global zig_sha256_x86_64 @ZIG_SHA256_x86_64@
+%global zig_sha256_aarch64 @ZIG_SHA256_aarch64@
+
+# Ship the upstream files byte for byte: no stripping, no debuginfo, no
+# build-id links, no shebang mangling or other brp post-processing.
+%global debug_package %{nil}
+%global _build_id_links none
+%global __os_install_post %{nil}
+%global __requires_exclude_from ^%{zig_dir}/lib/.*$
+%global __provides_exclude_from ^%{zig_dir}/.*$
+
+Name:           plzig-zig-toolchain
+Version:        @ZIG_VERSION@
+Release:        @TC_RELEASE@%{?dist}
+Summary:        Zig %{version} compiler for PL/Zig (official build, pruned)
+License:        MIT AND Apache-2.0 WITH LLVM-exception AND NCSA AND Zlib AND BSD-3-Clause
+URL:            https://ziglang.org/
+Source0:        https://ziglang.org/download/%{version}/zig-x86_64-linux-%{version}.tar.xz
+Source1:        https://ziglang.org/download/%{version}/zig-aarch64-linux-%{version}.tar.xz
+Source10:       NOTICE
+Source11:       install-pruned.sh
+Source12:       LLVM-LICENSE.TXT
+Source13:       zlib-LICENSE.txt
+Source14:       zstd-LICENSE.txt
+Source15:       musl-COPYRIGHT.txt
+ExclusiveArch:  x86_64 aarch64
+
+%description
+The official Zig %{version} compiler (ziglang.org, SHA-256 pinned by
+PL/Zig), for the PL/Zig procedural language of PostgreSQL. It is installed
+in a private directory below /usr/libexec, not on the PATH; the
+plzig_<major> packages use it as their default plzig.zig_path. The compiler
+binary is unchanged; lib/ holds only the parts PL/Zig needs (Zig's standard
+library, compiler runtime and test runner; no C/C++ library sources or
+headers).
+
+%prep
+%setup -q -c -T
+case %{_arch} in
+    x86_64)  tb=%{SOURCE0}; sum=%{zig_sha256_x86_64} ;;
+    aarch64) tb=%{SOURCE1}; sum=%{zig_sha256_aarch64} ;;
+    *) echo "unsupported architecture %{_arch}" >&2; exit 1 ;;
+esac
+echo "$sum  $tb" | sha256sum -c -
+tar -xJf "$tb" --no-same-owner
+cp -p %{SOURCE10} %{SOURCE12} %{SOURCE13} %{SOURCE14} %{SOURCE15} .
+cp -p zig-%{_arch}-linux-%{version}/LICENSE LICENSE
+
+%build
+# nothing to build: the compiler is the official binary
+
+%install
+sh %{SOURCE11} zig-%{_arch}-linux-%{version} %{buildroot}%{zig_dir}
+
+%check
+test "$(%{buildroot}%{zig_dir}/zig version)" = "%{version}"
+
+%files
+%license LICENSE NOTICE LLVM-LICENSE.TXT zlib-LICENSE.txt zstd-LICENSE.txt musl-COPYRIGHT.txt
+%dir %{_libexecdir}/plzig-zig-toolchain
+%{zig_dir}
+
+%changelog
+* @CHANGELOG_DATE@ PL/Zig maintainers <plzig@invalid> - @ZIG_VERSION@-@TC_RELEASE@
+- Zig @ZIG_VERSION@ for PL/Zig @PLZIG_VERSION@ (generated, not a release)

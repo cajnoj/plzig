@@ -1,0 +1,92 @@
+# PL/Zig for PGDG PostgreSQL, one package per major: plzig_<major>
+# (PGDG's naming).  Generated from packaging/rpm/plzig.spec.in by
+# packaging/rpm/gen-specs.sh (versions from the Makefile); build with
+#   rpmbuild -ba --define 'pgmajorversion 17' plzig.spec
+# See doc/packaging.md.
+
+%{!?pgmajorversion:%{error:pgmajorversion must be defined (14 ... 19)}}
+%global sname plzig
+%global pginstdir /usr/pgsql-%{pgmajorversion}
+%global zig_version @ZIG_VERSION@
+%global zig_path %{_libexecdir}/plzig-zig-toolchain/%{zig_version}/zig
+%global wamr_version 2.4.5
+
+# plzig-validate is a static PIE built (and stripped) by Zig; no debuginfo
+# for it.  plzig.so gets the usual debuginfo subpackage.
+%global _missing_build_ids_terminate_build 0
+
+Name:           %{sname}_%{pgmajorversion}
+Version:        @RPM_VERSION@
+Release:        @RPM_RELEASE@%{?dist}
+Summary:        PL/Zig procedural language for PostgreSQL %{pgmajorversion}
+# plzig.so: PL/Zig (PostgreSQL) + WAMR (Apache-2.0 WITH LLVM-exception);
+# plzig-validate: PL/Zig + Zig standard library (MIT); THIRD-PARTY-NOTICES
+License:        PostgreSQL AND Apache-2.0 WITH LLVM-exception AND MIT
+# URL: set when the public repository exists (PLAN.md section 13 F)
+Source0:        plzig-@DIST_VERSION@.tar.gz
+# https://github.com/bytecodealliance/wasm-micro-runtime/archive/refs/tags/WAMR-%%{wamr_version}.tar.gz
+# (SHA-256 pinned in the Makefile, WAMR_TARBALL_SHA256, and checked by the build)
+Source1:        WAMR-%{wamr_version}.tar.gz
+
+BuildRequires:  postgresql%{pgmajorversion}-devel
+BuildRequires:  plzig-zig-toolchain = %{zig_version}
+BuildRequires:  gcc make cmake patch tar gzip
+Requires:       postgresql%{pgmajorversion}-server
+Requires:       plzig-zig-toolchain = %{zig_version}
+# WAMR (classic interpreter only) is statically linked, with PL/Zig's
+# interrupt patch (third_party/wamr-interrupt.patch)
+Provides:       bundled(wamr) = %{wamr_version}
+ExclusiveArch:  x86_64 aarch64
+
+%description
+PL/Zig lets PostgreSQL functions, procedures, triggers and DO blocks be
+written in Zig %{zig_version}. Function bodies are compiled by the Zig
+compiler (package plzig-zig-toolchain, the default plzig.zig_path) to
+WebAssembly and run in an embedded interpreter (WAMR) inside the backend.
+
+The compiler runs in a sandbox. Its default mode,
+plzig.compiler_sandbox = require, needs Landlock ABI 6 or later (Linux 6.12
+or newer) and seccomp. On older kernels (the stock kernels of EL 8 and EL 9,
+for example) CREATE FUNCTION ... LANGUAGE plzig refuses to compile until an
+administrator lowers plzig.compiler_sandbox in postgresql.conf, which runs
+the compiler with fewer restrictions (see the README's security model).
+
+USAGE on the language is not granted to PUBLIC.
+
+%prep
+%setup -q -n plzig-@DIST_VERSION@
+
+%build
+%set_build_flags
+# PGXS takes PostgreSQL's own CFLAGS (the distribution's hardening flags);
+# COPT and PG_LDFLAGS add this build's, cmake (WAMR) reads them from the
+# environment set above.  rpath= : plzig.so links nothing from PostgreSQL's
+# lib directory, so PGXS's RUNPATH to it would only trip check-rpaths.
+%{__make} %{?_smp_mflags} PG_CONFIG=%{pginstdir}/bin/pg_config \
+    ZIG=%{zig_path} WAMR_TARBALL=%{SOURCE1} PLZIG_DEFAULT_ZIG_PATH=%{zig_path} \
+    COPT="$CFLAGS" PG_LDFLAGS="$LDFLAGS" rpath=
+
+%install
+%{__make} install DESTDIR=%{buildroot} PG_CONFIG=%{pginstdir}/bin/pg_config \
+    ZIG=%{zig_path} WAMR_TARBALL=%{SOURCE1} PLZIG_DEFAULT_ZIG_PATH=%{zig_path} \
+    COPT="$CFLAGS" PG_LDFLAGS="$LDFLAGS" rpath=
+# the license files are shipped with %%license instead
+rm -r %{buildroot}%{pginstdir}/doc/extension/plzig
+
+%check
+# unit tests of the source validator and the guest SDK (no server needed)
+%{__make} check-zig PG_CONFIG=%{pginstdir}/bin/pg_config ZIG=%{zig_path}
+
+%files
+%license LICENSE THIRD-PARTY-NOTICES LICENSES/Apache-2.0-WITH-LLVM-exception.txt LICENSES/MIT-Zig.txt
+%doc README.md doc/packaging.md doc/security.md doc/abi.md
+%{pginstdir}/lib/plzig.so
+%dir %{pginstdir}/lib/plzig
+%{pginstdir}/lib/plzig/plzig-validate
+%{pginstdir}/share/extension/plzig.control
+%{pginstdir}/share/extension/plzig--*.sql
+%{pginstdir}/share/plzig
+
+%changelog
+* @CHANGELOG_DATE@ PL/Zig maintainers <plzig@invalid> - @RPM_VERSION@-@RPM_RELEASE@
+- PL/Zig @PLZIG_VERSION@ (source @DIST_VERSION@; generated, not a release)

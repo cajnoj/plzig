@@ -1,0 +1,31 @@
+# rpmlint 2 filters for the PL/Zig RPMs (packaging/rpm/build.sh).  Every
+# entry says why the finding is expected.  no-url-tag is deliberately not
+# filtered: the URL is added when the public repository exists (phase F).
+
+# A PostgreSQL extension module is loaded by the server with dlopen(); it
+# has no SONAME (PGXS links every module that way).
+addFilter(r"plzig_\d+\.\S+: W: no-soname /usr/pgsql-\d+/lib/plzig\.so")
+
+# plzig-validate must be statically linked: the backend runs it under
+# Landlock, whose file rules give it no dynamic loader or shared libraries
+# (PLAN.md Deviation 19); it is a static PIE.
+addFilter(r"plzig_\d+\.\S+: E: statically-linked-binary /usr/pgsql-\d+/lib/plzig/plzig-validate")
+
+# The Sources are local files of the build (made by make dist, verified
+# against the Makefile's SHA-256); their upstream URLs are in comments.
+addFilter(r"W: invalid-url Source\d+: (plzig-|WAMR-)")
+
+# Technical terms in the descriptions, not misspellings.
+addFilter(r"spelling-error .*'(toolchain|seccomp|postgresql|conf|ziglang|usr|libexec|plzig|Landlock|WebAssembly|WAMR)'")
+
+# plzig-zig-toolchain ships the official Zig build unchanged (NOTICE): the
+# compiler binary as built upstream (statically linked, not PIE; a rebuild
+# would change its checksum and is not what the package is for), and
+# upstream's lib/ files as they are -- including empty test files and the
+# headers of Zig's bundled C front end (aro), which belong to the compiler,
+# not to a -devel package.  Its documentation is the license files.
+addFilter(r"plzig-zig-toolchain\.\S+: W: position-independent-executable-suggested /usr/libexec/plzig-zig-toolchain/")
+addFilter(r"plzig-zig-toolchain\.\S+: E: statically-linked-binary /usr/libexec/plzig-zig-toolchain/")
+addFilter(r"plzig-zig-toolchain\.\S+: E: zero-length /usr/libexec/plzig-zig-toolchain/")
+addFilter(r"plzig-zig-toolchain\.\S+: W: devel-file-in-non-devel-package /usr/libexec/plzig-zig-toolchain/")
+addFilter(r"plzig-zig-toolchain\.\S+: W: no-documentation")

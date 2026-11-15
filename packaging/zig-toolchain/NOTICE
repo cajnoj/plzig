@@ -1,0 +1,50 @@
+plzig-zig-toolchain: notices
+============================
+
+This package contains the official Zig compiler release built by the Zig
+Software Foundation (https://ziglang.org/download/), version and SHA-256
+pinned by PL/Zig, repackaged for PL/Zig: the compiler binary unchanged, and
+a pruned copy of its lib/ directory (lib/std, lib/compiler_rt, lib/compiler,
+lib/c and the top-level files of lib/, unchanged). Everything else of the
+upstream tarball is left out, in particular the C/C++ library sources and
+headers in lib/libc, lib/include, lib/libcxx, lib/libcxxabi, lib/libunwind
+and lib/libtsan, which carry other licenses (LGPL, GPL with the Linux
+syscall note, APSL, ...) and are not needed by PL/Zig.
+
+It is installed in a private directory and is meant only for PL/Zig
+(plzig.zig_path); it does not put `zig` on the PATH.
+
+PL/Zig is an independent project, not affiliated with or endorsed by the
+Zig Software Foundation.
+
+
+Zig (compiler, standard library, compiler runtime)
+--------------------------------------------------
+License: MIT (Expat). Copyright (c) Zig contributors.
+Text: LICENSE (from the upstream tarball).
+Some files of lib/std and lib/compiler_rt are ported from musl (MIT, see
+licenses/musl-COPYRIGHT.txt).
+
+
+Components statically linked into the zig binary
+------------------------------------------------
+The official Linux builds are statically linked. Identified from the
+binary and from the zig-bootstrap project's component list:
+
+* LLVM, Clang, LLD and LLVM's libc++, libc++abi and libunwind
+  (the binary reports clang version 22.1.8).
+  License: Apache-2.0 WITH LLVM-exception; parts under the legacy LLVM
+  license (University of Illinois/NCSA).
+  Text: licenses/LLVM-LICENSE.TXT (llvm/LICENSE.TXT of llvmorg-22.1.8).
+
+* zlib 1.3.1. License: Zlib. Text: licenses/zlib-LICENSE.txt.
+
+* Zstandard (zstd). License: BSD-3-Clause (zstd is dual-licensed
+  BSD-3-Clause OR GPL-2.0-only; distributed here under BSD-3-Clause).
+  Text: licenses/zstd-LICENSE.txt.
+
+* musl libc (static C library of the binary). License: MIT.
+  Text: licenses/musl-COPYRIGHT.txt.
+
+Package license expression (SPDX):
+  MIT AND Apache-2.0 WITH LLVM-exception AND NCSA AND Zlib AND BSD-3-Clause
