@@ -223,6 +223,13 @@ _PG_init(void)
 							PGC_SUSET,
 							0,
 							NULL, NULL, NULL);
+	/*
+	 * Transaction ends invalidate the SPI results and cursors of running
+	 * calls (a procedure's own commit()/rollback() closes them first; this
+	 * guards against any other way a transaction could end under a call).
+	 */
+	RegisterXactCallback(plzig_host_xact_callback, NULL);
+
 #if PG_VERSION_NUM >= 150000
 	MarkGUCPrefixReserved("plzig");
 #else
@@ -546,6 +553,15 @@ plzig_function_execute(PlzigFunction *fn, FunctionCallInfo fcinfo)
 		spec.retrow = fn->retrow;
 		spec.retset = fn->retset;
 		spec.rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+		/*
+		 * Transaction control only where PostgreSQL allows it: a procedure
+		 * called non-atomically (CALL outside a transaction block, not below
+		 * a function; PostgreSQL also makes SECURITY DEFINER procedures and
+		 * those with SET clauses atomic).  Everywhere else SPI is connected
+		 * atomically and SPI_commit reports PostgreSQL's own error.
+		 */
+		spec.nonatomic = fcinfo->context && IsA(fcinfo->context, CallContext) &&
+			!castNode(CallContext, fcinfo->context)->atomic;
 		if (fn->is_trigger)
 			spec.trigdata = (TriggerData *) fcinfo->context;
 		spec.read_only = fn->read_only;
@@ -654,6 +670,8 @@ plzig_inline_handler(PG_FUNCTION_ARGS)
 		inst = plzig_instance_create(mod);
 		memset(&spec, 0, sizeof(spec));
 		spec.rettype = &rettype;
+		/* DO outside a transaction block (and not below a function) */
+		spec.nonatomic = !codeblock->atomic;
 		(void) plzig_instance_call(inst, &spec, &isnull);
 	}
 	PG_FINALLY();

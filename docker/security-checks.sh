@@ -345,6 +345,9 @@ CREATE OR REPLACE FUNCTION hostile(what int) RETURNS int STRICT LANGUAGE plzig A
             vals[0] = .{ .val = if (what == 70) bad else plzig.addrOf(t.ptr), .len = if (what == 70) 5 else @intCast(t.len), .kind = 19, .is_null = 0 };
             _ = h.spi_execute_plan(pj.handle, &vals, 1);
         },
+        // transaction control in a function: PostgreSQL's own error
+        74 => h.commit(),
+        75 => h.rollback(),
         else => return 0,
     }
     return 1;
@@ -435,9 +438,11 @@ done <<'CASES'
 71|invalid input syntax for type json
 72|invalid byte sequence for encoding
 73|invalid byte sequence for encoding "UTF8": 0x00
+74|invalid transaction termination
+75|invalid transaction termination
 0|0
 CASES
-if [ "$n" -eq 74 ]; then pass "hostile guest: all 73 forged calls end in a clean ERROR"; fi
+if [ "$n" -eq 76 ]; then pass "hostile guest: all 75 forged calls end in a clean ERROR"; fi
 expect "hostile guest: backend still healthy" "4242" "SELECT 4242;"
 if grep -qE "terminated by signal|server process .* was terminated" /tmp/server.log; then fail "hostile guest: no backend crash in the server log"; else pass "hostile guest: no backend crash in the server log"; fi
 psqlq -c "DROP FUNCTION hostile(int); SELECT plzig_cache_clear();" >/dev/null

@@ -31,7 +31,7 @@ A module is accepted by the loader (`plzig_module_load`) only if
   (checked before WAMR sees the module, see doc/security.md §4.5);
 * WAMR's loader validates it (full validation, classic interpreter);
 * every import is a **function** imported from module **`plzig`**, its name
-  is one of the 22 host functions below, and WAMR linked it (i.e. the
+  is one of the 24 host functions below, and WAMR linked it (i.e. the
   signature matched the registered one) — anything else is rejected;
 * it instantiates under the current `plzig.max_memory`;
 * it exports a linear memory and the four functions below with exactly the
@@ -353,7 +353,7 @@ parentheses). Every import:
   guest memory across anything that could run guest code;
 * validates every handle on every use (*Handles*).
 
-22 imports, the complete list (the loader's allowlist,
+24 imports, the complete list (the loader's allowlist,
 `plzig_known_imports` in `src/plzig_runtime.c`, and the registration table
 in `src/plzig_host.c` must match):
 
@@ -363,7 +363,7 @@ in `src/plzig_host.c` must match):
 | `raise(ptr, len)` | `(ii)` | `ERROR` with SQLSTATE `P0001` and the given message (64 kB max). Does not return to the guest. |
 | `raise_error(code_ptr, code_len, msg_ptr, msg_len, detail_ptr, detail_len, hint_ptr, hint_len)` | `(iiiiiiii)` | `ERROR` (always that severity) with the given SQLSTATE, message, detail and hint. The SQLSTATE is checked first: it must be exactly 5 bytes of `[0-9A-Z]` (at most 16 bytes are read, and shown with non-printable bytes as `?`), else `22023 PL/Zig: invalid SQLSTATE "..."`; classes `00`, `01`, `02`, `08`, `53`, `57`, `58`, `F0`, `XX` are refused with `22023 PL/Zig: SQLSTATE <code> cannot be raised by a PL/Zig function` (never substituted). Message, detail and hint are copied like `raise`'s message (64 kB each, cut on a character boundary, valid in the database encoding, no NUL); then C0 control characters other than newline and tab, and DEL, become `?`. Detail or hint with length 0 are omitted (the pointer is not looked at). Does not return to the guest. |
 | `panic(ptr, len)` | `(ii)` | Zig panic handler (safety-check failures, `@panic`, `unreachable`): `ERROR` `38000` `PL/Zig panic: <msg>` (1 kB max). |
-| `spi_execute(sql_ptr, sql_len, params_ptr, nparams)` | `(iiii)I` | Runs one SQL string with `SPI_execute_with_args`; `params_ptr` points to `nparams` (≤ 65535) slots, each `is_null` or a text value (`val`/`len`); all parameter types are `text` (cast in SQL: `$1::int`). `read_only` is true unless the function is `VOLATILE` (`DO` blocks are volatile). The SPI connection is opened lazily (atomic, so no transaction control) and closed at the end of the call. Returns `SPI_processed` (capped at `INT64_MAX`). Any SQL error aborts the call. The previous result is freed. |
+| `spi_execute(sql_ptr, sql_len, params_ptr, nparams)` | `(iiii)I` | Runs one SQL string with `SPI_execute_with_args`; `params_ptr` points to `nparams` (≤ 65535) slots, each `is_null` or a text value (`val`/`len`); all parameter types are `text` (cast in SQL: `$1::int`). `read_only` is true unless the function is `VOLATILE` (`DO` blocks are volatile). The SPI connection is opened lazily and closed at the end of the call; it is non-atomic only in a procedure called non-atomically and in a `DO` block outside a transaction block (*Transaction control*), atomic everywhere else. Returns `SPI_processed` (capped at `INT64_MAX`). Any SQL error aborts the call. The previous result is freed. |
 | `spi_ncols()` | `()i` | Number of columns of the last result (0 if none). |
 | `spi_value_len(row, col)` | `(ii)i` | Length of the text representation of the 0-based (row, col) of the last result, `-1` for NULL. Out-of-range → `ERROR`. |
 | `spi_value_copy(row, col, buf, buf_len)` | `(iiii)i` | Copy up to `buf_len` bytes of that value into guest memory; returns bytes copied (`-1` for NULL). |
@@ -383,6 +383,9 @@ in `src/plzig_host.c` must match):
 
 | `srf_return_next(values_ptr, n)` | `(ii)` | Append one row to the result of a set-returning call (*Rows*, *Sets*): `n` values at `values_ptr`, `n` = the number of live attributes of the row type (1 for SETOF a scalar type); every value checked as for a row result; `ERROR` in any call that does not return a set. |
 
+| `commit()` | `()` | End the transaction with `SPI_commit` and start a new one (*Transaction control*). |
+| `rollback()` | `()` | The same with `SPI_rollback`. |
+
 Text values of `spi_value_*` are produced with `SPI_getvalue` (type output
 functions); a one-entry cache avoids converting a value twice for `len` +
 `copy`.
@@ -393,6 +396,39 @@ HOLD`), `FETCH`, `MOVE` and `CLOSE` are refused (`0A000`): cursors are
 available only through `spi_cursor_*`, which never outlive the call, and
 SQL must not reach portals the function did not open. (Syntax errors from
 this pre-parse are reported like SPI reports them.)
+
+### Transaction control
+
+`commit()` and `rollback()` (SDK: `plzig.commit()`, `plzig.rollback()`)
+call `SPI_commit` / `SPI_rollback`. SPI is connected with
+`SPI_OPT_NONATOMIC` only for a procedure whose `CallContext` is not atomic
+(`CALL` outside a transaction block and not below a function; PostgreSQL
+also makes `SECURITY DEFINER` procedures and those with `SET` clauses
+atomic) and for a `DO` block whose `InlineCodeBlock` is not atomic;
+everywhere else SPI is atomic and `SPI_commit` raises PostgreSQL's own
+`2D000 invalid transaction termination`. SPI runs `CALL` and `DO`
+statements a function executes atomically, so the only transaction end
+during a call is its own `commit()`/`rollback()`.
+
+Before the transaction ends, the host closes every cursor of the call
+(unpins and closes its portal: no portal of ours is ever held over a
+commit) and frees the last SPI result (its tuples may carry TOAST pointers
+that must not be followed in the next transaction). The cursor handles
+stay in the table, marked closed: fetching is `24000 the cursor was closed
+by the end of its transaction`, closing is accepted. Prepared statements
+survive (saved plans). The host keeps nothing for the call in a
+transaction's memory context or resource owner: the call contexts belong
+to the instance (children of `PL/Zig runtime`, under `TopMemoryContext`),
+the SPI connection's contexts are portal-lifetime in non-atomic mode, and
+a stashed error is copied into the caller's context (the portal's, for
+`CALL` and `DO`). An error during the commit is stashed like any error
+(`SPI_commit` has already aborted the failed transaction and started a new
+one): the call fails and the instance is destroyed. As a second line of
+defence, every transaction end increments a counter
+(`plzig_host_xact_callback`, registered in `_PG_init`); a cursor or an SPI
+result from an earlier transaction is never used (closed, or dropped as if
+there were no result). A procedure's output row is built from guest values
+after the last commit, never from pointers into an ended transaction.
 
 ### Kinds
 
@@ -496,7 +532,7 @@ name crosses the boundary.
   with the number of rows or executions.
 
 There are deliberately no imports for the clock, randomness, environment,
-files, network, threads, memory management or transaction control
+files, network, threads or memory management
 (`tz_convert` converts a timestamp the guest already has; it does not read
 the clock); guest memory
 grows only through the `memory.grow` instruction, bounded by
@@ -570,6 +606,7 @@ grows only through the `memory.grow` instruction, bounded by
 * Rows (*Rows*): `plzig.rowFieldCount(T)`, `rowFixedCount(T)`,
   `encodeRow(T, row, values, fixed)`, `decodeRow(T, values)`, `isRowType(T)`
   — used by the SDK root for composite arguments and results.
+* `plzig.commit()`, `plzig.rollback()` (*Transaction control*).
 * `plzig.returnNext(T, ?T)`: `srf_return_next` with the row encoded into a
   static buffer per row type (the generated `returnNext` calls it).
 * Triggers (*Triggers*): `plzig.Trigger` (`when`, `forEachRow`, `op`,

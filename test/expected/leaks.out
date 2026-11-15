@@ -209,6 +209,64 @@ SELECT lk_mem() - :m0 AS growth_rowarg;
              0
 (1 row)
 
+-- sets (a tuplestore per call), triggers (NEW in, a modified row out), and
+-- a procedure that commits (called by a PL/pgSQL loop: non-atomic CALLs)
+CREATE FUNCTION lk_srf(n int) RETURNS SETOF int STRICT LANGUAGE plzig AS $$
+    for (0..@intCast(n)) |k| returnNext(@intCast(k));
+$$;
+CREATE TABLE lk_trg_t (a int, b text);
+CREATE FUNCTION lk_trgf() RETURNS trigger LANGUAGE plzig AS $$
+    const r = (try tg.new(struct { a: ?i32 })).?;
+    return try tg.modify(.{ .b = if (@mod(r.a orelse 0, 2) == 0) "even" else "odd" });
+$$;
+CREATE TRIGGER lk_trg BEFORE INSERT ON lk_trg_t FOR EACH ROW EXECUTE FUNCTION lk_trgf();
+CREATE TABLE lk_proc_t (n int);
+CREATE PROCEDURE lk_proc(n int) LANGUAGE plzig AS $$
+    var c = try plzig.spi.open("SELECT 1", &.{});
+    _ = try c.next();
+    var buf: [16]u8 = undefined;
+    _ = try plzig.spi.execute("INSERT INTO lk_proc_t VALUES ($1::int)", &.{try std.fmt.bufPrint(&buf, "{d}", .{n.?})});
+    plzig.commit();
+    _ = try plzig.spi.execute("DELETE FROM lk_proc_t", &.{});
+    plzig.commit();
+$$;
+SELECT sum(x) FROM generate_series(1, 200) g, lk_srf(10) x;
+ sum  
+------
+ 9000
+(1 row)
+
+INSERT INTO lk_trg_t SELECT g FROM generate_series(1, 200) g;
+DO $$ BEGIN FOR i IN 1..100 LOOP CALL lk_proc(i); END LOOP; END $$;
+SELECT lk_mem() AS m0 \gset
+SELECT sum(x) FROM generate_series(1, 10000) g, lk_srf(10) x;
+  sum   
+--------
+ 450000
+(1 row)
+
+SELECT lk_mem() - :m0 AS growth_srf;
+ growth_srf 
+------------
+          0
+(1 row)
+
+SELECT lk_mem() AS m0 \gset
+INSERT INTO lk_trg_t SELECT g FROM generate_series(1, 10000) g;
+SELECT lk_mem() - :m0 AS growth_trigger, count(*) FILTER (WHERE b = 'even') AS even FROM lk_trg_t;
+ growth_trigger | even 
+----------------+------
+              0 | 5100
+(1 row)
+
+SELECT lk_mem() AS m0 \gset
+DO $$ BEGIN FOR i IN 1..2000 LOOP CALL lk_proc(i); END LOOP; END $$;
+SELECT lk_mem() - :m0 AS growth_proc, count(*) AS left_over FROM lk_proc_t;
+ growth_proc | left_over 
+-------------+-----------
+           0 |         0
+(1 row)
+
 -- a jsonb argument that is compressed and stored out of line, read 2000 times
 CREATE TABLE lk_jdoc AS SELECT jsonb_build_object('k', repeat('x', 100000), 'pad', (SELECT jsonb_agg(g) FROM generate_series(1, 5000) g)) AS j;
 SELECT sum(lk_jsonb_arg(j)) FROM lk_jdoc;

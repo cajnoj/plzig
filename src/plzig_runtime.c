@@ -310,7 +310,7 @@ static const char *const plzig_known_imports[] = {
 	"spi_row_size", "spi_row_read", "spi_prepare", "spi_plan_free",
 	"spi_execute_plan", "spi_cursor_open", "spi_cursor_open_plan",
 	"spi_cursor_fetch", "spi_cursor_close", "numeric_op", "tz_convert",
-	"srf_return_next", NULL
+	"srf_return_next", "commit", "rollback", NULL
 };
 
 static bool
@@ -1070,6 +1070,7 @@ plzig_instance_call(PlzigInstance *pi, const PlzigCallSpec *spec, bool *isnull)
 	ctx.errcxt = oldcxt;
 	ctx.read_only = spec->read_only;
 	ctx.trigdata = spec->trigdata;
+	ctx.nonatomic = spec->nonatomic;
 	ctx.cached_row = -1;
 	ctx.cached_col = -1;
 	ctx.cached_name_col = -1;

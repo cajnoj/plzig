@@ -7,7 +7,8 @@
 # numbers, handles, kinds and values, memory growth and nested calls, and
 # then returns a result forged from the script (an int, or a row), or the
 # rows the script pushed (a set-returning variant), or a forged trigger
-# result (a trigger variant, the script coming in NEW).
+# result (a trigger variant, the script coming in NEW); a procedure variant
+# is called by top-level CALLs, where commit and rollback take effect.
 # Batches of random scripts (from setseed, so a batch can be replayed) run
 # in PL/pgSQL loops, one subtransaction per call, as an unprivileged role.
 # Oracles (fuzz/common/sql-lib.sh, fz_check): no backend crash, no
@@ -69,6 +70,11 @@ fz_reload
     echo '$fzdriver$;'
     echo 'CREATE TRIGGER fuzz_hostabi_tt_b BEFORE INSERT OR UPDATE OR DELETE ON fuzz_hostabi_tt FOR EACH ROW EXECUTE FUNCTION fuzz_hostabi_trg();'
     echo 'CREATE TRIGGER fuzz_hostabi_tt_a AFTER INSERT ON fuzz_hostabi_tt FOR EACH ROW EXECUTE FUNCTION fuzz_hostabi_trg();'
+    # ... and as a procedure, called by top-level CALLs: commit and rollback are allowed
+    echo 'CREATE OR REPLACE PROCEDURE fuzz_hostabi_proc(script bytea) LANGUAGE plzig AS $fzdriver$'
+    cat "$here/driver.zig"
+    echo '$fzdriver$;'
+    echo 'GRANT EXECUTE ON PROCEDURE fuzz_hostabi_proc(bytea) TO fuzz_hostabi_user;'
 } >/tmp/fuzz-hostabi-create.sql
 out=$(fz_psql -f /tmp/fuzz-hostabi-create.sql)
 fz_set_conf compiler_sandbox ""
@@ -165,6 +171,34 @@ SQL
         fz_finding "PL/Zig memory contexts hold $mem bytes after batch $seed" "replay: PLZIG_FUZZ_SEED=$seed"
     fi
     fz_check "hostabi batch $seed"
+
+    # 40 top-level CALLs of the procedure (non-atomic: commit/rollback in
+    # the script take effect, with cursors and results open), one statement
+    # each, as the unprivileged role; outcomes by SQLSTATE
+    fz_psql -v seed="$seed" >/tmp/fuzz-hostabi-calls.sql <<'SQL'
+SELECT setseed(:seed::float8 / 2147483648 - floor(:seed::float8 / 2147483648));
+SELECT format('CALL fuzz_hostabi_proc(''\x%s''::bytea);',
+              (SELECT string_agg(lpad(to_hex(least(255, floor(random() * 256)::int)), 2, '0'), '')
+                 FROM generate_series(1, 1 + floor(random() * 400)::int + 0 * g)))
+  FROM generate_series(1, 40) g;
+SQL
+    out=$( { echo 'SET ROLE fuzz_hostabi_user;'; echo 'SET statement_timeout = '"'"'60s'"'"';'
+             grep '^CALL ' /tmp/fuzz-hostabi-calls.sql; echo 'SELECT 4243;'; } |
+           psql -X -q -At -v ON_ERROR_STOP=0 -v VERBOSITY=sqlstate 2>&1)
+    ncalls=$(grep -c '^CALL ' /tmp/fuzz-hostabi-calls.sql)
+    nerr=$(grep -cE '^ERROR:  [0-9A-Z]{5}$' <<<"$out")
+    calls=$((calls + ncalls))
+    states[CALL-ok]=$(( ${states[CALL-ok]:-0} + ncalls - nerr ))
+    while read -r c st; do
+        [ -n "$st" ] && states[CALL-$st]=$(( ${states[CALL-$st]:-0} + c ))
+    done < <(grep -oE '^ERROR:  [0-9A-Z]{5}$' <<<"$out" | awk '{ print $2 }' | sort | uniq -c)
+    if grep -q '^ERROR:  XX000$' <<<"$out"; then
+        fz_finding "internal error (XX000) in the CALLs of batch $seed" "replay: PLZIG_FUZZ_SEED=$seed"
+    fi
+    if ! grep -qx 4243 <<<"$out"; then
+        fz_finding "the session did not survive the CALLs of batch $seed: $(tail -3 <<<"$out")" "replay: PLZIG_FUZZ_SEED=$seed"
+    fi
+    fz_check "hostabi CALLs of batch $seed"
 done
 
 # the most frequent error messages (digits replaced by N)
@@ -175,8 +209,8 @@ if [ -s "$fz_out/messages.jsonl" ]; then
     fz_note "most frequent errors:"
     sed 's/^/    /' "$fz_out/messages-top.txt" | head -15 | tee -a "$fz_log"
 fi
-summary="$calls calls in $batches batches of 300 random scripts, seeds $fz_seed..$((fz_seed + batches - 1)); outcomes:"
+summary="$calls calls in $batches batches of 300 random scripts and 40 top-level CALLs, seeds $fz_seed..$((fz_seed + batches - 1)); outcomes:"
 for k in $(printf '%s\n' "${!states[@]}" | sort); do summary+=" $k=${states[$k]}"; done
-fz_psql -c "DROP FUNCTION fuzz_hostabi(bytea); DROP FUNCTION fuzz_hostabi_row(bytea); DROP FUNCTION fuzz_hostabi_set(bytea); DROP TABLE fuzz_hostabi_tt; DROP FUNCTION fuzz_hostabi_trg(); DROP TYPE fuzz_hostabi_rt; DROP DOMAIN fuzz_hostabi_pos; DROP TABLE fuzz_hostabi_t, fuzz_hostabi_secret; DROP ROLE fuzz_hostabi_user;" >/dev/null
+fz_psql -c "DROP FUNCTION fuzz_hostabi(bytea); DROP FUNCTION fuzz_hostabi_row(bytea); DROP FUNCTION fuzz_hostabi_set(bytea); DROP TABLE fuzz_hostabi_tt; DROP FUNCTION fuzz_hostabi_trg(); DROP PROCEDURE fuzz_hostabi_proc(bytea); DROP TYPE fuzz_hostabi_rt; DROP DOMAIN fuzz_hostabi_pos; DROP TABLE fuzz_hostabi_t, fuzz_hostabi_secret; DROP ROLE fuzz_hostabi_user;" >/dev/null
 fz_check "hostabi cleanup"
 fz_result hostabi "$summary"

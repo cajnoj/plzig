@@ -88,6 +88,8 @@ const wasm_env = struct {
         extern "plzig" fn tz_convert(op: u32, value: i64, zone_ptr: [*]const u8, zone_len: u32) i64;
         extern "plzig" fn numeric_op(op: u32, a_ptr: [*]const u8, a_len: u32, b_ptr: [*]const u8, b_len: u32, arg: i32, out_ptr: [*]u8, out_cap: u32) i32;
         extern "plzig" fn srf_return_next(values_ptr: [*]const Value, n: u32) void;
+        extern "plzig" fn commit() void;
+        extern "plzig" fn rollback() void;
     };
 };
 
@@ -2840,6 +2842,23 @@ fn textSlots(params: []const ?[]const u8) error{OutOfMemory}![]Slot {
         }
     }
     return slots;
+}
+
+/// Commit the current transaction and start a new one (PL/pgSQL's COMMIT),
+/// in a procedure called with `CALL` outside a transaction block, or in a
+/// `DO` block outside one; anywhere else PostgreSQL's error "invalid
+/// transaction termination" aborts the call.  Every cursor of the call is
+/// closed first (using it afterwards is an error; `close` is still fine)
+/// and the last SPI result is dropped; prepared statements survive.  An
+/// error during the commit (a deferred constraint) aborts the call.
+pub fn commit() void {
+    host.commit();
+}
+
+/// Roll back the current transaction and start a new one (PL/pgSQL's
+/// ROLLBACK); the same rules as `commit`.
+pub fn rollback() void {
+    host.rollback();
 }
 
 pub const spi = struct {

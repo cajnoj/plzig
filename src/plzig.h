@@ -14,6 +14,7 @@
 
 #include "access/htup.h"
 #include "access/tupdesc.h"
+#include "access/xact.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 
@@ -396,8 +397,11 @@ struct PlzigCallCtx
 	struct PlzigSrf *srf;		/* set-returning call: where rows go, or NULL */
 	struct TriggerData *trigdata;	/* trigger call (transition tables for SPI) */
 	bool		read_only;
+	bool		nonatomic;		/* SPI connected non-atomically: commit and
+								 * rollback allowed (procedures, DO) */
 	bool		spi_connected;
 	void	   *tuptable;		/* SPITupleTable * of the last spi_execute */
+	uint64		result_gen;		/* plzig_xact_gen when tuptable was stored */
 	uint64		ntuples;
 	PlzigRowBuf *result_row;	/* typed access to the last result */
 	PlzigCursor *cursors;		/* per-call cursor table (in cxt) */
@@ -412,6 +416,7 @@ struct PlzigCallCtx
 };
 
 extern void *plzig_host_symbols(int *n);
+extern void plzig_host_xact_callback(XactEvent event, void *arg);
 
 /* typed rows (plzig_host.c): conversion of a tuple, encoding into guest memory */
 extern PlzigRowBuf *plzig_rowbuf_create(MemoryContext parent);

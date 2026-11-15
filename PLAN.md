@@ -677,7 +677,8 @@ v1 is expected to be slower than PL/pgSQL; neither weakens the sandbox.
        or null to skip. The returned row is built by the host from checked
        fields and must match the table's row type; a trigger function keeps
        the permissions of its owner/caller like any other function.
-    4. *Transaction control in procedures*: `plzig.commit()` and
+    4. **Done (2026-11-15), see Deviations from plan, 35.**
+       *Transaction control in procedures*: `plzig.commit()` and
        `plzig.rollback()` (`SPI_commit`/`SPI_rollback`), only where
        PostgreSQL allows it (non-atomic context: `CALL` or `DO` outside a
        transaction block and not below a function; otherwise PostgreSQL's
@@ -1864,3 +1865,49 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       `docker/security-checks.sh`, `hostabi` (a trigger variant of the
       driver whose script comes in NEW and whose result is forged),
       `marshal` (`RETURNS trigger` in random signatures).
+35. **§12 item 14, step 4: transaction control in procedures and DO
+    (2026-11-15).** Two new host imports, `commit()` and `rollback()` (24
+    in total; ABI version still 5). No new GUC. The points the plan left
+    to the design (`doc/abi.md` *Transaction control*):
+    - *Non-atomic SPI only for procedures and DO*: `SPI_connect_ext(
+      SPI_OPT_NONATOMIC)` exactly when the `CallContext` (procedures) or
+      the `InlineCodeBlock` (`DO`) says non-atomic, as PL/pgSQL decides;
+      otherwise atomic, and PostgreSQL's own `SPI_commit` check reports
+      `2D000 invalid transaction termination` (functions, triggers,
+      transaction blocks, `SECURITY DEFINER`/`SET` procedures, procedures
+      below a function). Nested `CALL`/`DO` run through PL/Zig's SPI are
+      atomic (`SPI_execute_with_args` does not ask for non-atomic
+      execution; PL/pgSQL's `CALL` statement does) -- kept that way on
+      purpose: the only transaction end during a call is then the call's
+      own, which the host prepares for.
+    - *Cursors and results*: every cursor of the call is closed before
+      `SPI_commit`/`SPI_rollback` (unpinned and closed: no holdable portals);
+      its handle stays, marked closed, so fetching gives a clear error and
+      closing is harmless. The last SPI result is freed too (it may carry
+      TOAST pointers the next transaction must not follow -- the same
+      concern as `ExecuteCallStmt`'s comment about procedure outputs).
+      Defence in depth: a transaction counter bumped by an `XactCallback`
+      makes any cursor or result of an earlier transaction unusable, should
+      some other path end a transaction under a running call.
+    - *Prepared statements survive* (saved plans in `CacheMemoryContext`,
+      re-validated by the plan cache).
+    - *Memory and resource owners*: nothing the host keeps for a call lives
+      in a transaction context or resource owner (call contexts are the
+      instance's, under `TopMemoryContext`; errors are copied into the
+      caller's portal context; no resource-owner-tracked objects are kept
+      across imports). Tested by committing in loops, with cursors open,
+      and around SPI results.
+    - *Errors during commit* (deferred constraints) are stashed like any
+      host-import error: the call fails and the instance is destroyed
+      (tested: its globals restart).
+    - `COMMIT`/`ROLLBACK` as SQL through SPI stay refused (SPI's own
+      `SPI_ERROR_TRANSACTION`); no `AND CHAIN` variant (not needed for 1.0).
+    - *Tests*: `test/sql/xact.sql` (new: commit/rollback in procedures and
+      `DO`, new transaction ids, batches with prepared statements and a
+      later error, every context where PostgreSQL refuses it, `COMMIT` as
+      SQL, a later error, an error during the commit, cursors and results
+      across a commit, procedures called through SPI, recursion, a
+      procedure's output row after commits), two hostile-guest calls in a
+      function in `docker/security-checks.sh`, `hostabi` (commit/rollback
+      operations in every driver variant, and a procedure variant called
+      by top-level, non-atomic `CALL`s), loader stubs for the new imports.

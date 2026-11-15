@@ -162,6 +162,16 @@ h_srf_return_next(wasm_exec_env_t env, uint32 ptr, uint32 n)
 	stub_trap(env, "plzig: host error");
 }
 
+/*
+ * commit/rollback: the harness's calls are atomic (a function), where the
+ * server raises "invalid transaction termination": the trap that causes
+ */
+static void
+h_end_xact(wasm_exec_env_t env)
+{
+	stub_trap(env, "plzig: host error");
+}
+
 /* tz_convert: zone range checked, then the trap a failing import causes */
 static int64
 h_tz_convert(wasm_exec_env_t env, uint32 op, uint64 value, uint32 zone, uint32 zone_len)
@@ -195,6 +205,8 @@ static NativeSymbol stub_symbols[] = {
 	{"numeric_op", (void *) h_numeric_op, "(iiiiiiii)i", NULL},
 	{"tz_convert", (void *) h_tz_convert, "(iIii)I", NULL},
 	{"srf_return_next", (void *) h_srf_return_next, "(ii)", NULL},
+	{"commit", (void *) h_end_xact, "()", NULL},
+	{"rollback", (void *) h_end_xact, "()", NULL},
 };
 
 void *

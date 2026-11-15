@@ -455,6 +455,8 @@ struct PlzigCursor
 	SPITupleTable *batch;		/* current batch of rows, or NULL */
 	uint64		batch_pos;		/* next row of the batch */
 	bool		finished;		/* end reached; portal already closed */
+	bool		xact_closed;	/* closed by the end of its transaction */
+	uint64		gen;			/* plzig_xact_gen when it was opened */
 	PlzigRowBuf *rb;
 };
 
@@ -463,6 +465,31 @@ struct PlzigCursor
 #define PLZIG_HANDLE_MAX_INDEX	((1 << PLZIG_HANDLE_INDEX_BITS) - 1)
 
 static uint64 plzig_next_serial_value = 0;
+
+/*
+ * Incremented at every transaction end (plzig_host_xact_callback): SPI
+ * results and cursors of a running call that come from an earlier
+ * transaction are never used again.  A procedure ends transactions itself
+ * (commit/rollback), or a procedure it calls through SPI does.
+ */
+static uint64 plzig_xact_gen = 1;
+
+void
+plzig_host_xact_callback(XactEvent event, void *arg)
+{
+	switch (event)
+	{
+		case XACT_EVENT_COMMIT:
+		case XACT_EVENT_PARALLEL_COMMIT:
+		case XACT_EVENT_ABORT:
+		case XACT_EVENT_PARALLEL_ABORT:
+		case XACT_EVENT_PREPARE:
+			plzig_xact_gen++;
+			break;
+		default:
+			break;
+	}
+}
 
 /*
  * Next handle serial.  Monotonic per backend (so a handle of one instance or
@@ -503,7 +530,13 @@ spi_connect_if_needed(PlzigCallCtx *ctx)
 	{
 		MemoryContext old = MemoryContextSwitchTo(ctx->cxt);
 
-		if (SPI_connect() != SPI_OK_CONNECT)
+		/*
+		 * Non-atomic only for procedures and DO outside a transaction block
+		 * (plzig_function_execute, plzig_inline_handler): then commit and
+		 * rollback work; atomic everywhere else, so that SPI_commit refuses
+		 * with PostgreSQL's own error.
+		 */
+		if (SPI_connect_ext(ctx->nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT)
 			elog(ERROR, "SPI_connect failed");
 		ctx->spi_connected = true;
 		/* a trigger's transition tables (REFERENCING) become visible to SQL */
@@ -1212,6 +1245,7 @@ spi_forget_cache(PlzigCallCtx *ctx)
 static void
 spi_reset_result(PlzigCallCtx *ctx)
 {
+	/* (nothing here can throw: it also runs on stale results) */
 	spi_forget_cache(ctx);
 	if (ctx->result_row)
 		rowbuf_forget_desc(ctx->result_row);
@@ -1232,9 +1266,22 @@ spi_store_result(PlzigCallCtx *ctx, int rc)
 				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
 				 errmsg("PL/Zig: SPI_execute failed: %s", SPI_result_code_string(rc))));
 	ctx->tuptable = SPI_tuptable;
+	ctx->result_gen = plzig_xact_gen;
 	ctx->ntuples = SPI_tuptable ? SPI_tuptable->numvals : 0;
 	SPI_tuptable = NULL;
 	return SPI_processed > (uint64) PG_INT64_MAX ? PG_INT64_MAX : (int64) SPI_processed;
+}
+
+/*
+ * A result from an earlier transaction is dropped (its tuples may hold
+ * TOAST pointers that are no longer protected by a snapshot): afterwards
+ * there is no result, as after a new statement without one.
+ */
+static void
+spi_check_result(PlzigCallCtx *ctx)
+{
+	if (ctx->tuptable && ctx->result_gen != plzig_xact_gen)
+		spi_reset_result(ctx);
 }
 
 static int64
@@ -1287,6 +1334,7 @@ host_spi_ncols(wasm_exec_env_t env)
 
 	if (ctx == NULL)
 		return 0;
+	spi_check_result(ctx);
 	tt = (SPITupleTable *) ctx->tuptable;
 	return tt ? (uint32) tt->tupdesc->natts : 0;
 }
@@ -1294,7 +1342,10 @@ host_spi_ncols(wasm_exec_env_t env)
 static SPITupleTable *
 spi_result_row(PlzigCallCtx *ctx, uint32 row)
 {
-	SPITupleTable *tt = (SPITupleTable *) ctx->tuptable;
+	SPITupleTable *tt;
+
+	spi_check_result(ctx);
+	tt = (SPITupleTable *) ctx->tuptable;
 
 	if (tt == NULL)
 		ereport(ERROR,
@@ -1311,9 +1362,11 @@ spi_result_row(PlzigCallCtx *ctx, uint32 row)
 static char *
 spi_value(PlzigCallCtx *ctx, uint32 row, uint32 col, bool *isnull)
 {
-	SPITupleTable *tt = (SPITupleTable *) ctx->tuptable;
+	SPITupleTable *tt;
 	MemoryContext old;
 
+	spi_check_result(ctx);
+	tt = (SPITupleTable *) ctx->tuptable;
 	if (tt == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
@@ -1407,9 +1460,11 @@ host_spi_value_copy(wasm_exec_env_t env, uint32 row, uint32 col,
 static char *
 spi_colname(PlzigCallCtx *ctx, uint32 col)
 {
-	SPITupleTable *tt = (SPITupleTable *) ctx->tuptable;
+	SPITupleTable *tt;
 	MemoryContext old;
 
+	spi_check_result(ctx);
+	tt = (SPITupleTable *) ctx->tuptable;
 	if (tt == NULL || col >= (uint32) tt->tupdesc->natts)
 		ereport(ERROR,
 				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
@@ -1766,19 +1821,45 @@ host_spi_execute_plan(wasm_exec_env_t env, uint64 handle, uint32 params_ptr,
  * ---------------------------------------------------------------------
  */
 
-/* The entry for handle in the current call's table, or ERROR. */
+static void cursor_finish(PlzigCursor *c);
+
+/*
+ * The transaction a cursor belongs to has ended: close it (its portal, if a
+ * transaction end left it, and its batch); the entry stays until the guest
+ * closes the cursor or the call ends, so that using it is a clear error.
+ */
+static void
+cursor_end_by_xact(PlzigCallCtx *ctx, PlzigCursor *c)
+{
+	cursor_finish(c);
+	c->xact_closed = true;
+	ctx->nopen--;
+}
+
+/*
+ * The entry for handle in the current call's table, or ERROR.  A cursor of
+ * an earlier transaction is closed; then only closing it is allowed.
+ */
 static PlzigCursor *
-cursor_lookup(PlzigCallCtx *ctx, uint64 handle)
+cursor_lookup(PlzigCallCtx *ctx, uint64 handle, bool for_close)
 {
 	uint64		idx = handle & PLZIG_HANDLE_MAX_INDEX;
 	uint64		serial = handle >> PLZIG_HANDLE_INDEX_BITS;
+	PlzigCursor *c;
 
 	if (serial == 0 || idx >= (uint64) ctx->ncursors ||
 		ctx->cursors[idx].serial != serial)
 		ereport(ERROR,
 				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
 				 errmsg("PL/Zig: invalid cursor handle")));
-	return &ctx->cursors[idx];
+	c = &ctx->cursors[idx];
+	if (!c->xact_closed && c->gen != plzig_xact_gen)
+		cursor_end_by_xact(ctx, c);
+	if (c->xact_closed && !for_close)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_CURSOR_STATE),
+				 errmsg("PL/Zig: the cursor was closed by the end of its transaction (COMMIT or ROLLBACK)")));
+	return c;
 }
 
 /*
@@ -1834,7 +1915,8 @@ cursor_release(PlzigCallCtx *ctx, PlzigCursor *c)
 {
 	cursor_finish(c);
 	c->serial = 0;
-	ctx->nopen--;
+	if (!c->xact_closed)		/* else no longer counted */
+		ctx->nopen--;
 	MemoryContextDelete(c->cxt);
 	memset(c, 0, sizeof(*c));
 }
@@ -1895,7 +1977,16 @@ cursor_attach(PlzigCallCtx *ctx, PlzigCursor *c, int idx, Portal portal)
 	c->portal_name = MemoryContextStrdup(c->cxt, portal->name);
 	c->rb = plzig_rowbuf_create(c->cxt);
 	c->portal = portal;
-	/* nobody else (CLOSE, CLOSE ALL in nested SQL) can drop it now */
+	c->gen = plzig_xact_gen;
+	c->xact_closed = false;
+	/*
+	 * Nobody else (CLOSE, CLOSE ALL in nested SQL) can drop it now.  The
+	 * only transaction end during a call is the call's own commit/rollback
+	 * (SPI runs nested CALL and DO atomically), which closes every cursor
+	 * first, so no pinned portal of ours is ever held over a commit
+	 * (HoldPinnedPortals); a cursor from an earlier transaction would be
+	 * refused anyway (plzig_xact_gen).
+	 */
 	PinPortal(portal);
 	c->serial = next_serial();
 	ctx->nopen++;
@@ -2012,7 +2103,7 @@ host_spi_cursor_fetch(wasm_exec_env_t env, uint64 handle, uint32 buf, uint32 buf
 		return -1;
 	PG_TRY();
 	{
-		PlzigCursor *c = cursor_lookup(ctx, handle);
+		PlzigCursor *c = cursor_lookup(ctx, handle, false);
 		PlzigRowBuf *rb = c->rb;
 
 		/* a row that did not fit last time is still current: deliver it */
@@ -2077,7 +2168,7 @@ host_spi_cursor_close(wasm_exec_env_t env, uint64 handle)
 		return;
 	PG_TRY();
 	{
-		cursor_release(ctx, cursor_lookup(ctx, handle));
+		cursor_release(ctx, cursor_lookup(ctx, handle, true));
 		MemoryContextSwitchTo(oldcxt);
 	}
 	PG_CATCH();
@@ -2253,6 +2344,71 @@ host_tz_convert(wasm_exec_env_t env, uint32 op, int64 value, uint32 zone_ptr, ui
 }
 
 /* ---------------------------------------------------------------------
+ * transaction control (procedures and DO)
+ * ---------------------------------------------------------------------
+ */
+
+/*
+ * commit() / rollback(): SPI_commit / SPI_rollback.  Allowed only where
+ * PostgreSQL allows it: SPI is connected non-atomically only for a
+ * procedure called non-atomically and for DO outside a transaction block;
+ * everywhere else SPI_commit raises PostgreSQL's own error (2D000).  Before
+ * the transaction ends, every cursor of the call is closed (no portal of
+ * ours is held over) and the last SPI result is freed (its tuples may hold
+ * TOAST pointers the next transaction must not follow); prepared
+ * statements survive (saved plans).  Nothing the host keeps for the call
+ * lives in a transaction's memory context or resource owner (call
+ * contexts belong to the instance, errors are copied into the caller's
+ * portal-lifetime context).  An error during the commit (a deferred
+ * constraint, say) is stashed like any other: the call fails and the
+ * instance is destroyed.
+ */
+static void
+host_end_xact(wasm_exec_env_t env, bool commit)
+{
+	PlzigCallCtx *ctx = host_ctx(env);
+	MemoryContext oldcxt = CurrentMemoryContext;
+
+	if (ctx == NULL)
+		return;
+	PG_TRY();
+	{
+		int			i;
+
+		MemoryContextReset(ctx->scratch);
+		MemoryContextSwitchTo(ctx->scratch);
+		spi_connect_if_needed(ctx);
+		for (i = 0; i < ctx->ncursors; i++)
+			if (ctx->cursors[i].serial != 0 && !ctx->cursors[i].xact_closed)
+				cursor_end_by_xact(ctx, &ctx->cursors[i]);
+		spi_reset_result(ctx);
+		if (commit)
+			SPI_commit();
+		else
+			SPI_rollback();
+		MemoryContextSwitchTo(oldcxt);
+		MemoryContextReset(ctx->scratch);
+	}
+	PG_CATCH();
+	{
+		host_catch(ctx, env, oldcxt);
+	}
+	PG_END_TRY();
+}
+
+static void
+host_commit(wasm_exec_env_t env)
+{
+	host_end_xact(env, true);
+}
+
+static void
+host_rollback(wasm_exec_env_t env)
+{
+	host_end_xact(env, false);
+}
+
+/* ---------------------------------------------------------------------
  * set-returning functions
  * ---------------------------------------------------------------------
  */
@@ -2341,6 +2497,8 @@ static NativeSymbol plzig_native_symbols[] = {
 	{"numeric_op", (void *) host_numeric_op, "(iiiiiiii)i", NULL},
 	{"tz_convert", (void *) host_tz_convert, "(iIii)I", NULL},
 	{"srf_return_next", (void *) host_srf_return_next, "(ii)", NULL},
+	{"commit", (void *) host_commit, "()", NULL},
+	{"rollback", (void *) host_rollback, "()", NULL},
 };
 
 void *

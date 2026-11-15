@@ -3,6 +3,7 @@
     //   fuzz_hostabi_row(script bytea) RETURNS fuzz_hostabi_rt ...
     //   fuzz_hostabi_set(script bytea) RETURNS SETOF fuzz_hostabi_rt ...
     //   fuzz_hostabi_trg() RETURNS trigger (the script: NEW's first column)
+    //   fuzz_hostabi_proc(script bytea) (a procedure; top-level CALLs)
     // compiled through docker/fake/hostilezig.c (which makes the SDK's host
     // import table public, adds rawPtr/addrOf/memSize helpers and lets
     // hostileCall below replace the SDK's plzig_call), so that it can call
@@ -428,7 +429,7 @@ fn run(script: []const u8) i32 {
     last_cols = 0;
     while (!sc.done()) : (ops += 1) {
         const op = sc.byte();
-        switch (op % 25) {
+        switch (op % 26) {
             0 => h.log(sc.byte() % 6, P([*]const u8, ptrArg(&sc)), lenArg(&sc)),
             1 => if (op == 1) {
                 h.raise(P([*]const u8, ptrArg(&sc)), lenArg(&sc));
@@ -523,6 +524,9 @@ fn run(script: []const u8) i32 {
                 _ = plzig.allocator.alloc(u8, @as(usize, pages) * 65536 + 1) catch {};
             },
             23 => pushRow(&sc),
+            // transaction control: allowed only in the procedure variant
+            // called by a top-level CALL; anywhere else PostgreSQL's error
+            24 => if (sc.byte() < 128) h.commit() else h.rollback(),
             22 => {
                 // scribble on the scratch buffer the host reads from
                 const off = sc.int(u16) % gbuf.len;

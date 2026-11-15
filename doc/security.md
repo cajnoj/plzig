@@ -215,7 +215,21 @@ wrong-mode cache files), `test/tap/t/060_environment.pl`, fuzz target
   security, column privileges and `SECURITY DEFINER` behave as in PL/pgSQL;
   SPI is read-only unless the function is `VOLATILE` (decided at every
   execution); `DECLARE`/`FETCH`/`MOVE`/`CLOSE` are refused on the raw parse
-  tree; PL/Zig's own portals are pinned; no transaction control;
+  tree; PL/Zig's own portals are pinned; `COMMIT`/`ROLLBACK` as SQL are
+  refused by SPI;
+* **transaction control** (`commit`/`rollback`, `doc/abi.md` *Transaction
+  control*) works only where PostgreSQL allows it: SPI is connected
+  non-atomically only for procedures called non-atomically and `DO`
+  outside a transaction block, so in every other context (functions,
+  triggers, transaction blocks, `SECURITY DEFINER` procedures, procedures
+  below a function or called through SPI) PostgreSQL's own check refuses
+  it. Every cursor of the call is closed and the last SPI result freed
+  before the transaction ends (no holdable portal, no TOAST pointer
+  followed across the boundary); prepared statements survive as saved
+  plans; nothing the host keeps for the call lives in a transaction's
+  memory context or resource owner; a per-backend transaction counter
+  refuses any cursor or result from an earlier transaction; an error during
+  the commit destroys the instance like any error;
 * text crossing the boundary is checked for the database encoding and NUL
   bytes; `log`/`raise`/`raise_error`/`panic` messages are length-capped;
   `raise_error` raises only `ERROR`, with a well-formed SQLSTATE outside
@@ -294,7 +308,7 @@ Tests: `test/sql/spi*.sql`, `test/sql/adversarial.sql` (row-level security
 and column privileges through `spi.execute`, prepared statements and
 cursors; a kept plan re-checked after `SET ROLE`; definer/invoker nesting;
 refused identity changes; read-only transactions and data-modifying CTEs),
-`docker/security-checks.sh` (73 hostile-guest calls, among them forged
+`docker/security-checks.sh` (75 hostile-guest calls, among them forged
 fixed-width, numeric and jsonb parameters and forged `numeric_op` and
 `tz_convert` calls; forged argument buffers; 20 forged row results: wrong
 field count, kinds, NULL flags, pointers, lengths, out-of-range values,
@@ -303,7 +317,9 @@ binary jsonb, misaligned value arrays; 9 forged or misplaced pushed rows;
 changed row types), `srf.sql` (work_mem spill, temp_file_limit, checked
 rows, rows outside a set), `triggers.sql` (checked columns, generated
 columns, tables altered after compilation, partitions, recursion,
-`SECURITY DEFINER`, RLS), `test/sql/types_fixed.sql`,
+`SECURITY DEFINER`, RLS), `xact.sql` (commit/rollback in every context
+PostgreSQL refuses, open cursors and results, a later error, an error
+during the commit), `test/sql/types_fixed.sql`,
 `types_numeric.sql`, `types_calendar.sql`, `types_jsonb.sql` (every range
 limit, malformed numerics as results and parameters), fuzz targets
 `hostabi`, `marshal` and `jsonb` (§7), TAP `040_standby.pl` (read-only on a
@@ -682,6 +698,20 @@ The whole test matrix (`docker/run-tests.sh`, all six versions) and every
 variant of `docker/run-all.sh` (hardened, Valgrind, ASan/UBSan, coverage
 89.5 % of lines, GCC/Clang `-Wextra -Werror`, upgrade from 14, fuzz smoke,
 static analysis, full disk) passed on the same tree.
+
+Runs for rows, sets, triggers and transaction control (PLAN.md §12 item 14,
+2026-11-15; x86_64, PostgreSQL 18.7 for fuzzing, images built from that
+tree):
+
+| Target | Budget | Executions | Result |
+|---|---|---|---|
+| hostabi (24 imports; forged row, set, trigger and procedure results; top-level CALLs with commit/rollback) | 600 s × 8 containers (distinct seeds) | 336 600 calls | no finding, no sanitizer report |
+| every target, smoke (`docker/run-all.sh` fuzz variant) | 60 s each | – | no finding |
+
+`docker/run-all.sh` (every variant: main on all six versions with
+isolation and TAP, hardened 14/18/19, Valgrind with the new tests, ASan/UBSan,
+coverage, GCC/Clang `-Wextra -Werror`, upgrade from 14, fuzz smoke, static
+analysis, full disk) and `docker/run-tests.sh` passed on the final tree.
 
 Not done: 24-hour fuzzing runs (a pre-release step, `fuzz/README.md`),
 CodeQL, SQLsmith-style random SQL, `wasm-smith`-generated modules, aarch64.

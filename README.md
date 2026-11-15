@@ -499,7 +499,9 @@ affected either way.
 Three ways to run SQL. All of them run with the privileges of the current
 user, exactly like PL/pgSQL (`SECURITY DEFINER` works as usual); SPI is
 read-only unless the function is `VOLATILE`; any SQL error aborts the whole
-call and cannot be caught in Zig; there is no transaction control.
+call and cannot be caught in Zig. Procedures and `DO` blocks can end the
+transaction with `plzig.commit()` / `plzig.rollback()` (see *Procedures and
+DO*).
 
 **`spi.execute`** — one statement, text parameters, the whole result
 materialised:
@@ -612,8 +614,37 @@ CALL log_it('hello');
 DO $$ plzig.notice("hi", .{}); $$ LANGUAGE plzig;
 ```
 
-Transaction control (`COMMIT`/`ROLLBACK`) inside procedures is not supported.
 A `DO` block is compiled every time it runs; its module is never cached.
+
+**Transaction control**: `plzig.commit()` and `plzig.rollback()` end the
+current transaction and start a new one, as PL/pgSQL's `COMMIT` and
+`ROLLBACK`, where PostgreSQL allows it: in a procedure called with `CALL`
+outside a transaction block, or in a `DO` block outside one. Anywhere else
+— in a function, inside `BEGIN ... COMMIT`, in a procedure called by a
+function or through SPI (including from another procedure: PL/Zig's SPI
+runs nested `CALL`s atomically), in a `SECURITY DEFINER` procedure or one
+with a `SET` clause, in a trigger — PostgreSQL's own error `invalid
+transaction termination` aborts the call.
+
+```sql
+CREATE PROCEDURE load_batches(n int) LANGUAGE plzig AS $$
+    const ins = try plzig.spi.prepare("INSERT INTO t VALUES ($1)", &.{.int4});
+    var i: i32 = 1;
+    while (i <= n.?) : (i += 1) {
+        _ = try ins.execute(.{i});           // prepared statements survive
+        if (@mod(i, 1000) == 0) plzig.commit();
+    }
+$$;
+CALL load_batches(100000);
+```
+
+* Every cursor of the call is closed at a commit or rollback (fetching from
+  it afterwards is an error; closing it is fine), and the last SPI result
+  is dropped (`Result.get`/`row` afterwards: no SPI result). Values the
+  function copied into its own memory stay valid.
+* An error during the commit (a deferred constraint, say) aborts the call;
+  the instance is discarded like after any error (its globals start over).
+* `COMMIT`/`ROLLBACK` as SQL through `plzig.spi.execute` stay refused.
 
 ### Session state
 
@@ -626,8 +657,7 @@ start over.
 Event triggers, set-returning functions in value-per-call mode,
 `VARIADIC` parameters, polymorphic and other pseudo-types (except `void`
 results and `record` described by output parameters), aggregates/window
-functions,
-transaction control, catching SQL errors, and any access to the clock,
+functions, catching SQL errors, and any access to the clock,
 randomness, environment, files or network from guest code (use SQL through
 SPI: `SELECT now()`).
 
