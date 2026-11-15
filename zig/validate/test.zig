@@ -215,6 +215,34 @@ test "@import forms" {
     try expectRejected("const s = @import(", msg);
     // the validator does not stop at the first problem
     try testing.expectEqual(@as(usize, 2), try check("const a = @import(\"std\");\nconst b = @import(\"builtin\");"));
+    // without --allow-import, the names of used functions are refused too
+    try expectRejected("const t = @import(\"plzig.use.t\");", msg);
+}
+
+/// validateWithImports (the --allow-import names of the functions a file uses)
+fn checkWith(src: []const u8, extra: []const []const u8) !usize {
+    const z = try gpa.allocSentinel(u8, src.len, 0);
+    defer gpa.free(z);
+    @memcpy(z, src);
+    v.reset();
+    return v.validateWithImports(z, extra);
+}
+
+test "@import of the functions a file uses (--allow-import)" {
+    const extra = [_][]const u8{ "plzig.use.t", "plzig.use.enc" };
+    try testing.expectEqual(@as(usize, 0), try checkWith("const t = @import(\"plzig.use.t\").call;", &extra));
+    try testing.expectEqual(@as(usize, 0), try checkWith("const p = @import(\"plzig\"); const e = @import ( \"plzig.use.enc\" ) .call;", &extra));
+    // exactly the given names, byte for byte: no prefix, suffix, case or escape tricks
+    try testing.expectEqual(@as(usize, 1), try checkWith("const t = @import(\"plzig.use.u\");", &extra));
+    try testing.expectEqual(@as(usize, 1), try checkWith("const t = @import(\"plzig.use.\");", &extra));
+    try testing.expectEqual(@as(usize, 1), try checkWith("const t = @import(\"plzig.use.tt\");", &extra));
+    try testing.expectEqual(@as(usize, 1), try checkWith("const t = @import(\"PLZIG.USE.T\");", &extra));
+    try testing.expectEqual(@as(usize, 1), try checkWith("const t = @import(\"plzig.use.\\x74\");", &extra));
+    try testing.expectEqual(@as(usize, 1), try checkWith("const t = @import(\n    \\\\plzig.use.t\n);", &extra));
+    try testing.expectEqual(@as(usize, 1), try checkWith("const t = @import(\"std\");", &extra));
+    try testing.expectEqual(@as(usize, 1), try checkWith("const t = @import(\"\");", &[_][]const u8{""}));
+    // and nothing else changes: builtins and keywords are still checked
+    try testing.expectEqual(@as(usize, 1), try checkWith("const t = @embedFile(\"x\");", &extra));
 }
 
 // ---------------------------------------------------------------------------

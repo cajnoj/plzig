@@ -108,7 +108,9 @@ and how it is tested.
   an allowlist (`@embedFile`, `@extern`, `@export`, `@ptrFromInt`,
   `@ptrCast`, `@intFromPtr`, `@setEvalBranchQuota`, `@wasmMemoryGrow`,
   atomics, ... — the full lists are in the file), `@import` other than the
-  exact token sequence `@import ( "plzig" )`, the keywords `extern`,
+  exact token sequence `@import ( "plzig" )` (or, for a file that uses
+  other functions, `@import ( "plzig.use.<alias>" )` with exactly the names
+  the backend passes as `--allow-import`, §4.13), the keywords `extern`,
   `export`, `asm`, `linksection`, `callconv`, `threadlocal`, `addrspace`,
   `volatile`, invalid tokens and NUL bytes. Inputs over 4 MB are refused.
 * It relies on the compiler being exactly Zig 0.17.1 (the backend runs
@@ -471,6 +473,86 @@ traps: no data directory, no build directory, no Zig installation path),
   (`plzig.instance_cache_size`, `plzig.instance_cache_max_memory`), plans
   per instance and cursors per call, `statement_timeout`.
 
+### 4.13 Functions compiled into others (`//#use`)
+
+A function can compile other PL/Zig functions into its own module and call
+them as Zig functions (README, *Using other PL/Zig functions*). A
+compiled-in call is not a SQL call: it bypasses everything fmgr does for
+one — the `EXECUTE` check, `SECURITY DEFINER`, `SET` clauses, the
+argument and result conversions (domain constraints, input functions).
+The trust model is therefore: **the used code becomes part of the using
+function, and only code its owner could have copied in by hand is
+allowed.** Implemented in `src/plzig_use.c`:
+
+* *Explicit, literal references.* Only `//#use schema.function(types) as
+  name` lines at the top of the body; nothing is inferred from Zig code.
+  The C side recognises them line by line (a line whose first non-blank
+  characters are `//` is always a comment in Zig: there are no block
+  comments, and no string literal spans lines except `\\` lines), so no
+  Zig lexer is needed and the lines remain comments for the compiler. A
+  malformed or misplaced directive is an error, never ignored.
+* *Resolution independent of the session.* The name must be
+  schema-qualified and is resolved by PostgreSQL's `regprocedure` input
+  function with `search_path` set to `pg_catalog, pg_temp` and the user id
+  switched to the using function's owner (`SECURITY_LOCAL_USERID_CHANGE`):
+  the result does not depend on who triggers the compilation or on their
+  `search_path`, and naming a schema needs the owner's `USAGE` on it.
+  Functions and parameter types in temporary schemas are refused. The
+  reference is resolved and every check below re-run at every
+  compilation (validator, first call, `plzig_check_all()`).
+* *Same owner.* The used function must be owned by the using function's
+  owner (transitively, so all compiled-in code has one owner). Stricter
+  than "the owner may execute it" on purpose: otherwise the used
+  function's owner could change code that then runs inside a `SECURITY
+  DEFINER` user owned by somebody else. The owner must also hold `EXECUTE`
+  (ACL check, including role memberships), so a function its owner has
+  revoked from itself is not compiled in. Callers of the using function
+  need no `EXECUTE` on the used one; this is the owner's decision, as when
+  the owner copies code between functions.
+* *No `SECURITY DEFINER`, no `SET` clauses* on the used function: both
+  take effect only through fmgr, so compiled in they would silently not
+  apply.
+* *Scalar types without domains.* Composite types, output parameters,
+  set-returning, trigger functions, procedures, aggregates and window
+  functions are refused; so are domain-typed parameters and results, whose
+  constraints a compiled-in call would not check. A used function's result
+  never reaches the database directly: whatever the using function returns,
+  stores or passes to SPI goes through the host's usual checks.
+* *Isolation of the code.* Each used function is its own Zig module,
+  generated exactly as when it is compiled standalone, and validated by
+  `plzig-validate` exactly like a standalone function; a file may import
+  only `plzig` and the functions it uses itself, under host-chosen names
+  (`plzig.use.<alias>`), and a module depends only on `plzig` and its own
+  uses. At most 32 functions and 8 levels; cycles are refused.
+* *Limits.* Compiled-in code runs in the caller's instance: its memory
+  cap, stack, `statement_timeout`, arena, SPI connection, read-only rule
+  and user id. Compile time grows with the code compiled in (still one
+  compilation, one `plzig.compile_timeout` per child run).
+* *Staleness.* The module cache key covers the generated source of every
+  compiled-in function and the module layout. A loaded function keeps the
+  `pg_proc` row versions (xmin, ctid) of everything compiled into it; any
+  `pg_proc` invalidation makes the next call compare them, and any change
+  of `pg_authid` or `pg_auth_members` (a membership can carry `EXECUTE`)
+  makes every function with uses compile again. So a change of a used
+  function's body, owner, ACL, `SECURITY DEFINER`, `SET`, name, or its
+  removal is noticed by every session at its next call, and the checks
+  run again — without relying on `pg_depend`.
+* *Dependencies.* `CREATE FUNCTION` (with `check_function_bodies = on`)
+  records a normal `pg_depend` entry on each directly used function, under
+  an `AccessShareLock` on it (so a concurrent `DROP` cannot leave an orphan
+  entry). With `check_function_bodies = off` (`pg_restore`, `pg_upgrade`)
+  nothing is checked and the entry is recorded for each directive that
+  resolves (in a subtransaction each; anything that fails is skipped), so a
+  dump of a restored database is ordered correctly again.
+* *`DO` blocks* cannot use functions (refused): a block's only "owner" is
+  the current user, and it has no dependencies or cache entry.
+* Tests: `test/sql/uses.sql` (every refusal, transitive uses, collisions,
+  changes after creation, dependencies, `check_function_bodies = off`),
+  `test/tap/t/100_uses.pl` (changes made by another session while one has
+  the user loaded, the module cache), `test/sql/check_all.sql`, the dump/
+  restore and upgrade TAP tests, `zig/validate/test.zig`
+  (`--allow-import`).
+
 ## 5. Attacker A: what a role with `USAGE` can do
 
 * **Run code in the backend**: only as WebAssembly in the interpreter
@@ -478,6 +560,9 @@ traps: no data directory, no build directory, no Zig installation path),
   or in a host import (§8, items 4 and 5).
 * **Run SQL**: only with its own privileges, or those of a `SECURITY
   DEFINER` function's owner — exactly as with PL/pgSQL (§4.7).
+* **Compile another role's function into its own** (`//#use`): refused;
+  only functions of the same owner, which that owner may execute and which
+  are neither `SECURITY DEFINER` nor have `SET` clauses (§4.13).
 * **Run the compiler on chosen input**: yes; that is what `USAGE` grants,
   and why it is not granted to `PUBLIC`. The compiler is confined (§4.8);
   a compiler exploit makes A into attacker C.
@@ -669,6 +754,15 @@ because the cache is writable by nobody but the server's OS user (§2).
     sandboxed like user code). What a function returns is checked by the
     host either way (*4.7*). The jsonb layout is read in host byte order, so
     `jsonb` falls back to text on big-endian hosts (untested).
+14. **`//#use` skips the used function's SQL-level checks for callers.**
+    A caller of a function that uses another needs no `EXECUTE` on the
+    used one (the owner's decision, §4.13), and values cross between the
+    two as Zig values: a text-I/O argument (`inet`, an array) is whatever
+    bytes the caller passes, unchecked by the type's input function (the
+    used function must cope with them like with any other input). Domains
+    are refused for that reason. Role-membership changes make every
+    function with uses compile again in every session (a cost, not a
+    risk).
 
 ## 9. Verification status
 

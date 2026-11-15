@@ -34,8 +34,32 @@ CREATE FUNCTION lazy_bad() RETURNS int LANGUAGE plzig AS $$ return @embedFile("/
 RESET check_function_bodies;
 SET ROLE dev;
 CREATE FUNCTION owned_by_dev() RETURNS text LANGUAGE plzig AS $$ return "dev"; $$;
+-- a function compiled into another (//#use).  The user's name sorts before
+-- the helper's, so only the recorded dependency makes pg_dump restore the
+-- helper first; the restore (check_function_bodies = off) must record the
+-- dependency again, and the owner checks pass after ALTER ... OWNER.
+CREATE FUNCTION zzz_helper(x int) RETURNS int STRICT LANGUAGE plzig AS $$ return x + 1; $$;
+CREATE FUNCTION aaa_user(x int) RETURNS int STRICT LANGUAGE plzig AS $$
+//#use public.zzz_helper(integer) as helper
+    return (try helper(x)).? * 10;
+$$;
 RESET ROLE;
 });
+is($src->safe_psql('app', 'SELECT aaa_user(1)'), '20', 'a function using another');
+
+# the dependency of a function on the functions it uses, and that it blocks DROP
+sub check_uses
+{
+	my ($node, $db, $what) = @_;
+	is($node->safe_psql($db, 'SET ROLE dev; SELECT aaa_user(4)'), '50',
+		"$what: the function using another compiles and works");
+	is($node->safe_psql($db, q{SELECT count(*) FROM pg_depend
+		WHERE objid = 'aaa_user(int)'::regprocedure AND refobjid = 'zzz_helper(int)'::regprocedure
+		  AND deptype = 'n'}), '1', "$what: its dependency on the used function is restored");
+	my ($rc, $out, $err) = $node->psql($db, 'DROP FUNCTION zzz_helper(int)');
+	like($err, qr/other objects depend on it/, "$what: the used function cannot be dropped alone");
+	return;
+}
 
 my $tmp = PostgreSQL::Test::Utils::tempdir;
 
@@ -63,6 +87,7 @@ is($src->safe_psql('app2', "SELECT has_language_privilege('dev', 'plzig', 'USAGE
 	't', 'language ACL preserved by pg_dump');
 is($src->safe_psql('app2', "SELECT has_language_privilege('public', 'plzig', 'USAGE')"),
 	'f', 'USAGE still not granted to PUBLIC');
+check_uses($src, 'app2', 'pg_restore');
 
 # --- pg_dumpall into another cluster
 $src->command_ok([ 'pg_dumpall', '-f', "$tmp/all.sql", '-d', $src->connstr('postgres') ],
@@ -80,6 +105,7 @@ is($dst->safe_psql('app', "SELECT has_language_privilege('public', 'plzig', 'USA
 	'f', 'PUBLIC still has no USAGE');
 ($rc, $out, $err) = $dst->psql('app', 'CALL p()');
 like($err, qr/NOTICE:  proc/, 'procedure works');
+check_uses($dst, 'app', 'pg_dumpall');
 
 $src->stop;
 $dst->stop;

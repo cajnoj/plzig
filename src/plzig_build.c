@@ -696,20 +696,34 @@ plzig_load_sdk(void)
 	plzig_sha256_parts(parts, lens, 2, plzig_sdk_digest);
 }
 
+/*
+ * The module cache key: sha256 over the ABI version, the pinned Zig version,
+ * the fixed flags, the SDK digest and the generated source; for a function
+ * that uses others (//#use), also the module layout (which unit imports
+ * which under which name: everything the extra compiler flags are made of)
+ * and the generated source of every used function, so that a change of any
+ * of them makes a new module.  A function without uses has the key it had
+ * before uses existed.
+ */
 static void
-plzig_cache_key(const char *src, size_t srclen, char *hex)
+plzig_cache_key(const PlzigProgram *prog, char *hex)
 {
 	StringInfoData flags;
-	const char *parts[5];
-	size_t		lens[5];
+	StringInfoData layout;
+	const char **parts;
+	size_t	   *lens;
+	int			nparts;
 	char		abi[16];
 	int			i;
+	int			u;
 
 	initStringInfo(&flags);
 	for (i = 0; plzig_zig_flags[i]; i++)
 		appendStringInfo(&flags, "%s ", plzig_zig_flags[i]);
 	snprintf(abi, sizeof(abi), "abi%d", PLZIG_ABI_VERSION);
 
+	parts = palloc(sizeof(char *) * (prog->nunits + 6));
+	lens = palloc(sizeof(size_t) * (prog->nunits + 6));
 	parts[0] = abi;
 	lens[0] = strlen(abi);
 	parts[1] = PLZIG_ZIG_VERSION;
@@ -718,10 +732,33 @@ plzig_cache_key(const char *src, size_t srclen, char *hex)
 	lens[2] = flags.len;
 	parts[3] = plzig_sdk_digest;
 	lens[3] = strlen(plzig_sdk_digest);
-	parts[4] = src;
-	lens[4] = srclen;
-	plzig_sha256_parts(parts, lens, 5, hex);
+	parts[4] = prog->units[0].src;
+	lens[4] = prog->units[0].srclen;
+	nparts = 5;
+	initStringInfo(&layout);
+	if (prog->nunits > 1)
+	{
+		for (u = 0; u < prog->nunits; u++)
+		{
+			appendStringInfo(&layout, "unit %d:", u);
+			for (i = 0; i < prog->units[u].nuses; i++)
+				appendStringInfo(&layout, " %s=%d", prog->units[u].use_alias[i],
+								 prog->units[u].use_unit[i]);
+			appendStringInfoChar(&layout, '\n');
+		}
+		parts[nparts] = layout.data;
+		lens[nparts++] = layout.len;
+		for (u = 1; u < prog->nunits; u++)
+		{
+			parts[nparts] = prog->units[u].src;
+			lens[nparts++] = prog->units[u].srclen;
+		}
+	}
+	plzig_sha256_parts(parts, lens, nparts, hex);
 	pfree(flags.data);
+	pfree(layout.data);
+	pfree(parts);
+	pfree(lens);
 }
 
 /* ---------------------------------------------------------------------
@@ -798,9 +835,33 @@ plzig_replace_all(const char *s, const char *from, const char *to)
  *   - continuation lines are indented by two spaces, so no line of the
  *     DETAIL starts in column 0 like "ERROR:  ..." would.
  */
+/*
+ * In compiler output, a position "src/unit<i>.zig:L:C:" (a used function,
+ * plzig_use.c) is shown as "function <signature>, line L-1, column C:".
+ * Returns the length of the marker at p and sets *label, or 0.
+ */
+static size_t
+plzig_unit_marker(const char *p, const PlzigProgram *prog, const char **label)
+{
+	const char *q;
+	long		u;
+	char	   *end;
+
+	if (prog == NULL || strncmp(p, "src/unit", 8) != 0 || !isdigit((unsigned char) p[8]))
+		return 0;
+	u = strtol(p + 8, &end, 10);
+	if (strncmp(end, ".zig:", 5) != 0 || u < 1 || u >= prog->nunits)
+		return 0;
+	q = end + 5;
+	if (!isdigit((unsigned char) *q))
+		return 0;
+	*label = prog->units[u].display;
+	return q - p;
+}
+
 static char *
-plzig_format_output(const char *raw, int rawlen, const char *builddir,
-					bool validator)
+plzig_format_output_units(const char *raw, int rawlen, const char *builddir,
+						  bool validator, const PlzigProgram *prog)
 {
 	StringInfoData b;
 	StringInfoData out;
@@ -843,12 +904,18 @@ plzig_format_output(const char *raw, int rawlen, const char *builddir,
 	{
 		/* at the start of a line (validator) or at "src/user.zig:" (zig) */
 		bool		at_marker;
+		size_t		skip = ml;
+		const char *label = NULL;
 
 		if (validator)
 			at_marker = (p == s || p[-1] == '\n') && isdigit((unsigned char) *p);
 		else
+		{
 			at_marker = strncmp(p, marker, ml) == 0 &&
 				isdigit((unsigned char) p[ml]);
+			if (!at_marker && (skip = plzig_unit_marker(p, prog, &label)) > 0)
+				at_marker = true;
+		}
 
 		if (at_marker)
 		{
@@ -856,12 +923,14 @@ plzig_format_output(const char *raw, int rawlen, const char *builddir,
 			long		line;
 			long		col;
 
-			line = strtol(p + ml, &end, 10);
+			line = strtol(p + skip, &end, 10);
 			if (*end == ':' && isdigit((unsigned char) end[1]))
 			{
 				col = strtol(end + 1, &end, 10);
 				if (*end == ':')
 				{
+					if (label)
+						appendStringInfo(&b, "function %s, ", label);
 					appendStringInfo(&b, "line %ld, column %ld:", line > 1 ? line - 1 : 0, col);
 					p = end + 1;
 					continue;
@@ -898,6 +967,12 @@ plzig_format_output(const char *raw, int rawlen, const char *builddir,
 			appendStringInfoString(&out, "  ");
 	}
 	return out.data;
+}
+
+static char *
+plzig_format_output(const char *raw, int rawlen, const char *builddir, bool validator)
+{
+	return plzig_format_output_units(raw, rawlen, builddir, validator, NULL);
 }
 
 /* ---------------------------------------------------------------------
@@ -1549,8 +1624,39 @@ plzig_verify_version(const char *zigbin, char **envp, const char *builddir,
  * Compile src in a fresh build directory; on success the module is in
  * *wasm (palloc'd).  Caller holds the compile lock.
  */
+/* the file and module of unit u of a build (plzig_use.c) */
+static void
+plzig_unit_file(int u, char *buf, size_t len)
+{
+	if (u == 0)
+		strlcpy(buf, "src/user.zig", len);
+	else
+		snprintf(buf, len, "src/unit%d.zig", u);
+}
+
 static char *
-plzig_compile(const char *root, const char *zigcache, const char *src, size_t srclen,
+plzig_unit_module(int u)
+{
+	return u == 0 ? pstrdup("user") : psprintf("plzig.unit.%d", u);
+}
+
+/* --dep entries of unit u: each use under its import name */
+static int
+plzig_unit_deps(const PlzigProgram *prog, int u, char **argv, int n)
+{
+	int			i;
+
+	for (i = 0; i < prog->units[u].nuses; i++)
+	{
+		argv[n++] = "--dep";
+		argv[n++] = psprintf(PLZIG_USE_IMPORT_PREFIX "%s=%s", prog->units[u].use_alias[i],
+							 plzig_unit_module(prog->units[u].use_unit[i]));
+	}
+	return n;
+}
+
+static char *
+plzig_compile(const char *root, const char *zigcache, const PlzigProgram *prog,
 			  uint32 *wasm_len)
 {
 	char		builddir[MAXPGPATH];
@@ -1565,13 +1671,21 @@ plzig_compile(const char *root, const char *zigcache, const char *src, size_t sr
 	char		env_tmp[MAXPGPATH + 8];
 	char		gc_arg[MAXPGPATH];
 	char	   *envp[9];
-	char	   *argv[64];
+	char	  **argv;
+	int			maxargs;
 	PlzigSandbox sb;
 	PlzigSpawnResult res;
 	char	   *volatile wasm = NULL;	/* set inside PG_TRY, read after it */
 	volatile size_t len = 0;
 	int			i;
 	int			n;
+	int			u;
+
+	/* fixed flags, 6 inserted after the first, per unit: its module and uses */
+	maxargs = 8 + lengthof(plzig_zig_flags);
+	for (u = 0; u < prog->nunits; u++)
+		maxargs += 4 + 2 * prog->units[u].nuses;
+	argv = palloc0(sizeof(char *) * maxargs);
 
 	/* before anything is created or run: path, ownership, mode, checksum */
 	need_version = plzig_check_toolchain(zigbin, ziglib);
@@ -1616,8 +1730,14 @@ plzig_compile(const char *root, const char *zigcache, const char *src, size_t sr
 		plzig_write_file(path, plzig_sdk_plzig, plzig_sdk_plzig_len, false);
 		plzig_path(path, "%s/sdk/root.zig", builddir);
 		plzig_write_file(path, plzig_sdk_root, plzig_sdk_root_len, false);
-		plzig_path(path, "%s/src/user.zig", builddir);
-		plzig_write_file(path, src, srclen, false);
+		for (u = 0; u < prog->nunits; u++)
+		{
+			char		file[32];
+
+			plzig_unit_file(u, file, sizeof(file));
+			plzig_path(path, "%s/%s", builddir, file);
+			plzig_write_file(path, prog->units[u].src, prog->units[u].srclen, false);
+		}
 
 		plzig_setup_sandbox(&sb, builddir, zigcache, validator, zigbin, ziglib);
 
@@ -1638,32 +1758,73 @@ plzig_compile(const char *root, const char *zigcache, const char *src, size_t sr
 		if (need_version)
 			plzig_verify_version(zigbin, envp, builddir, &sb);
 
-		/* 1. lexical policy check */
-		argv[0] = validator;
-		argv[1] = NULL;
-		plzig_spawn(validator, argv, envp, builddir, path, &sb,
-					plzig_compile_timeout, &res);
-		plzig_record_sandbox(&res, &sb);
-		if (res.exit_status == 1)
-			ereport(ERROR,
-					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 errmsg("PL/Zig source rejected by policy"),
-					 errdetail("%s", plzig_format_output(res.output.data, res.output.len,
-														 builddir, true))));
-		if (res.exit_status != 0)
+		/*
+		 * 1. lexical policy check, of every file exactly as of a standalone
+		 * function; a file may import, besides "plzig", the functions it
+		 * uses under the names the host gave them (and nothing else).
+		 */
+		for (u = 0; u < prog->nunits; u++)
+		{
+			char		file[32];
+			char	   *shown;
+
+			n = 0;
+			argv[n++] = validator;
+			for (i = 0; i < prog->units[u].nuses; i++)
+			{
+				argv[n++] = "--allow-import";
+				argv[n++] = psprintf(PLZIG_USE_IMPORT_PREFIX "%s", prog->units[u].use_alias[i]);
+			}
+			argv[n] = NULL;
+			Assert(n < maxargs);
+			plzig_unit_file(u, file, sizeof(file));
+			plzig_path(path, "%s/%s", builddir, file);
+			plzig_spawn(validator, argv, envp, builddir, path, &sb,
+						plzig_compile_timeout, &res);
+			plzig_record_sandbox(&res, &sb);
+			if (res.exit_status == 0)
+				continue;
+			shown = plzig_format_output(res.output.data, res.output.len, builddir, true);
+			if (u > 0)
+				shown = psprintf("In the used function %s:\n  %s", prog->units[u].display, shown);
+			if (res.exit_status == 1)
+				ereport(ERROR,
+						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+						 errmsg("PL/Zig source rejected by policy"),
+						 errdetail("%s", shown)));
 			ereport(ERROR,
 					(errcode(ERRCODE_SYSTEM_ERROR),
 					 errmsg("PL/Zig source validator failed (status %d, signal %d)",
 							res.exit_status, res.term_signal),
-					 errdetail("%s", plzig_format_output(res.output.data, res.output.len,
-														 builddir, true))));
+					 errdetail("%s", shown)));
+		}
 
-		/* 2. compile */
+		/*
+		 * 2. compile.  The used functions (plzig_use.c) are modules of their
+		 * own, "plzig.unit.<i>" from src/unit<i>.zig, each depending on
+		 * "plzig" and on the units it uses; the user module gets its uses
+		 * as --dep entries too.
+		 */
 		n = 0;
 		argv[n++] = zigbin;
 		for (i = 0; plzig_zig_flags[i]; i++)
 		{
+			if (strcmp(plzig_zig_flags[i], "-Muser=src/user.zig") == 0)
+				n = plzig_unit_deps(prog, 0, argv, n);
 			argv[n++] = (char *) plzig_zig_flags[i];
+			if (strcmp(plzig_zig_flags[i], "-Mplzig=sdk/plzig.zig") == 0)
+			{
+				for (u = 1; u < prog->nunits; u++)
+				{
+					char		file[32];
+
+					argv[n++] = "--dep";
+					argv[n++] = "plzig";
+					n = plzig_unit_deps(prog, u, argv, n);
+					plzig_unit_file(u, file, sizeof(file));
+					argv[n++] = psprintf("-M%s=%s", plzig_unit_module(u), file);
+				}
+			}
 			if (i == 0)
 			{
 				snprintf(gc_arg, sizeof(gc_arg), "%s", zigcache);
@@ -1676,7 +1837,7 @@ plzig_compile(const char *root, const char *zigcache, const char *src, size_t sr
 			}
 		}
 		argv[n] = NULL;
-		Assert(n < lengthof(argv));
+		Assert(n < maxargs);
 
 		plzig_spawn(zigbin, argv, envp, builddir, NULL, &sb,
 					plzig_compile_timeout, &res);
@@ -1687,14 +1848,14 @@ plzig_compile(const char *root, const char *zigcache, const char *src, size_t sr
 				ereport(ERROR,
 						(errcode(ERRCODE_SYSTEM_ERROR),
 						 errmsg("PL/Zig compiler terminated by signal %d", res.term_signal),
-						 errdetail("%s", plzig_format_output(res.output.data, res.output.len,
-															 builddir, false)),
+						 errdetail("%s", plzig_format_output_units(res.output.data, res.output.len,
+															   builddir, false, prog)),
 						 errhint("Check plzig.compile_memory_limit and plzig.compile_timeout.")));
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
 					 errmsg("PL/Zig compilation failed"),
-					 errdetail("%s", plzig_format_output(res.output.data, res.output.len,
-														 builddir, false))));
+					 errdetail("%s", plzig_format_output_units(res.output.data, res.output.len,
+														   builddir, false, prog))));
 		}
 
 		/* 3. collect the module */
@@ -1911,7 +2072,7 @@ plzig_cache_install(const char *tmp, const char *final, const char *wasm, size_t
  * distinct block leave a file behind.
  */
 char *
-plzig_get_wasm(const char *src, size_t srclen, uint32 *wasm_len, bool use_cache)
+plzig_get_wasm(const PlzigProgram *prog, uint32 *wasm_len, bool use_cache)
 {
 	char		root[MAXPGPATH];
 	char		cache[MAXPGPATH];
@@ -1930,7 +2091,7 @@ plzig_get_wasm(const char *src, size_t srclen, uint32 *wasm_len, bool use_cache)
 	}
 
 	plzig_load_sdk();
-	plzig_cache_key(src, srclen, key);
+	plzig_cache_key(prog, key);
 	plzig_dirs(root, cache, zigcache);
 	plzig_path(final, "%s/%s.wasm", cache, key);
 
@@ -1965,7 +2126,7 @@ plzig_get_wasm(const char *src, size_t srclen, uint32 *wasm_len, bool use_cache)
 
 			plzig_sweep_build_dirs(root);
 
-			wasm = plzig_compile(root, zigcache, src, srclen, &wlen);
+			wasm = plzig_compile(root, zigcache, prog, &wlen);
 			len = wlen;
 
 			if (use_cache)
@@ -2053,7 +2214,7 @@ plzig_test_cache_key(PG_FUNCTION_ARGS)
 	char		key[65];
 
 	plzig_load_sdk();
-	plzig_cache_key(VARDATA_ANY(src), VARSIZE_ANY_EXHDR(src), key);
+	plzig_cache_key(plzig_program_single(VARDATA_ANY(src), VARSIZE_ANY_EXHDR(src)), key);
 	PG_RETURN_TEXT_P(cstring_to_text(key));
 }
 

@@ -16,7 +16,8 @@
 # (date, numeric, jsonb, timestamptz, interval, uuid, bytea, float8 as
 # arguments, four result types), OUT parameters, a composite argument and
 # result, SETOF/TABLE, a row trigger, a procedure with transaction control,
-# and DO blocks.  The mix:
+# DO blocks, and a function that compiles two others into itself (//#use:
+# a strict and a non-strict helper, created by run.sh).  The mix:
 #   ~50%  valid:      a body assembled from statements that type-check in
 #                     the family (SPI, cursors, prepared statements, std,
 #                     native-type operations, logging), some of which fail
@@ -345,6 +346,18 @@ $fam{proc} = { weight => 2,
               '{ var c = try plzig.spi.open("SELECT g FROM generate_series(1, 5) g", &.{}); _ = try c.next(); plzig.commit(); _ = c.next() catch |e| plzig.debug("{s}", .{@errorName(e)}); }',
               '{ const st = try plzig.spi.prepare("INSERT INTO fz_log VALUES ($1)", &.{.int4}); for (0..N) |k| { _ = try st.execute(.{@as(i32, @intCast(k))}); plzig.commit(); } }'],
     ret => ['return .{ .n = (n orelse 0) + M };', 'return .{ .n = null };'] };
+$fam{use} = { weight => 2,
+    create => 'CREATE OR REPLACE FUNCTION fz_use(a int) RETURNS int STRICT LANGUAGE plzig AS',
+    call => 'SELECT fz_use(3);',
+    prefix => "//#use public.fz_h_int(integer) as hi\n//#use public.fz_h_text(text) as ht",
+    stmts => ['{ const v = (try hi(a)).?; plzig.debug("{d}", .{v}); }',
+              '{ const t = try ht("W"); plzig.debug("{?s}", .{t}); }',
+              '{ const t = try ht(null); plzig.debug("{?s}", .{t}); }',
+              '{ var k: i32 = 0; var vs: i32 = 0; while (k < M) : (k += 1) vs +%= (try hi(k)).?; plzig.debug("{d}", .{vs}); }',
+              '{ _ = hi(-N) catch |e| plzig.debug("{s}", .{@errorName(e)}); }',
+              '{ const v = try hi(-N); plzig.debug("{?d}", .{v}); }'],
+    ret => ['return (try hi(a)).?;', 'return try hi(a -% M);', 'return @intCast((try ht("W")).?.len);',
+            'return (try hi(std.math.maxInt(i32))).?;'] };
 $fam{do} = { weight => 3, create => 'DO', call => '',
     stmts => ['{ plzig.commit(); }', '{ _ = try plzig.spi.execute("INSERT INTO fz_log VALUES (M)", &.{}); plzig.rollback(); }'],
     ret => [''] };
@@ -366,6 +379,8 @@ sub valid_body {
     push @parts, fill($F->{stmts}[0]) if ($f eq 'srf' || $f eq 'srfs') && rand() < 0.7;
     my $ret = fill(pick(@{$F->{ret}}));
     push @parts, $ret if $ret ne '';
+    # directives (//#use) come first
+    unshift @parts, $F->{prefix} if $F->{prefix};
     return join("\n", @parts);
 }
 

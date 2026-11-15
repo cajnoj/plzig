@@ -3,7 +3,11 @@
 //! Reads one Zig source file on stdin, tokenizes it with the compiler's own
 //! tokenizer (std.zig.Tokenizer) and rejects:
 //!   * any builtin not on the allowlist,
-//!   * @import with anything but the literal "plzig",
+//!   * @import with anything but the literal "plzig" or one of the names
+//!     given as `--allow-import NAME` (the host passes the import names of
+//!     the PL/Zig functions this file uses, see src/plzig_use.c; nothing
+//!     else can be named, and such a name resolves only to a module the
+//!     host built from another validated file),
 //!   * the keywords extern, export, asm, linksection, callconv, threadlocal,
 //!     addrspace, volatile,
 //!   * invalid tokens and NUL bytes.
@@ -150,6 +154,22 @@ fn isAllowedBuiltin(name: []const u8) bool {
 /// Check src; diagnostics are appended to the output buffer.  Returns the
 /// number of problems found (0 = accepted).
 pub fn validate(src: [:0]const u8) usize {
+    return validateWithImports(src, &.{});
+}
+
+fn isAllowedImport(lit: []const u8, extra: []const []const u8) bool {
+    if (std.mem.eql(u8, lit, "\"plzig\"")) return true;
+    if (lit.len < 2 or lit[0] != '"' or lit[lit.len - 1] != '"') return false;
+    const name = lit[1 .. lit.len - 1];
+    for (extra) |e| {
+        if (e.len != 0 and std.mem.eql(u8, name, e)) return true;
+    }
+    return false;
+}
+
+/// validate(), where @import may also name exactly one of `extra` (plain
+/// string literals compared byte for byte: no escape sequence can match).
+pub fn validateWithImports(src: [:0]const u8, extra: []const []const u8) usize {
     if (std.mem.indexOfScalar(u8, src, 0)) |pos| {
         report(src, pos, "NUL byte in source", "");
         return n_errors;
@@ -165,12 +185,12 @@ pub fn validate(src: [:0]const u8) usize {
                 if (!isAllowedBuiltin(text)) {
                     report(src, t.loc.start, "builtin not allowed in PL/Zig", text);
                 } else if (std.mem.eql(u8, text, "@import")) {
-                    // Must be exactly: @import ( "plzig" )
+                    // Must be exactly: @import ( "plzig" ), or an allowed name
                     const a = tok.next();
                     const b = tok.next();
                     const c = tok.next();
                     const ok = a.tag == .l_paren and b.tag == .string_literal and
-                        std.mem.eql(u8, src[b.loc.start..b.loc.end], "\"plzig\"") and
+                        isAllowedImport(src[b.loc.start..b.loc.end], extra) and
                         c.tag == .r_paren;
                     if (!ok) report(src, t.loc.start, "only @import(\"plzig\") is allowed; use plzig.std", "");
                 }
@@ -208,7 +228,33 @@ pub fn readSource(fd: i32, buf: []u8) ReadError!usize {
     }
 }
 
-pub fn main() u8 {
+/// most --allow-import names (the host passes at most PLZIG_MAX_USES)
+pub const max_imports = 64;
+var import_names: [max_imports][]const u8 = undefined;
+
+pub fn main(init: std.process.Init.Minimal) u8 {
+    // usage: plzig-validate [--allow-import NAME]... < source
+    const argv = init.args.vector;
+    var n_imports: usize = 0;
+    var i: usize = 1;
+    while (i < argv.len) : (i += 1) {
+        const arg = std.mem.span(argv[i]);
+        if (std.mem.eql(u8, arg, "--allow-import") and i + 1 < argv.len and n_imports < max_imports) {
+            const name = std.mem.span(argv[i + 1]);
+            if (name.len == 0 or std.mem.indexOfAny(u8, name, "\"\\") != null) {
+                emit("invalid import name\n");
+                flush();
+                return 2;
+            }
+            import_names[n_imports] = name;
+            n_imports += 1;
+            i += 1;
+        } else {
+            emit("usage: plzig-validate [--allow-import NAME]... < source\n");
+            flush();
+            return 2;
+        }
+    }
     const len = readSource(0, &source_buf) catch |err| {
         emit(if (err == error.TooLarge) "source too large\n" else "read error\n");
         flush();
@@ -216,7 +262,7 @@ pub fn main() u8 {
     };
     source_buf[len] = 0;
     const src: [:0]const u8 = source_buf[0..len :0];
-    _ = validate(src);
+    _ = validateWithImports(src, import_names[0..n_imports]);
     if (n_errors > 20) emit("too many errors\n");
     flush();
     return if (n_errors == 0) 0 else 1;

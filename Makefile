@@ -22,11 +22,11 @@ EXTENSION = plzig
 MODULE_big = plzig
 OBJS = src/plzig.o src/plzig_source.o src/plzig_build.o src/plzig_spawn.o \
        src/plzig_sandbox.o src/plzig_runtime.o src/plzig_host.o src/plzig_types.o \
-       src/plzig_row.o
+       src/plzig_row.o src/plzig_use.o
 DATA = sql/plzig--1.0.sql
 PGFILEDESC = "PL/Zig - procedural language"
 
-REGRESS = setup basics types types_more types_fixed types_numeric types_calendar types_jsonb rows srf triggers xact signatures usage encoding errors spi spi_prepared spi_cursor \
+REGRESS = setup basics types types_more types_fixed types_numeric types_calendar types_jsonb rows srf triggers xact signatures usage encoding errors spi spi_prepared spi_cursor uses \
           sandbox adversarial resources leaks check_all lifecycle
 REGRESS_OPTS = --inputdir=test --load-extension=plzig
 # only against a PLZIG_TESTING=1 build: make installcheck-testing

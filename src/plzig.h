@@ -263,16 +263,61 @@ typedef struct PlzigSignature
 } PlzigSignature;
 
 extern void plzig_check_signature(HeapTuple proctup, PlzigSignature *sig);
+extern bool plzig_valid_identifier(const char *s);
 extern char *plzig_get_body(HeapTuple proctup);
 extern char *plzig_generate_source(const PlzigSignature *sig, const char *body,
+								   char *const *use_aliases, int nuses,
 								   size_t *srclen);
 extern char *plzig_generate_inline_source(const char *body, size_t *srclen);
+
+/* ---------------------------------------------------------------------
+ * Using other functions: //#use directives (plzig_use.c)
+ * ---------------------------------------------------------------------
+ */
+/* distinct functions compiled into one module besides the function itself */
+#define PLZIG_MAX_USES			32
+/* longest chain of uses (a uses b uses c ...: edges) */
+#define PLZIG_MAX_USE_DEPTH		8
+/* the import name under which a file sees a function it uses */
+#define PLZIG_USE_IMPORT_PREFIX	"plzig.use."
+
+/*
+ * One Zig file of a build.  Unit 0 is the function being compiled (module
+ * "user", src/user.zig); every other unit is a function it uses, directly or
+ * transitively, compiled as module "plzig.unit.<i>" (src/unit<i>.zig) from
+ * exactly the source it is compiled from when standalone.
+ */
+typedef struct PlzigUnit
+{
+	Oid			fn_oid;			/* InvalidOid for a DO block */
+	TransactionId fn_xmin;		/* the pg_proc row the source was made from */
+	ItemPointerData fn_tid;
+	char	   *display;		/* qualified signature, for messages (NULL for unit 0) */
+	char	   *src;
+	size_t		srclen;
+	int			nuses;			/* direct uses of this unit */
+	char	  **use_alias;		/* their aliases (validated identifiers) */
+	int		   *use_unit;		/* their unit indexes */
+} PlzigUnit;
+
+typedef struct PlzigProgram
+{
+	int			nunits;
+	PlzigUnit  *units;
+} PlzigProgram;
+
+extern PlzigProgram *plzig_program_single(char *src, size_t srclen);
+extern PlzigProgram *plzig_program_build(HeapTuple proctup, const PlzigSignature *sig,
+										 const char *body, bool lock_uses);
+extern void plzig_inline_check_directives(const char *body);
+extern void plzig_record_use_dependencies(Oid fn_oid, const PlzigProgram *prog);
+extern void plzig_record_uses_lenient(HeapTuple proctup);
 
 /* ---------------------------------------------------------------------
  * Build pipeline (plzig_build.c)
  * ---------------------------------------------------------------------
  */
-extern char *plzig_get_wasm(const char *src, size_t srclen, uint32 *wasm_len,
+extern char *plzig_get_wasm(const PlzigProgram *prog, uint32 *wasm_len,
 							bool use_cache);
 extern int64 plzig_cache_clear_files(void);
 extern const char *plzig_sandbox_status_string(void);

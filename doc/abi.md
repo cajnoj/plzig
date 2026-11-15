@@ -653,6 +653,16 @@ const plzig = @import("plzig"); const std = plzig.std; pub fn call(@"a": i32, @"
   `plzig`, `std` or `call` (the generated file's own declarations);
   unnamed parameters are `arg1..argN`.
 * `DO` blocks: `pub fn call() anyerror!void {`.
+* Used functions (`//#use schema.f(types) as name`, `src/plzig_use.c`):
+  right after the prelude, one `const @"name" = @import("plzig.use.name").call;`
+  per directive, on the header line. Each used function is compiled from
+  its own generated source (exactly as when it is compiled standalone) as
+  module `plzig.unit.<i>` from `src/unit<i>.zig`, with `--dep plzig` and a
+  `--dep plzig.use.<alias>=plzig.unit.<j>` per function it uses itself;
+  the user module gets the same `--dep` entries for its uses. Diagnostics
+  `src/unit<i>.zig:N:C:` are shown as `function <signature>, line N-1,
+  column C:`. Nothing in the host/guest ABI changes: only `root.zig` calls
+  `user.call`, and a used function's `call` is an ordinary Zig function.
 
 ## Interrupts
 

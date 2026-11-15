@@ -232,6 +232,40 @@ SELECT * FROM checked WHERE function = 'ca_sum(ca_ab)';
 
 DROP FUNCTION ca_sum(ca_ab);
 DROP TYPE ca_ab;
+-- a function that uses others (//#use) is checked with everything it uses,
+-- resolved and checked as for a call
+CREATE FUNCTION cu_helper(x int) RETURNS int STRICT LANGUAGE plzig AS $$ return x + 1; $$;
+CREATE FUNCTION cu_user(x int) RETURNS int STRICT LANGUAGE plzig AS $$
+//#use public.cu_helper(integer) as h
+    return (try h(x)).?;
+$$;
+SELECT * FROM checked WHERE function LIKE 'cu\_%';
+ function | sqlstate | message 
+----------+----------+---------
+(0 rows)
+
+-- a used function that may no longer be used: reported for its user
+ALTER FUNCTION cu_helper(int) SECURITY DEFINER;
+SELECT * FROM checked WHERE function LIKE 'cu\_%';
+     function     | sqlstate |                           message                            
+------------------+----------+--------------------------------------------------------------
+ cu_user(integer) | 0A000    | cannot use public.cu_helper(integer): it is SECURITY DEFINER
+(1 row)
+
+ALTER FUNCTION cu_helper(int) SECURITY INVOKER;
+-- a used function that no longer compiles: reported for both
+SET check_function_bodies = off;
+CREATE OR REPLACE FUNCTION cu_helper(x int) RETURNS int STRICT LANGUAGE plzig AS $$ return "x"; $$;
+RESET check_function_bodies;
+SELECT * FROM checked WHERE function LIKE 'cu\_%';
+      function      | sqlstate |          message          
+--------------------+----------+---------------------------
+ cu_helper(integer) | 42P13    | PL/Zig compilation failed
+ cu_user(integer)   | 42P13    | PL/Zig compilation failed
+(2 rows)
+
+DROP FUNCTION cu_helper(int) CASCADE;
+NOTICE:  drop cascades to function cu_user(integer)
 -- functions of other languages are not looked at
 CREATE FUNCTION cs_sql() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;
 SELECT count(*) AS reported FROM plzig_check_all() WHERE function = 'cs_sql()'::regprocedure;

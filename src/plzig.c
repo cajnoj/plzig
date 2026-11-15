@@ -78,6 +78,20 @@ typedef struct PlzigFunction
 	bool		is_trigger;		/* RETURNS trigger */
 	bool		read_only;
 	char	   *signature;		/* for error context */
+	/*
+	 * The functions compiled in (//#use, plzig_use.c), directly or
+	 * indirectly: the pg_proc rows their sources were made from.  Any change
+	 * of one of them (body, owner, ACL, SECURITY DEFINER, SET, name, drop)
+	 * makes this entry stale, so that the next call compiles again and
+	 * re-runs every check; so does any change of role memberships or roles
+	 * (an EXECUTE privilege can come from a membership).
+	 */
+	int			nused;
+	Oid		   *used_oid;
+	TransactionId *used_xmin;
+	ItemPointerData *used_tid;
+	uint64		used_checked_gen;	/* plzig_proc_inval_gen when last verified */
+	uint64		auth_gen;		/* plzig_auth_inval_gen when built */
 } PlzigFunction;
 
 typedef struct PlzigHashEnt
@@ -88,6 +102,9 @@ typedef struct PlzigHashEnt
 
 static HTAB *plzig_fn_hash = NULL;
 static bool plzig_fn_sweep_needed = false;
+/* bumped by every pg_proc invalidation / every role or membership change */
+static uint64 plzig_proc_inval_gen = 1;
+static uint64 plzig_auth_inval_gen = 1;
 static MemoryContext plzig_fn_cxt = NULL;
 static dlist_head plzig_lru = DLIST_STATIC_INIT(plzig_lru);
 static int	plzig_lru_count = 0;
@@ -318,19 +335,34 @@ plzig_function_build(Oid fn_oid, HeapTuple proctup)
 	{
 		PlzigSignature sig;
 		char	   *body;
-		char	   *src;
-		size_t		srclen;
+		PlzigProgram *prog;
 		char	   *wasm;
 		uint32		wasm_len;
 		int			i;
 
 		plzig_check_signature(proctup, &sig);
 		body = plzig_get_body(proctup);
-		src = plzig_generate_source(&sig, body, &srclen);
-		wasm = plzig_get_wasm(src, srclen, &wasm_len, true);
+		/*
+		 * Generations before the sources are read: an invalidation that
+		 * arrives while compiling makes the entry checked again.
+		 */
+		fn->auth_gen = plzig_auth_inval_gen;
+		fn->used_checked_gen = plzig_proc_inval_gen;
+		prog = plzig_program_build(proctup, &sig, body, false);
+		wasm = plzig_get_wasm(prog, &wasm_len, true);
 		fn->module = plzig_module_load(wasm, wasm_len);
 
 		old = MemoryContextSwitchTo(cxt);
+		fn->nused = prog->nunits - 1;
+		fn->used_oid = palloc0(sizeof(Oid) * (fn->nused + 1));
+		fn->used_xmin = palloc0(sizeof(TransactionId) * (fn->nused + 1));
+		fn->used_tid = palloc0(sizeof(ItemPointerData) * (fn->nused + 1));
+		for (i = 0; i < fn->nused; i++)
+		{
+			fn->used_oid[i] = prog->units[i + 1].fn_oid;
+			fn->used_xmin[i] = prog->units[i + 1].fn_xmin;
+			fn->used_tid[i] = prog->units[i + 1].fn_tid;
+		}
 		fn->nargs = sig.nargs;
 		fn->argtypes = palloc0(sizeof(PlzigTypeInfo) * (sig.nargs > 0 ? sig.nargs : 1));
 		for (i = 0; i < sig.nargs; i++)
@@ -395,6 +427,47 @@ static void
 plzig_proc_inval_callback(Datum arg, int cacheid, uint32 hashvalue)
 {
 	plzig_fn_sweep_needed = true;
+	plzig_proc_inval_gen++;
+}
+
+/* a role or a role membership changed: recheck functions with uses */
+static void
+plzig_auth_inval_callback(Datum arg, int cacheid, uint32 hashvalue)
+{
+	plzig_fn_sweep_needed = true;
+	plzig_auth_inval_gen++;
+}
+
+/*
+ * Are the functions compiled into fn (//#use) unchanged since it was built?
+ * Their rows are looked up only after some pg_proc invalidation.
+ */
+static bool
+plzig_function_uses_current(PlzigFunction *fn)
+{
+	int			i;
+
+	if (fn->nused == 0)
+		return true;
+	if (fn->auth_gen != plzig_auth_inval_gen)
+		return false;
+	if (fn->used_checked_gen == plzig_proc_inval_gen)
+		return true;
+	for (i = 0; i < fn->nused; i++)
+	{
+		HeapTuple	tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn->used_oid[i]));
+		bool		same;
+
+		if (!HeapTupleIsValid(tup))
+			return false;
+		same = fn->used_xmin[i] == HeapTupleHeaderGetRawXmin(tup->t_data) &&
+			ItemPointerEquals(&fn->used_tid[i], &tup->t_self);
+		ReleaseSysCache(tup);
+		if (!same)
+			return false;
+	}
+	fn->used_checked_gen = plzig_proc_inval_gen;
+	return true;
 }
 
 /*
@@ -427,7 +500,8 @@ plzig_function_sweep(void)
 		else
 		{
 			if (fn->fn_xmin != HeapTupleHeaderGetRawXmin(tup->t_data) ||
-				!ItemPointerEquals(&fn->fn_tid, &tup->t_self))
+				!ItemPointerEquals(&fn->fn_tid, &tup->t_self) ||
+				!plzig_function_uses_current(fn))
 				stale = lappend(stale, fn);
 			ReleaseSysCache(tup);
 		}
@@ -476,6 +550,8 @@ plzig_function_lookup(Oid fn_oid)
 		plzig_fn_hash = hash_create("PL/Zig functions", 64, &ctl,
 									HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 		CacheRegisterSyscacheCallback(PROCOID, plzig_proc_inval_callback, (Datum) 0);
+		CacheRegisterSyscacheCallback(AUTHOID, plzig_auth_inval_callback, (Datum) 0);
+		CacheRegisterSyscacheCallback(AUTHMEMROLEMEM, plzig_auth_inval_callback, (Datum) 0);
 	}
 	if (plzig_fn_sweep_needed)
 		plzig_function_sweep();
@@ -490,7 +566,8 @@ plzig_function_lookup(Oid fn_oid)
 		fn = ent->fn;
 		if (fn->fn_xmin != HeapTupleHeaderGetRawXmin(proctup->t_data) ||
 			!ItemPointerEquals(&fn->fn_tid, &proctup->t_self) ||
-			!plzig_function_rows_current(fn))
+			!plzig_function_rows_current(fn) ||
+			!plzig_function_uses_current(fn))
 		{
 			plzig_function_invalidate(fn);
 			fn = NULL;
@@ -658,9 +735,10 @@ plzig_inline_handler(PG_FUNCTION_ARGS)
 	MemoryContext oldcxt = CurrentMemoryContext;
 	PlzigCallSpec spec;
 
+	plzig_inline_check_directives(codeblock->source_text);
 	src = plzig_generate_inline_source(codeblock->source_text, &srclen);
 	/* DO blocks are never cached: compiled, run once, discarded */
-	wasm = plzig_get_wasm(src, srclen, &wasm_len, false);
+	wasm = plzig_get_wasm(plzig_program_single(src, srclen), &wasm_len, false);
 
 	memset(&rettype, 0, sizeof(rettype));
 	rettype.typid = VOIDOID;
@@ -715,14 +793,17 @@ plzig_validator(PG_FUNCTION_ARGS)
 	if (check_function_bodies)
 	{
 		char	   *body = plzig_get_body(proctup);
-		size_t		srclen;
-		char	   *src = plzig_generate_source(&sig, body, &srclen);
+		PlzigProgram *prog = plzig_program_build(proctup, &sig, body, true);
 		uint32		wasm_len;
-		char	   *wasm = plzig_get_wasm(src, srclen, &wasm_len, true);
+		char	   *wasm = plzig_get_wasm(prog, &wasm_len, true);
 		PlzigModule *mod = plzig_module_load(wasm, wasm_len);
 
 		plzig_module_unload(mod);
+		/* CREATE has reset the function's dependencies before calling us */
+		plzig_record_use_dependencies(fn_oid, prog);
 	}
+	else
+		plzig_record_uses_lenient(proctup);
 
 	ReleaseSysCache(proctup);
 	PG_RETURN_VOID();
@@ -820,8 +901,6 @@ plzig_check_one(Oid fn_oid, Oid langoid)
 	HeapTuple	proctup;
 	PlzigSignature sig;
 	char	   *body;
-	char	   *src;
-	size_t		srclen;
 	char	   *wasm;
 	uint32		wasm_len;
 
@@ -842,8 +921,8 @@ plzig_check_one(Oid fn_oid, Oid langoid)
 
 	plzig_check_signature(proctup, &sig);
 	body = plzig_get_body(proctup);
-	src = plzig_generate_source(&sig, body, &srclen);
-	wasm = plzig_get_wasm(src, srclen, &wasm_len, true);
+	/* the functions it uses are resolved and checked as for a call */
+	wasm = plzig_get_wasm(plzig_program_build(proctup, &sig, body, false), &wasm_len, true);
 	plzig_module_unload(plzig_module_load(wasm, wasm_len));
 
 	ReleaseSysCache(proctup);

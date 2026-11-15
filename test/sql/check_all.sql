@@ -133,6 +133,25 @@ SELECT * FROM checked WHERE function = 'ca_sum(ca_ab)';
 DROP FUNCTION ca_sum(ca_ab);
 DROP TYPE ca_ab;
 
+-- a function that uses others (//#use) is checked with everything it uses,
+-- resolved and checked as for a call
+CREATE FUNCTION cu_helper(x int) RETURNS int STRICT LANGUAGE plzig AS $$ return x + 1; $$;
+CREATE FUNCTION cu_user(x int) RETURNS int STRICT LANGUAGE plzig AS $$
+//#use public.cu_helper(integer) as h
+    return (try h(x)).?;
+$$;
+SELECT * FROM checked WHERE function LIKE 'cu\_%';
+-- a used function that may no longer be used: reported for its user
+ALTER FUNCTION cu_helper(int) SECURITY DEFINER;
+SELECT * FROM checked WHERE function LIKE 'cu\_%';
+ALTER FUNCTION cu_helper(int) SECURITY INVOKER;
+-- a used function that no longer compiles: reported for both
+SET check_function_bodies = off;
+CREATE OR REPLACE FUNCTION cu_helper(x int) RETURNS int STRICT LANGUAGE plzig AS $$ return "x"; $$;
+RESET check_function_bodies;
+SELECT * FROM checked WHERE function LIKE 'cu\_%';
+DROP FUNCTION cu_helper(int) CASCADE;
+
 -- functions of other languages are not looked at
 CREATE FUNCTION cs_sql() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;
 SELECT count(*) AS reported FROM plzig_check_all() WHERE function = 'cs_sql()'::regprocedure;

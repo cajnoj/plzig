@@ -29,6 +29,7 @@ $old->safe_psql('postgres', q{
 CREATE ROLE dev LOGIN;
 CREATE EXTENSION plzig;
 GRANT USAGE ON LANGUAGE plzig TO dev;
+GRANT CREATE ON SCHEMA public TO dev;
 CREATE FUNCTION double_it(x int) RETURNS int STRICT IMMUTABLE LANGUAGE plzig AS $$ return x * 2; $$;
 CREATE TABLE t (x int);
 INSERT INTO t SELECT generate_series(1, 100);
@@ -36,7 +37,17 @@ CREATE INDEX t_idx ON t (double_it(x));
 CREATE FUNCTION greet(n text) RETURNS text STRICT LANGUAGE plzig AS $$
     return try std.fmt.allocPrint(plzig.allocator, "hello {s}", .{n});
 $$;
+-- a function compiled into another (//#use), owned by dev; the user's name
+-- sorts before the helper's, so only the dependency orders the restore
+SET ROLE dev;
+CREATE FUNCTION zzz_helper(x int) RETURNS int STRICT LANGUAGE plzig AS $$ return x + 1; $$;
+CREATE FUNCTION aaa_user(x int) RETURNS int STRICT LANGUAGE plzig AS $$
+//#use public.zzz_helper(integer) as helper
+    return (try helper(x)).? * 10;
+$$;
+RESET ROLE;
 });
+is($old->safe_psql('postgres', 'SELECT aaa_user(1)'), '20', 'a function using another, in the old cluster');
 is($old->safe_psql('postgres', "SELECT greet('old')"), 'hello old', 'works in the old cluster');
 $old->stop;
 
@@ -65,5 +76,12 @@ is($new->safe_psql('postgres', 'SET enable_seqscan = off; SELECT count(*) FROM t
 	'1', 'expression index usable');
 is($new->safe_psql('postgres', "SELECT has_language_privilege('dev', 'plzig', 'USAGE'), has_language_privilege('public', 'plzig', 'USAGE')"),
 	't|f', 'language ACL preserved');
+is($new->safe_psql('postgres', 'SET ROLE dev; SELECT aaa_user(4)'), '50',
+	'the function using another compiles and works after the upgrade');
+is($new->safe_psql('postgres', q{SELECT count(*) FROM pg_depend
+	WHERE objid = 'aaa_user(int)'::regprocedure AND refobjid = 'zzz_helper(int)'::regprocedure
+	  AND deptype = 'n'}), '1', 'its dependency on the used function is in the new cluster');
+my ($rc, $out, $err) = $new->psql('postgres', 'DROP FUNCTION zzz_helper(int)');
+like($err, qr/other objects depend on it/, 'the used function cannot be dropped alone');
 $new->stop;
 done_testing();

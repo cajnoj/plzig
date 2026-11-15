@@ -3,7 +3,8 @@
 # (fuzz/pipeline/gen.pl: valid, near-valid and invalid bodies of functions
 # of several families -- scalar, text, non-strict, native types, OUT
 # parameters, composite argument and result, SETOF/TABLE, a row trigger, a
-# procedure with transaction control, DO blocks) through CREATE FUNCTION /
+# procedure with transaction control, DO blocks, a function using two others
+# with //#use) through CREATE FUNCTION /
 # CREATE PROCEDURE / DO on the running (ASan) server, as an unprivileged
 # role with USAGE, with the default sandbox (require), then a call of every
 # function that compiled (the trigger through INSERT/UPDATE on its table),
@@ -23,7 +24,9 @@
 # (57014), SQL errors of its queries and of the arguments it passes them
 # (22003, 22012, 42883, 42P01, 42703, 0A000, 25006, 42501, 22P02), memory
 # (53200, 54000, 54001) -- plus, for the families that return values the
-# host checks, the errors of those checks (FAMILY_CALL_EXTRA below).  A DO
+# host checks, the errors of those checks (call_extra below), and for the
+# family with //#use directives a directive moved after code by a mutation
+# (42601, create_extra below).  A DO
 # block compiles *and runs* its body in one statement, so its expected set
 # is the union of the CREATE set and the call set: a panic in a DO block is
 # a clean 38000, exactly as in a called function.
@@ -48,6 +51,14 @@ CREATE TABLE fz_t (id int, name text, qty int NOT NULL DEFAULT 0, price numeric(
 CREATE TABLE fz_log (n int);
 CREATE FUNCTION fz_tg() RETURNS trigger LANGUAGE plzig AS $$ return .new; $$;
 CREATE TRIGGER fz_t_trg BEFORE INSERT OR UPDATE ON fz_t FOR EACH ROW EXECUTE FUNCTION fz_tg();
+CREATE FUNCTION fz_h_int(x int) RETURNS int STRICT LANGUAGE plzig AS $$
+    if (x < 0) return error.Negative;
+    return x +% 1;
+$$;
+CREATE FUNCTION fz_h_text(t text) RETURNS text LANGUAGE plzig AS $$
+    const v = t orelse return null;
+    return try std.fmt.allocPrint(plzig.allocator, "<{s}>", .{v});
+$$;
 SQL
 ) || { fz_finding "pipeline setup failed: $out"; }
 # a smaller cache, so that eviction runs
@@ -56,6 +67,10 @@ fz_reload
 
 create_ok=" ok 42501 42P13 54000 57014 22021 22P05 "
 call_ok=" ok P0001 38000 22023 57014 22003 22012 53200 54001 54000 42883 42P01 42703 0A000 25006 42501 22P02 "
+declare -A create_extra=(
+    # a //#use directive moved after the first line of code
+    [use]=" 42601 "
+)
 declare -A call_extra=(
     # results the host checks: date/timestamp range, numeric, JSON text
     # (22P05: a \u0000 escape jsonb_in does not support)
@@ -99,7 +114,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
             ok="$create_ok${call_ok# }"
         else
             sql=$(printf '%s $%s$\n%s\n$%s$;' "$create" "$tag" "$(cat "$f")" "$tag")
-            ok=$create_ok
+            ok="$create_ok${create_extra[$family]:-}"
         fi
         out=$(printf '%s\n' "SET statement_timeout = '30s';" "\\set VERBOSITY verbose" "$sql" |
               psql -X -q -At -U fuzz_pipe 2>&1)

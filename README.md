@@ -672,6 +672,84 @@ CALL load_batches(100000);
   the instance is discarded like after any error (its globals start over).
 * `COMMIT`/`ROLLBACK` as SQL through `plzig.spi.execute` stay refused.
 
+### Using other PL/Zig functions (`//#use`)
+
+A function can compile other PL/Zig functions into itself and call them as
+plain Zig functions — no SPI, no conversion of arguments and results. It
+declares each one in a directive line at the top of its body:
+
+```sql
+CREATE FUNCTION hashids.encode_list(numbers bigint[], salt text, min_length int, alphabet text)
+RETURNS text STRICT LANGUAGE plzig AS $$ ... $$;
+
+CREATE FUNCTION hashids.encode(n bigint, salt text) RETURNS text STRICT LANGUAGE plzig AS $$
+//#use hashids.encode_list(bigint[], text, integer, text) as encode_list
+    const list = try std.fmt.allocPrint(plzig.allocator, "{{{d}}}", .{n});
+    return (try encode_list(list, salt, 0, "abcdefghijklmnopqrstuvwxyz")).?;
+$$;
+```
+
+* The form is `//#use schema.function(argument types) as name`. The
+  function is named like a `regprocedure` value (`'hashids.encode_list(bigint[],
+  text, integer, text)'::regprocedure`) and **must be schema-qualified**; the
+  `search_path` is never used (unqualified type names can only be built-in
+  types). It is looked up again at every compilation, as the owner of the
+  using function.
+* Directive lines are lines whose first non-blank characters are `//#`.
+  They must come before the first line of code (blank lines and `//`
+  comments may precede them). They stay in the source as comments, so line
+  numbers in compiler messages do not move. A malformed directive, an
+  unknown one (`//#include`) or one after code is an error at `CREATE`.
+* `name` is the used function's `call`, with exactly the Zig signature its
+  body has when it is compiled on its own: plain parameter types for a
+  `STRICT` function, optionals otherwise; the result is `anyerror!?T`
+  (`anyerror!void` for `void`). So `try encode_list(...)` propagates its
+  Zig errors, and its `plzig.raise`, panics and SPI errors abort the call
+  as the caller's own would.
+* Each used function is compiled as a Zig module of its own, so its private
+  helpers (code after its body) never clash with the user's. It may itself
+  use other functions (at most 8 levels deep and 32 functions in all); a
+  cycle between different functions is an error, while a function calling
+  its own `call` recursively needs no directive. A function used through
+  two paths is compiled in once.
+* What can be used: PL/Zig functions (not procedures, aggregates, window,
+  trigger or set-returning functions) with scalar parameters and result —
+  no composite types, `OUT`/`INOUT`/`TABLE` parameters or domains (a
+  domain's constraints would not be checked: compiled in, values are passed
+  as Zig values). Types that cross the boundary as text (`inet`, arrays,
+  ...) are plain `[]const u8` between the two functions, without the input
+  function's check.
+* **Restrictions** (a compiled-in call skips what a SQL-level call
+  enforces; see *Security model*): the used function must have **the same
+  owner** as the using one, that owner must hold `EXECUTE` on it, and it
+  must not be `SECURITY DEFINER` or have `SET` clauses. Callers of the
+  using function need no `EXECUTE` on the used one: its code is part of the
+  using function, as if the owner had copied it in.
+* It runs **inside the caller**: within the caller's memory
+  (`plzig.max_memory`), stack and time limits (`statement_timeout`), with
+  the caller's arena and SPI connection — so under the caller's read-only
+  rule (from the caller's volatility, not its own) and, in a `SECURITY
+  DEFINER` caller, as the caller's owner.
+* A normal dependency on each directly used function is recorded, so `DROP
+  FUNCTION` of a used function needs `CASCADE`, and `pg_dump` restores
+  used functions first. Correctness does not depend on it: whenever a used
+  function changes (body, owner, privileges, `SECURITY DEFINER`, `SET`,
+  name, dropped) or a role membership changes, sessions that loaded the
+  using function compile it again at its next call and re-run every check;
+  if one fails, the call fails with that error. The module cache key covers
+  the generated source of every compiled-in function, so a changed used
+  function always yields a new module.
+* With `check_function_bodies = off` (as `pg_restore` and `pg_upgrade` run)
+  nothing is checked at `CREATE`; the dependency is recorded for each used
+  function that exists. Everything is checked at the first call.
+* Not available in `DO` blocks (an error): a block has no owner of its
+  own, no dependencies and no cache entry.
+
+Cost: a compiled-in call is an ordinary Zig function call inside the same
+module; calling the same function through `plzig.spi` costs a query
+(see `doc/benchmarks.md`, *Compiled-in calls*). The user's module grows by
+the used functions' code, and each compilation compiles them too.
+
 ### Session state
 
 Globals persist per function per session (and are never shared between
@@ -793,8 +871,17 @@ patched to poll `QueryCancelPending`/`ProcDiePending` at every branch and
 call). SQL runs through SPI with the normal permission checks of the
 current user.
 
+**Functions compiled into others** (`//#use`) skip what a SQL call checks,
+so only functions with the same owner, which that owner may execute and
+which are neither `SECURITY DEFINER` nor have `SET` clauses, can be
+compiled in; references are schema-qualified literals resolved as the
+owner (never through the session's `search_path`) and checked again at
+every compilation, and sessions notice every change of a used function
+(*Using other PL/Zig functions*; `doc/security.md` §4.13).
+
 **Defence in depth.** Before compiling, `plzig-validate` (built on the
-compiler's own tokenizer) rejects `@import` of anything but `"plzig"`, every
+compiler's own tokenizer) rejects `@import` of anything but `"plzig"` (and
+the host-chosen names of the functions a file uses), every
 builtin not on an allowlist (e.g. `@embedFile`, `@extern`, `@export`,
 `@ptrFromInt`, `@ptrCast`, `@setEvalBranchQuota`, `@wasmMemoryGrow`,
 atomics) and the keywords `extern`, `export`, `asm`, `linksection`,

@@ -19,7 +19,7 @@
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
-static bool
+bool
 plzig_valid_identifier(const char *s)
 {
 	const char *p;
@@ -365,7 +365,8 @@ plzig_row_type_index(StringInfo buf, Oid *seen, int *nseen, Oid typid)
 }
 
 char *
-plzig_generate_source(const PlzigSignature *sig, const char *body, size_t *srclen)
+plzig_generate_source(const PlzigSignature *sig, const char *body,
+					  char *const *use_aliases, int nuses, size_t *srclen)
 {
 	StringInfoData buf;
 	int			i;
@@ -375,6 +376,18 @@ plzig_generate_source(const PlzigSignature *sig, const char *body, size_t *srcle
 
 	initStringInfo(&buf);
 	appendStringInfoString(&buf, PLZIG_SRC_PRELUDE);
+
+	/*
+	 * The functions this one uses (//#use directives, plzig_use.c): each is
+	 * a module of its own, imported under a name only the host gives it;
+	 * the alias is its `call`.  Aliases were validated as identifiers.
+	 */
+	for (i = 0; i < nuses; i++)
+	{
+		Assert(plzig_valid_identifier(use_aliases[i]));
+		appendStringInfo(&buf, "const @\"%s\" = @import(\"" PLZIG_USE_IMPORT_PREFIX "%s\").call; ",
+						 use_aliases[i], use_aliases[i]);
+	}
 
 	/*
 	 * Declarations of the row types, all on the header line (so that
@@ -528,7 +541,7 @@ plzig_test_generate_source(PG_FUNCTION_ARGS)
 	if (plzig_type_is_row(sig.rettype))
 		sig.rettupdesc = lookup_rowtype_tupdesc_copy(sig.rettype, -1);
 	sig.strict = PG_GETARG_BOOL(3);
-	src = plzig_generate_source(&sig, text_to_cstring(PG_GETARG_TEXT_PP(4)), &len);
+	src = plzig_generate_source(&sig, text_to_cstring(PG_GETARG_TEXT_PP(4)), NULL, 0, &len);
 	if (len != strlen(src))
 		elog(ERROR, "reported length %zu differs from the text length %zu", len, strlen(src));
 	PG_RETURN_TEXT_P(cstring_to_text_with_len(src, (int) len));

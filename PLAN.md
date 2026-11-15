@@ -2083,3 +2083,99 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
     - *Not verifiable here*: the workflows were not run on GitHub; they pass
       `actionlint` 1.7.12 (with shellcheck) and the commands they run were
       run locally in Docker with short durations.
+41. **One PL/Zig function compiled into another: `//#use` (owner request,
+    2026-11-15).** "If fn a() calls fn b(), compile b() into a()'s code",
+    for modularity (the hashids port carried the same 316 helper lines in
+    each of 15 functions). New file `src/plzig_use.c`; no host/guest ABI
+    change, no new GUC, no new host import. Design (README, *Using other
+    PL/Zig functions*; doc/security.md §4.13):
+    - *Syntax*: directive lines `//#use schema.function(argument types) as
+      name` at the top of the body (before the first line of code; blank
+      lines and comments may precede them). Chosen because a line whose
+      first non-blank characters are `//` is always a comment in Zig (no
+      block comments; only `\\` string lines span lines), so the C side
+      needs no Zig lexer and the lines stay in the source (line numbers do
+      not move). Explicit, never inferred from calls. Malformed, unknown
+      (`//#include`) and misplaced (after code) directives are errors
+      (42601); `//#` is reserved for directives.
+    - *Resolution*: PostgreSQL's `regprocedurein` with `search_path` set to
+      `pg_catalog, pg_temp` (GUC nest level, `GUC_ACTION_SAVE`, so also in
+      parallel workers) and the user id switched to the using function's
+      owner (`SECURITY_LOCAL_USERID_CHANGE`): the result does not depend on
+      the session or on who compiles, and schema `USAGE` is the owner's.
+      The function name must be qualified (42602); unqualified type names
+      therefore can only be built-in types. Functions and parameter types
+      in temporary schemas are refused. Re-resolved at every compilation.
+    - *What may be used*: PL/Zig functions (42809 otherwise; procedures,
+      aggregates, window functions 42809 too), not set-returning, trigger,
+      with output parameters, composite or domain parameters or results
+      (0A000). Domains are refused (not in the brief) because a compiled-in
+      call would not check their constraints; text-I/O types are allowed as
+      `[]const u8` (documented: no input-function check between the two).
+    - *Security*: same owner (42501), the owner holds `EXECUTE` (42501,
+      ACL check incl. memberships), not `SECURITY DEFINER`, no `SET`
+      clauses (0A000), all as specified. Callers of the user need no
+      `EXECUTE` on the used function (the code is the owner's, as if
+      copied). The used function runs inside the caller's instance and
+      limits, with the caller's SPI connection, read-only rule and user id.
+    - *`DO` blocks*: `//#use` refused (0A000); directives are still parsed.
+    - *Calling convention*: each used function is a Zig module of its own,
+      `plzig.unit.<i>` from `src/unit<i>.zig`, generated exactly as when
+      compiled standalone (its own directives included), depending on
+      `plzig` and on its own uses; a file imports a used function under the
+      host-chosen name `plzig.use.<alias>` (`--dep plzig.use.<alias>=
+      plzig.unit.<i>`), and the generated header line declares `const
+      @"alias" = @import("plzig.use.alias").call;`. Transitive; a function
+      reached twice is one module; at most 8 levels and 32 functions
+      (54000); a cycle between different functions, or a function using
+      itself, is 42P13 (direct recursion through `call` needs nothing);
+      the same function twice in one function 42723; alias collisions with
+      parameters, generated names (`Result`, `returnNext`, `tg`) or each
+      other 42712, an alias that is no identifier (or `plzig`/`std`/`call`)
+      42602; a collision with the body's own declarations is Zig's error.
+    - *Validator*: `plzig-validate [--allow-import NAME]...`; each file is
+      validated exactly as a standalone function, and `@import` may name,
+      besides `"plzig"`, exactly the given names (the file's own uses),
+      compared byte for byte. `validate()` (the fuzz target's entry) is
+      unchanged.
+    - *Cache key*: unchanged for a function without uses; with uses, the
+      module layout and every used function's generated source are added.
+      Compiler messages from a used function are shown as `function
+      <signature>, line L, column C:`; validator messages with "In the used
+      function ...".
+    - *Staleness without pg_depend*: a loaded function keeps the `pg_proc`
+      row versions (xmin, ctid) of everything compiled in; after any
+      `pg_proc` invalidation they are compared at the next call (sweep and
+      lookup), and any `pg_authid`/`pg_auth_members` change (EXECUTE through
+      a membership) invalidates every function with uses. The rebuild
+      re-runs every check; if one fails, the call fails with it.
+    - *pg_depend*: the validator (check_function_bodies = on), after a
+      successful compilation, records a normal dependency on each directly
+      used function (CREATE has reset the function's dependencies; an
+      existing identical entry is not duplicated), holding an
+      `AccessShareLock` on the used function. With check_function_bodies =
+      off (pg_restore, pg_upgrade) nothing is checked or refused, and the
+      dependency is recorded for every directive that resolves (each in a
+      subtransaction; failures skipped). The owner check could not run
+      there anyway: a restore creates every function as the restoring user
+      and changes the owner afterwards. Because the dependency is restored,
+      pg_dump orders a used function before its user (tested with names
+      that sort the other way).
+    - *`plzig_check_all()`* compiles functions with uses through the same
+      path (resolution and checks as at a call; no lock, no dependency).
+    - *Tests*: `test/sql/uses.sql` (new: happy path, transitive and shared
+      uses, helper-name isolation, every refusal, cycles, limits, line
+      numbers, kinds of users, native types and SPI, every change of a used
+      function after the user exists, role memberships, dependencies and
+      check_function_bodies = off, `SECURITY DEFINER` user, cache contents
+      across sessions), `test/sql/check_all.sql` (a user, a refused and a
+      failing used function), `test/tap/t/100_uses.pl` (new: changes made
+      by another session while one has the user loaded; a fresh session
+      gets a new module), `050_dump_restore.pl` and `080_upgrade.pl` (a
+      user and its helper survive, dependency restored, DROP refused),
+      `zig/validate/test.zig` (`--allow-import`), fuzz `pipeline` (a
+      family whose body uses a helper function).
+    - *Benchmark* (`bench/use-call.sql`, doc/benchmarks.md *Compiled-in
+      calls*): one million calls of a small helper, PostgreSQL 18.7:
+      compiled in ~5 ns per call (the same as the inline baseline: the
+      call was inlined), through a prepared `plzig.spi` statement ~1.4 µs.

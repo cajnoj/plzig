@@ -190,6 +190,31 @@ the start of phase D:
   `0xAA` in uninitialised memory.
 * These three are optional to-do items in PLAN.md §12 (9–11).
 
+## Compiled-in calls (`//#use`)
+
+A standalone measurement, not part of `bench/run.sh`:
+`bench/use-call.sql` (README, *Using other PL/Zig functions*). One small
+PL/Zig helper (`mix(bigint)`: shift, xor, multiply, shift, xor) is called
+one million times in a loop by (i) a function that compiles it in with
+`//#use`, (ii) a function that calls it through `plzig.spi` (a prepared
+statement kept in a global, typed `int8` parameter and result, the fastest
+SPI path), and (iii), as the baseline, the same steps written inline in the
+loop. All three return the same value. PostgreSQL 18.7 in the test image
+(`plzig-test:18.7`), defaults, one session, the machine below without core
+pinning; three runs each, 2026-11-15:
+
+| | 1 M calls, ms (3 runs) | per call |
+|---|---|---:|
+| (iii) inline baseline | 4.6, 4.9, 5.1 | ~5 ns (loop included) |
+| (i) compiled in (`//#use`) | 4.9, 5.0, 5.1 | ~5 ns (loop included) |
+| (ii) through `plzig.spi` | 1444, 1442, 1434 | ~1.4 µs |
+
+A compiled-in call costs what the same code inline costs: it is an
+ordinary Zig call within one module, and here the compiler inlined it. The
+SPI call costs about 1.4 µs — executor start-up, a function call through
+fmgr into the helper's own instance, and the result conversion — roughly
+300 times the helper itself. 10 M compiled-in calls take 50 ms (linear).
+
 ## Machine, versions, settings
 
 | | |
