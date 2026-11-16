@@ -81,13 +81,20 @@ include(${WAMR_ROOT_DIR}/build-scripts/runtime_lib.cmake)
 # printf-style logging to the host (which discards it), hidden visibility.
 # BLOCK_ADDR_CACHE_SIZE (config.h default 64, x2 ways, per exec env): the
 # classic interpreter looks up the end of a block in this cache when it
-# branches out of it, and rescans the bytecode to the block's end on a miss.
-# Zig inlines most of a function's callees into one large wasm function, so
-# with 64 sets hot blocks evicted each other on every call and the rescans
-# cost several microseconds per call (measured, PLAN.md Deviations 30);
-# 256 sets remove that for the SDK's hot paths.  Each exec env grows by
-# 192 x 2 x 24 bytes (about 9 kB); no change to what modules are accepted.
-add_definitions(-DWASM_ENABLE_PLZIG_INTERRUPT=1 -DBH_VPRINTF=plzig_wamr_vprintf -DBLOCK_ADDR_CACHE_SIZE=256)
+# enters an `if` or branches out of a block, and rescans the bytecode to the
+# block's end on a miss.  The set is the block's address modulo the size, so
+# which hot blocks collide depends on code layout.  Zig inlines most of a
+# function's callees into one large wasm function, so with 64 sets hot
+# blocks evicted each other on every call and the rescans cost several
+# microseconds per call (PLAN.md Deviations 30); 256 sets fixed the SDK's
+# hot paths but not large user functions (40 % of the cycles in
+# wasm_loader_find_block_addr, a function twice as slow because unexecuted
+# code was added; PLAN.md Deviations 54).  1024 sets bring the rescans below
+# 0.3 % of the cycles there; 4096 and 16384 measured the same.  An exec env
+# holds 1024 x 2 x 24 bytes = 48 kB of cache (36 kB more than with 256),
+# next to its 512 kB interpreter stack; no change to what modules are
+# accepted.
+add_definitions(-DWASM_ENABLE_PLZIG_INTERRUPT=1 -DBH_VPRINTF=plzig_wamr_vprintf -DBLOCK_ADDR_CACHE_SIZE=1024)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fvisibility=hidden -fno-strict-aliasing")
 set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -Wa,--noexecstack")
 

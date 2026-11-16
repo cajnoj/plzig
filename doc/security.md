@@ -186,7 +186,7 @@ wrong-mode cache files), `test/tap/t/060_environment.pl`, fuzz target
   multi-module, GC, memory64, SIMD, reference types, bulk memory, tail
   calls, exception handling; `third_party/wamr/CMakeLists.txt`) and
   software bounds checks (`WAMR_DISABLE_HW_BOUND_CHECK`), and a block
-  address cache of 256 sets instead of 64 (`BLOCK_ADDR_CACHE_SIZE`, a
+  address cache of 1024 sets instead of 64 (`BLOCK_ADDR_CACHE_SIZE`, a
   performance setting: more memory per execution environment, no change to
   what is accepted or executed), so it installs
   no signal handlers and creates no threads. After initialising it the
