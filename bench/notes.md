@@ -116,6 +116,20 @@ the bytecode to a block's end; the rest were byte-wise 0xAA fills of
 unfilled buffers on the hot paths fixed both, without changing what modules
 may do.
 
+A later measurement (PLAN.md Deviations 54) found the same cache still
+dominating in larger functions (a port of Open Location Code: up to 40 % of
+all cycles in `wasm_loader_find_block_addr`, one function twice as slow
+because code it never executed had been added); the cache now has 1024
+sets. Not part of the tables above, which are the earlier full run: the
+same 18.7 configuration (JIT off, CPUs 0-11, medians of 15 runs) before and
+after that change and a faster `Numeric.fromF64`, on 2026-11-16, gave
+tasks 2-13 within -12 % .. +4 % of each other for PL/Zig (jsonb_field
+184 -> 162 ms, numeric_loop 328 -> 293 ms, text_1MB 46.4 -> 41.2 ms;
+PL/pgSQL moved by up to -11 % in the same runs, so part of that is run-to-run
+variation). Task 1 measured 239 -> 301 ms in that full run, but two
+alternating task-1-only runs of the two builds gave 247.1 / 247.5 and
+240.0 / 240.1 ms, so that difference was not the change.
+
 **JIT** makes no measurable difference to any language here: with the
 default thresholds only the outer statement of task 1's PL variants is
 compiled (its cost estimate counts 100 per function call), and the time is

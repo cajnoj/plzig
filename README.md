@@ -837,6 +837,54 @@ Globals persist per function per session (and are never shared between
 functions); an instance that raised an error is discarded, so its globals
 start over.
 
+### Writing fast functions
+
+Function bodies run in WAMR's classic interpreter: every WebAssembly
+instruction is decoded and dispatched one at a time, so things that are
+free in native code have a price. Measured with small PL/Zig functions on
+PostgreSQL 18.7 (Intel Core Ultra 7 155H, one backend, per operation, loop
+overhead subtracted; the figures are a guide, not a contract):
+
+* **Large `undefined` arrays cost time.** In `ReleaseSafe` (the only mode)
+  Zig fills `undefined` memory with `0xAA`. Up to 64 bytes that is a few
+  stores (under 0.1 µs); from about 128 bytes on it is a byte loop of
+  about **10 ns per byte** (a `[1024]u8` scratch buffer: 9.7 µs every time
+  its declaration runs). Initialising it with `@splat(0)` costs the same,
+  and so does `Allocator.alloc` (it fills too). Keep scratch buffers small,
+  make large ones `var` declarations at container level (a `struct { var
+  buf: [4096]u8 = undefined; }` costs nothing per call: it is static
+  data), or take arena memory with `plzig.allocator.rawAlloc` when you
+  write all of it right away. Copying is a byte loop as well (`@memcpy` of
+  1 kB: about 14 µs), so pass slices rather than large arrays or structs by
+  value.
+* **Avoid 128-bit division and formatting.** `u128`/`i128` division is a
+  library routine that is itself interpreted: 0.3–0.6 µs per division
+  against 0.02 µs for `u64`; a 64×64→128-bit multiplication is about
+  0.15 µs. Formatting an `i128` with `{d}` takes about 6.4 µs, an `i64`
+  1.4 µs. Prefer 64-bit integers, and split wider arithmetic into 64-bit
+  halves where you need it.
+* **Prefer `i64`/`f64` to `plzig.Numeric` arithmetic** where the result is
+  exact anyway. Every `Numeric` operation is a host call into PostgreSQL's
+  numeric code: about 0.4 µs each (`add`), against a few nanoseconds for a
+  native `f64` or `i64` operation. `Numeric.toI64`/`toF64` and
+  `Numeric.fromI64` stay in the guest (0.2 µs for `fromI64`).
+  `Numeric.fromF64` (exactly what `float8::numeric` gives) takes about
+  1.1 µs for 1e-8 <= |x| < 2^64 and about 30 µs outside that range, where
+  it needs exact big-integer arithmetic.
+* **Calls are cheap, the work inside counts.** Calling a PL/Zig function
+  from SQL costs about 0.3–0.5 µs (the arguments are converted, the guest
+  entered); a host call (SPI, a numeric operation, a message) is of the
+  same order plus its own work.
+* **Speed can depend on the code around it.** The interpreter caches where
+  each block of the code ends, per function instance; the cache is
+  indexed by code address, so whether hot blocks collide depends on code
+  layout. With the cache size PL/Zig uses (1024 sets, PLAN.md Deviations
+  54) this no longer dominates even in large functions, but identical code
+  can still run 5–20 % slower when a lot of other code is compiled into
+  the same function (measured: an Open Location Code `decode` at 20 µs on
+  its own and 21–24 µs with one to four other functions' code present
+  but not executed). Measure the function you care about, in place.
+
 ### Not supported (by design, see PLAN.md D10)
 
 Event triggers, set-returning functions in value-per-call mode,
@@ -1122,8 +1170,9 @@ path goes to the server log only.
   compile; the Zig cache does not grow per distinct function (it holds
   the standard library's compiled forms, about 45 MB).
 * Idle cached instances are bounded by `plzig.instance_cache_size` and
-  `plzig.instance_cache_max_memory` (default: at most 64 × 4 MB per
-  backend between statements).
+  `plzig.instance_cache_max_memory` (default: at most 64 × 4 MB of linear
+  memory per backend between statements, plus about 0.6 MB per instance
+  for the interpreter's stack, 512 kB, and its block-address cache, 48 kB).
 * Runtime resource use is bounded per instance (`plzig.max_memory`), but a
   function recursing through SPI creates one instance per level, and
   `spi.execute` results are fully materialised (cursors are not: at most 50

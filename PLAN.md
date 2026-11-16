@@ -2453,3 +2453,99 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
     `/usr/share/dnf5/repos.d`, so there through
     `/etc/dnf/repos.override.d`); on EL 8/9 the `postgresql` module is
     disabled as well.
+54. **Slow spots found by the Open Location Code port (2026-11-16).**
+    The port (a separate repository) showed four problems; no ABI change, no
+    new host import or GUC (the SDK digest changes, so modules are
+    recompiled once).
+    - *`Numeric.fromF64` took about 36 µs per call.* Its exact digit
+      generator worked on 324-byte big integers on the stack: each was
+      filled and copied byte by byte by the interpreter (two initialisations
+      and three copies per call), and the 15 digits were found by repeated
+      subtraction. Now a fast path (`decimal15Fast`, `zig/sdk/plzig.zig`)
+      handles normal values with 1e-8 <= |x| < 2^64 exactly in 64-bit
+      arithmetic: x = m * 2^e2 is scaled by 10^p into [10^14, 10^15) with one
+      64x64->128-bit multiplication done in 32-bit halves and shifts on the
+      two words (no u128 division, no compiler-rt call), and the shifted-out
+      bits decide half-to-even rounding; values of 10^15 or more use the
+      integer part with u64 division and the binary fraction as sticky bit.
+      The decimal exponent is estimated from the binary one and corrected
+      (at most three tries, else the exact path). The result is written
+      straight into arena memory (no digit buffer). Everything else
+      (subnormals, < 1e-8, >= 2^64) uses the old exact path, whose big
+      integers are now static (only the used limbs are copied): 45 -> 30 µs
+      there. Measured in a loop of 20 000 calls (PostgreSQL 18.7): 35.5 ->
+      1.1 µs per call for ordinary values. Tests: a `test` block in
+      `zig/sdk/plzig.zig` itself (private functions; `make check-zig` now
+      also runs `zig test` with the SDK as the root module, so no test-only
+      declaration is public) compares the result bytes with the exact path
+      for 100 000 random bit
+      patterns, 100 000 random values in the range (at least 99 % must take
+      the fast path), every power of two (subnormals included) and ten with
+      neighbours, the range boundaries +-6 ulps, 40 000 integer ties and
+      8 800 dyadic fraction ties (asserted to be on the fast path), and two
+      ties written out; mutating either rounding rule in the fast path made
+      the tests fail. `test/sql/types_numeric.sql` compares `fromF64` with
+      `float8::numeric` as text (scale included) on about 11 000 values of
+      the same kinds.
+    - *The same code ran at different speeds depending on the code around
+      it.* Rebuilt repro: `decode` 20.4 µs per call alone, 40.5 µs with an
+      `encode` call compiled into the same function but not executed, 45 µs
+      with it executed (encode alone: 2.6 µs). perf (user-space cycles,
+      the benchmark backend) showed 40 % of the cycles in
+      `wasm_loader_find_block_addr` for the second function and none for the
+      first: the block-address cache of Deviations 30 (256 sets of two,
+      indexed by the block's address modulo the size) thrashed, and each miss
+      rescans the bytecode to the block's end. Neither not inserting
+      duplicate entries nor inserting only the looked-up block on a miss
+      (both tried as WAMR source changes) helped; a larger cache did: 1024,
+      4096 and 16384 sets gave 21.4-21.8 µs, with
+      `wasm_loader_find_block_addr` below 0.3 % of the cycles in this repro
+      and in the port's `recovernearest`, `shorten` and `decode`.
+      `BLOCK_ADDR_CACHE_SIZE=1024` (a build define, no WAMR source change, no
+      change to what is accepted): 48 kB per execution environment (36 kB
+      more), next to its 512 kB interpreter stack; with the default
+      `plzig.instance_cache_size` of 64 at most 2.3 MB more per backend. The
+      port's benchmark: `recovernearest` 85.6 -> 55.6 µs, `shorten` 43.8 ->
+      37.8 µs, `encode` 3.3 -> 2.7 µs, `decode` unchanged (the port's
+      README, `bench.sql`, before/after images of this tree). Without the
+      larger cache the new SDK alone moved the port's 15-digit `decode` from
+      30.5 to 44.8 µs (layout), which the larger cache removed. What remains:
+      `decode` with four other functions compiled in but not executed takes
+      23.8 µs instead of 20 µs; perf stat shows 7.6 % more instructions and
+      18 % more cycles, and no block-cache rescans, so this is different
+      generated code and processor effects of a larger function, not the
+      cache (inference from the counts). A per-function side table of block
+      ends (resolved once) would remove the layout dependence of the cache
+      completely but is a larger WAMR change and was not needed.
+    - *`undefined` fills and 128-bit arithmetic* (measured, per operation):
+      an `undefined` stack array of up to 64 bytes costs a few stores, from
+      128 bytes on about 9.5 ns per byte (`[1024]u8`: 9.7 µs); `@splat(0)`
+      costs the same; `@memcpy` about 13.6 ns per byte; u128 division
+      0.34-0.57 µs against 0.02 µs for u64; a 64x64->128 multiplication
+      0.15 µs; `{d}` of an i128 6.4 µs against 1.4 µs for an i64; a numeric
+      host operation (`add`) 0.43 µs. SDK audit: no 128-bit division or
+      multiplication on a hot path (the new `fromF64` path avoids them);
+      the argument tuple of the entry point and the row structs filled field
+      by field are not filled at run time (a 20-argument function and a
+      20-field composite argument cost 0.08 and 0.6 µs more than one
+      argument/field, far below a fill); `fromI64`'s 10-byte digit array is
+      cheap (rewriting it without the array made it slower: 0.22 -> 0.36 µs,
+      reverted). The big integers of the `fromF64` fallback were the one
+      hot-path fill that mattered. README: *Writing fast functions*.
+    - *Discarding a parameter* (`_ = n;`) failed with Zig's "pointless
+      discard of function parameter" and a note at line 0: the generated
+      header has `_ = &n;` for every parameter (an unused parameter is an
+      error), and Zig 0.17.1 reports any discard of a variable that is used
+      anywhere, so no header makes both legal without analysing the body.
+      The compile error now carries a HINT (`plzig_discard_hint`,
+      `src/plzig_build.c`) that the header already marks parameters as used
+      and the discard should be removed; the error's own position was
+      already mapped to the body's line (tested: `test/sql/basics.sql`, with
+      the note at line 0 and with the user's own use).
+    - Benchmarks (bench/, 18.7, JIT off, CPUs 0-11; `doc/benchmarks.md`
+      has the figures): PL/Zig tasks 2-13 within -12 % .. +4 %; task 1 was
+      26 % slower in the full after-run but identical in alternating
+      task-1-only runs of both builds (247.1/247.5, 240.0/240.1 ms).
+    - Verification: `docker/run-all.sh` (all 17 jobs, six versions and every
+      variant, fuzz smoke included: loader 616 700 executions, pipeline
+      133 bodies) passes; coverage 91.1 %.
