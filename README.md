@@ -13,9 +13,12 @@ SELECT add(1, 2);   -- 3
 The Zig code is **not** compiled to native code. It is compiled to a
 `wasm32-freestanding` WebAssembly module and executed by an embedded,
 interpreter-only WebAssembly runtime (WAMR) inside the backend. Guest code
-has its own linear memory, cannot make system calls, and can only call the
-small host API PL/Zig provides (logging, errors, SPI: queries, prepared
-statements, cursors). The design and the
+is given its own linear memory and no system-call interface; a module is
+loaded only if everything it imports belongs to the small host API PL/Zig
+provides (logging, errors, SPI: queries, prepared statements, cursors).
+These are defences, not guarantees: what they rely on, what was tested and
+what remains open is in [Security model](#security-model) and
+[doc/security.md](doc/security.md). The design and the
 reasoning behind every decision are in [PLAN.md](PLAN.md); the host/guest
 interface is in [doc/abi.md](doc/abi.md).
 
@@ -572,8 +575,9 @@ be valid in the database encoding without NUL bytes, are cut at 64 kB, and
 control characters other than newline and tab are shown as `?`. Empty or
 `null` detail and hint are omitted. The same holds for the text of
 `plzig.raise`, of messages of every level (`plzig.notice`, `plzig.print`,
-...) and of panic messages: a function cannot write terminal escape
-sequences or carriage returns into the server log or the client's output.
+...) and of panic messages: the host replaces terminal escape sequences
+and carriage returns before a message goes to the server log or to the
+client (tested in `test/sql/errors.sql`).
 
 Integer overflow, out-of-bounds indexing, `unreachable`, null unwrapping and
 other safety checks are on (`ReleaseSafe`) and raise
@@ -989,13 +993,26 @@ This section is the operator's summary. The threat model, every defence
 with what it relies on, and the residual risks are in
 [`doc/security.md`](doc/security.md).
 
-**What the sandbox gives you.** Guest code runs in a WebAssembly
-interpreter with software bounds checks. It cannot read or write backend
-memory, make system calls, start threads or install signal handlers; it can
-only call the host imports listed in `doc/abi.md`, all of which validate
-their arguments. A Zig bug in a function — overflow, out-of-bounds access,
-use of a dangling pointer, stack overflow — corrupts at most that
-function's own linear memory and ends in an `ERROR`. Guest memory is capped
+Nothing here is a guarantee. PL/Zig is not "guaranteed secure" and its
+sandboxes are not "impossible to escape": the paragraphs below describe
+the defences that are implemented and the properties the test suite
+checks, and *Limits* below says where they end. There has been no
+independent security audit.
+
+**What the sandbox is built to do.** Guest code runs in a WebAssembly
+interpreter with software bounds checks. The interpreter gives it no
+access to backend memory outside its own linear memory, and no interface
+for system calls, threads or signal handlers; a module is loaded only if
+all its imports are among the host imports listed in `doc/abi.md`, each of
+which validates its arguments. A Zig bug in a function — overflow,
+out-of-bounds access, use of a dangling pointer, stack overflow — is
+thereby confined to that function's own linear memory and ends in an
+`ERROR`. This holds as long as WAMR and PL/Zig's host functions are free
+of bugs that guest code can reach; both are C code inside the backend, and
+a bug there could expose backend memory (`doc/security.md` §8, items 4 and
+5). What was tested: hostile modules and forged host calls
+(`docker/security-checks.sh`), sanitizer and Valgrind runs, and fuzzing of
+the loader and the host interface (`doc/security.md` §9). Guest memory is capped
 per instance; runaway loops are stopped by query cancel,
 `statement_timeout` and `pg_terminate_backend` (the vendored interpreter is
 patched to poll `QueryCancelPending`/`ProcDiePending` at every branch and
@@ -1135,9 +1152,12 @@ by the next compilation: every compilation holds the cluster-wide compile
 lock from creating its build directory to removing it, so with the lock
 held any other build directory is stale, whatever its pid.
 
-Messages that can reach a client never contain the data directory: paths
-under it are shown relative to it (e.g. `plzig/cache/…`), and the full
-path goes to the server log only.
+Messages that can reach a client are written without the data directory:
+paths under it are shown relative to it (e.g. `plzig/cache/…`), and the
+full path goes to the server log only. The tests check this for compile
+errors, policy rejections, panics and traps as seen by an unprivileged
+user (`test/sql/adversarial.sql`, `test/sql/resources.sql`); a message
+path that no test covers could still differ.
 
 **Limits — read these.**
 
@@ -1158,8 +1178,8 @@ path goes to the server log only.
 * Even with Landlock, the Zig cache directory is shared by all
   compilations. A malicious input that exploits the compiler could poison
   it and thereby alter modules later compiled for *other* users' functions,
-  including `SECURITY DEFINER` ones. The sandbox stops that code from
-  touching the database files, but not from influencing other functions'
+  including `SECURITY DEFINER` ones. The sandbox is built to keep that code
+  away from the database files, but not from influencing other functions'
   WebAssembly. Treat `USAGE ON LANGUAGE plzig` as "may run the compiler".
 * The lexical policy and the curated `std` are conveniences, not the
   security boundary; clever comptime code may reach more of `std` than

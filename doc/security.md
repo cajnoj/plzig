@@ -7,8 +7,19 @@ statement is an inference rather than something a test demonstrates, it says
 so. README.md, section *Security model*, is the operator-facing summary;
 `doc/abi.md` specifies the host/guest interface.
 
-The project rule is **security over functionality**: nothing PL/Zig does may
-put data integrity at risk or bypass PostgreSQL's permission system.
+The project rule is **security over functionality**: PL/Zig is designed so
+that nothing it does puts data integrity at risk or bypasses PostgreSQL's
+permission system.
+
+**How to read this document.** It makes no absolute claim. PL/Zig is not
+"guaranteed secure", and no statement here means that a boundary cannot be
+crossed. Sentences such as "X is refused", "the host never keeps Y" or "the
+compiler cannot open Z" describe what the code is written to do and, where
+a test is named, what that test observed on the platforms listed in §9.
+They hold only as far as PL/Zig's own code, WAMR, the Zig compiler and the
+Linux kernel are free of relevant bugs, and only for the configurations
+described. §8 lists the known limits; §9 lists what was run and what was
+not. There has been no independent security audit.
 
 ## 1. Assets
 
@@ -47,7 +58,7 @@ module loader, and §6.2 spells out what B can achieve.
  client SQL ──► backend (trusted C: plzig.so + WAMR)
                  │   ├── guest module (untrusted Wasm code, in-process,
                  │   │     interpreted by WAMR; reaches the backend only
-                 │   │     through 21 host imports)              ◄── boundary 1
+                 │   │     through 24 host imports)              ◄── boundary 1
                  │   ├── $PGDATA/plzig/cache/*.wasm (B can write; every
                  │   │     file is re-validated when loaded)      ◄── boundary 2
                  │   └── fork + execve
@@ -58,8 +69,10 @@ module loader, and §6.2 spells out what B can achieve.
 ```
 
 1. **Guest ↔ backend**: guest code is a WebAssembly module run by the
-   interpreter inside the backend process. It has its own linear memory and
-   no system calls; it can call only the host imports (`doc/abi.md`).
+   interpreter inside the backend process. It is given its own linear
+   memory and no system-call interface; the loader accepts a module only if
+   everything it imports is one of the host imports (`doc/abi.md`). This
+   boundary is only as strong as WAMR and the host imports (§8 items 4, 5).
 2. **Module file ↔ loader**: a module read from the cache is treated as
    hostile input: WAMR validates it, PL/Zig checks imports, exports and the
    ABI version, every time it is loaded.
@@ -164,11 +177,11 @@ freshly compiled or read from the cache:
   is capped at 1023 MB, WAMR rejects more than 65535 locals anyway, the
   table limit is far above what a Zig module needs);
 * full WAMR validation (`wasm_runtime_load`);
-* every import must be a *function* from module `plzig`, one of the 21
+* every import must be a *function* from module `plzig`, one of the 24
   known names, and linked by WAMR (signature equal to the registered one);
 * a trial instantiation under `plzig.max_memory`, the four exports with
   exactly the right parameter/result types, a linear memory,
-  `plzig_abi_version() == 4`, and an argument buffer from `plzig_init()`
+  `plzig_abi_version() == 5`, and an argument buffer from `plzig_init()`
   of 16 bytes to 1 MB inside the linear memory (re-validated on every call
   with the actual argument size; `doc/abi.md`).
 
@@ -245,16 +258,18 @@ wrong-mode cache files), `test/tap/t/060_environment.pl`, fuzz target
   bytes; `log`/`raise`/`raise_error`/`panic` messages are length-capped;
   `raise_error` raises only `ERROR`, with a well-formed SQLSTATE outside
   the classes a server condition uses (`00`, `01`, `02`, `08`, `53`, `57`,
-  `58`, `F0`, `XX`), so a function cannot make its failure look like a
-  connection loss, a shutdown or an internal error;
+  `58`, `F0`, `XX`), so that a function's failure is not reported as a
+  connection loss, a shutdown or an internal error (the refused classes are
+  tested in `test/sql/errors.sql`);
 * **values of the natively mapped types** (`doc/abi.md`, *Range checks*,
   *numeric*, *jsonb*) that come back from a guest -- a function result, a
   prepared-statement parameter, an operand of `numeric_op`, the value
   `tz_convert` converts -- are never stored as the guest built them:
   `date`, `time`, `timetz`, `timestamp`, `timestamptz` and `oid` are
   range-checked with PostgreSQL's own macros as the types' receive
-  functions do (`plzig_scalar_from_guest`), so no value outside what
-  PostgreSQL itself can produce reaches a table or an index; `interval` and
+  functions do (`plzig_scalar_from_guest`), with the aim that no value
+  outside what PostgreSQL itself can produce reaches a table or an index
+  (every range limit is exercised by the tests named below); `interval` and
   `uuid` must be exactly 16 bytes (every bit pattern is a valid value);
   `numeric` must have exactly the length its header announces and then goes
   through `numeric_recv`, the server's validating input path
@@ -584,12 +599,17 @@ allowed.** Implemented in `src/plzig_use.c`:
 ### 6.1 C — a compromised compiler
 
 It runs as the server's OS user, confined as in §4.8. With `require`
-enforced it **cannot**: read or write the data directory outside its build
-directory and the Zig cache (in particular not the module cache, the
-catalog or `postgresql.conf`), execute any program but the compiler and the
-validator, create symbolic links, hard-link files from outside, open any
-socket, signal or trace processes outside its sandbox, leave the process
-group the backend kills, or survive its backend. It **can**: read the Zig
+enforced, the confinement is **built to deny** the following, and the test
+that runs inside the confined child (§4.8, *Tests*) observed each attempt
+fail on the tested kernels: reading or writing the data directory outside
+its build directory and the Zig cache (in particular the module cache, the
+catalog and `postgresql.conf`), executing any program but the compiler and
+the validator, creating symbolic links, hard-linking files from outside,
+opening a socket, signalling or tracing processes outside its sandbox,
+leaving the process group the backend kills, and surviving its backend.
+This is what Landlock, seccomp and the process set-up enforce; it does not
+cover a kernel vulnerability, an attempt the test does not make, or a
+system call the deny filter does not list. It **can**: read the Zig
 lib directory; read and write the shared Zig cache (§8 item 1); learn its
 build directory path; use CPU, memory and disk up to the limits (§8 items
 6 and 7); fork and re-execute itself; return any output — which the backend
@@ -599,8 +619,9 @@ sandboxed (§4.6), and the messages are sanitised (§4.11).
 ### 6.2 B — a cache writer
 
 A planted module is validated like any other (§4.5) and runs inside the
-interpreter, so B gains **no code execution in the backend** unless WAMR
-or a host import has a bug; malformed files, links and FIFOs are refused
+interpreter, so B's module stays guest code: native code execution in the
+backend would need a bug in WAMR or in a host import (§8 items 4 and 5);
+malformed files, links and FIFOs are refused
 (§4.5, §4.9). But a module is trusted to *be* the function whose key it
 carries: a module planted under the key of an existing function (the key
 is computable from public information, `pg_proc.prosrc`) runs in that
@@ -707,10 +728,16 @@ because the cache is writable by nobody but the server's OS user (§2).
      (`wasm_runtime.c:453`) for a module whose linear memory has 0 pages:
      `NULL + 0`, never dereferenced (every access is bounds-checked
      against size 0). Reproducer `fuzz/loader/findings/wamr-null-plus-zero.wasm`.
-5. **In-process sandbox.** Guest code shares the backend's address space.
-   Software bounds checks stop architectural out-of-bounds access, but an
-   interpreter offers no protection against microarchitectural side
-   channels (Spectre-style); PL/Zig makes no claim there.
+5. **In-process sandbox, and PL/Zig's own host code.** Guest code shares
+   the backend's address space; nothing but the interpreter's software
+   bounds checks and the checks in the host imports (§4.7) separates it
+   from backend memory. A bug in either — the host imports and the runtime
+   glue are about 4,800 lines of C written for this project
+   (`src/plzig_host.c`, `plzig_row.c`, `plzig_runtime.c`) — could let guest
+   code read or corrupt backend memory. They are tested and fuzzed (§7, §9), which
+   reduces that risk and does not remove it. An interpreter also offers no
+   protection against microarchitectural side channels (Spectre-style);
+   PL/Zig makes no claim there.
 6. **No process-count or memory-cgroup limit for the compiler.** The
    compiler may `fork` (it runs its own linker that way), and no
    `RLIMIT_NPROC` or pids limit is set: a compromised compiler can create
@@ -740,18 +767,19 @@ because the cache is writable by nobody but the server's OS user (§2).
    deliberately.
 10. **Server log**: guest code can write to the server log
     (`plzig.print(.log, ...)`), including newlines, like `RAISE LOG`.
-11. **aarch64 is untested.** The code paths are parameterised (Zig tarball
-    by architecture, the seccomp filter has an aarch64 variant with its own
-    architecture check), but neither the suite nor the fuzz targets have
-    run on aarch64. The seccomp filter and Landlock rules there are
-    unverified.
+11. **aarch64 is tested much less than x86_64.** CI runs the main test
+    layers (including `docker/security-checks.sh` and the no-Landlock and
+    no-seccomp runs) on aarch64 for PostgreSQL 18.7 only. The fuzz targets,
+    the hardened, Valgrind and sanitizer variants, the other PostgreSQL
+    versions and the package builds have not been run on aarch64.
 12. **Toolchain trust.** PL/Zig checks ownership, permissions, location and
     version of the compiler, and optionally its hash, but cannot prove it
     is an authentic Zig build; the lib directory is not hashed.
 13. **Guest-side readers of native values.** The jsonb reader and the
-    numeric/calendar code run in the guest: a bug there can only give a
-    function a wrong answer or a trap, never touch host memory (it is
-    sandboxed like user code). What a function returns is checked by the
+    numeric/calendar code run in the guest, confined like user code: a
+    bug there is expected to give a function a wrong answer or a trap, with
+    no more access to host memory than any other guest code has (item 5).
+    What a function returns is checked by the
     host either way (*4.7*). The jsonb layout is read in host byte order, so
     `jsonb` falls back to text on big-endian hosts (untested).
 14. **`//#use` skips the used function's SQL-level checks for callers.**
@@ -817,4 +845,5 @@ coverage, GCC/Clang `-Wextra -Werror`, upgrade from 14, fuzz smoke, static
 analysis, full disk) and `docker/run-tests.sh` passed on the final tree.
 
 Not done: 24-hour fuzzing runs (a pre-release step, `fuzz/README.md`),
-CodeQL, SQLsmith-style random SQL, `wasm-smith`-generated modules, aarch64.
+CodeQL, SQLsmith-style random SQL, `wasm-smith`-generated modules, fuzzing
+and the non-default variants on aarch64, an independent security audit.
