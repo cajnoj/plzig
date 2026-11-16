@@ -969,6 +969,24 @@ plzig_format_output_units(const char *raw, int rawlen, const char *builddir,
 	return out.data;
 }
 
+/*
+ * Did the compiler refuse a discard ("_ = n;") of a parameter?  The
+ * generated header (src/user.zig line 1, shown as line 0) has "_ = &n;" for
+ * every parameter, since an unused one is an error in Zig; Zig 0.17.1 also
+ * reports the discard of a variable that is used anywhere as an error
+ * ("pointless discard"), and its note may point at that header.  Such a
+ * discard can only be removed, which the hint says.
+ */
+static bool
+plzig_discard_hint(const char *raw, int rawlen)
+{
+	char	   *s = pnstrdup(raw, rawlen);
+	bool		found = strstr(s, "error: pointless discard of function parameter") != NULL;
+
+	pfree(s);
+	return found;
+}
+
 static char *
 plzig_format_output(const char *raw, int rawlen, const char *builddir, bool validator)
 {
@@ -1855,7 +1873,9 @@ plzig_compile(const char *root, const char *zigcache, const PlzigProgram *prog,
 					(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
 					 errmsg("PL/Zig compilation failed"),
 					 errdetail("%s", plzig_format_output_units(res.output.data, res.output.len,
-														   builddir, false, prog))));
+														   builddir, false, prog)),
+					 plzig_discard_hint(res.output.data, res.output.len) ?
+					 errhint("The generated function header (line 0) already marks every parameter as used, so a discard such as \"_ = name;\" is not needed: remove it.") : 0));
 		}
 
 		/* 3. collect the module */

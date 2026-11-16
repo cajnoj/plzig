@@ -131,3 +131,15 @@ SELECT fact(10);
 
 -- a trigger function returns a plzig.TriggerResult (test/sql/triggers.sql)
 CREATE FUNCTION trg() RETURNS trigger LANGUAGE plzig AS $$ return; $$;
+
+-- the generated header marks every parameter as used, so Zig refuses a
+-- discard of one ("pointless discard"); the error points at the body's line
+-- and the hint says to remove the discard
+\set VERBOSITY default
+CREATE FUNCTION discard_param(a numeric, n int) RETURNS numeric STRICT LANGUAGE plzig AS $$ _ = n; return a; $$;
+CREATE FUNCTION discard_param2(a int) RETURNS int STRICT LANGUAGE plzig AS $$
+    const b = a + 1;
+    _ = a;
+    return b;
+$$;
+\set VERBOSITY terse

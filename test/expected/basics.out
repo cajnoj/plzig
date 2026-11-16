@@ -189,3 +189,30 @@ SELECT fact(10);
 -- a trigger function returns a plzig.TriggerResult (test/sql/triggers.sql)
 CREATE FUNCTION trg() RETURNS trigger LANGUAGE plzig AS $$ return; $$;
 ERROR:  PL/Zig compilation failed
+-- the generated header marks every parameter as used, so Zig refuses a
+-- discard of one ("pointless discard"); the error points at the body's line
+-- and the hint says to remove the discard
+\set VERBOSITY default
+CREATE FUNCTION discard_param(a numeric, n int) RETURNS numeric STRICT LANGUAGE plzig AS $$ _ = n; return a; $$;
+ERROR:  PL/Zig compilation failed
+DETAIL:  line 1, column 6: error: pointless discard of function parameter
+   _ = n; return a; 
+       ^
+  line 0, column 142: note: used here
+  const plzig = @import("plzig"); const std = plzig.std; pub fn call(@"a": plzig.Numeric, @"n": i32) anyerror!?plzig.Numeric { _ = &@"a"; _ = &@"n";
+                                                                                                                                               ^~~~
+HINT:  The generated function header (line 0) already marks every parameter as used, so a discard such as "_ = name;" is not needed: remove it.
+CREATE FUNCTION discard_param2(a int) RETURNS int STRICT LANGUAGE plzig AS $$
+    const b = a + 1;
+    _ = a;
+    return b;
+$$;
+ERROR:  PL/Zig compilation failed
+DETAIL:  line 3, column 9: error: pointless discard of function parameter
+      _ = a;
+          ^
+  line 2, column 15: note: used here
+      const b = a + 1;
+                ^
+HINT:  The generated function header (line 0) already marks every parameter as used, so a discard such as "_ = name;" is not needed: remove it.
+\set VERBOSITY terse
