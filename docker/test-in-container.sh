@@ -6,6 +6,9 @@
 #
 # PLZIG_LAYERS (space separated; default "unit regress security leaks"):
 #   unit       Zig unit tests of the validator and the SDK (make check-zig)
+#   licenses   license files of the source and of `make install`, and the
+#              attribution list against the files WAMR's build read
+#              (make check-licenses installcheck-licenses, and the self-test)
 #   regress    the pg_regress suite (make installcheck)
 #   security   docker/security-checks.sh (needs postgresql.conf changes)
 #   leaks      docker/leak-checks.sh, then the contents of $PGDATA/plzig
@@ -58,6 +61,18 @@ if has unit; then
     else
         tail -40 /tmp/check-zig.log
         layer unit FAIL "see log"
+    fi
+fi
+# license material: no server either
+if has licenses; then
+    echo "--- license material (packaging/check-licenses.sh)"
+    if { make -s -C /src check-licenses ZIG="$PLZIG_TEST_ZIG" &&
+         make -s -C /src installcheck-licenses &&
+         bash /src/packaging/check-licenses.sh selftest /src; } >/tmp/licenses.log 2>&1; then
+        layer licenses PASS "$(grep -c '^  ok ' /tmp/licenses.log) checks"
+    else
+        cat /tmp/licenses.log
+        layer licenses FAIL "$(grep -c '^  FAIL ' /tmp/licenses.log) failed"
     fi
 fi
 needs_server=0

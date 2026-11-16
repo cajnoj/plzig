@@ -18,6 +18,9 @@
 #              if given); nothing of PL/Python or PL/Perl got installed
 #   files      compiled-in plzig.zig_path = the toolchain package's compiler,
 #              root-owned and not writable by others; hardening of plzig.so
+#   licenses   packaging/pkgtest-licenses.sh: every binary, debug and source
+#              package carries the license files and attributions of the
+#              source tarball, byte-identical, also as installed
 #   upgrade    a function created with the /prev packages still runs after
 #              upgrading to /pkgs and a server restart; a new one compiles
 #   sandbox    CREATE EXTENSION, a compilation, plzig_sandbox_status()
@@ -114,8 +117,9 @@ case $family in
               dnf -q -y install --nogpgcheck "$@"; } >/tmp/install.log 2>&1 || { tail -30 /tmp/install.log; return 1; }
         }
         # test tooling: pg_regress (postgresqlNN-test), readelf, procps, su, diff
-        # (the Fedora 45 and AlmaLinux 10 images have no su and no diff)
-        tooling() { dnf -q -y install "postgresql$major-test" binutils procps-ng util-linux diffutils >/tmp/tooling.log 2>&1; }
+        # (the Fedora 45 and AlmaLinux 10 images have no su and no diff); cpio
+        # unpacks the packages for the license check
+        tooling() { dnf -q -y install "postgresql$major-test" binutils procps-ng util-linux diffutils cpio >/tmp/tooling.log 2>&1; }
         pg_regress=/usr/pgsql-$major/lib/test/regress/pg_regress
         installed_pls() { rpm -qa | grep -Ei 'plpython|plperl' || true; }
         ;;
@@ -227,6 +231,13 @@ grep -qE 'RPATH|RUNPATH' <<<"$dyn" && { fok=0; fdetail+="RPATH/RUNPATH set; "; }
     { fok=0; fdetail+="plzig-validate is not a static PIE; "; }
 if [ $fok = 1 ]; then step files PASS "zig_path default $zig_path; plzig.so RELRO, BIND_NOW, NX stack, SSP, FORTIFY, no RUNPATH"
 else step files FAIL "$fdetail"; fi
+
+# ------------------------------------------------------------------ licenses
+if bash /packaging/pkgtest-licenses.sh "$family" "$major" "$src" /pkgs /in/plzig.tar.gz >/tmp/licenses.log 2>&1; then
+    step licenses PASS "$(grep -c '^  ok ' /tmp/licenses.log) checks: binary, debug and source packages, and as installed"
+else
+    cat /tmp/licenses.log; step licenses FAIL "$(grep '^  FAIL' /tmp/licenses.log | head -3 | tr '\n' ' ')"
+fi
 
 # ------------------------------------------------------------------ sandbox
 st=$(q "CREATE EXTENSION IF NOT EXISTS plzig; DO \$\$ plzig.notice(\"compiled $RANDOM\", .{}); \$\$ LANGUAGE plzig; SELECT plzig_sandbox_status();")

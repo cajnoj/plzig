@@ -1,0 +1,6 @@
+0a274df3755e61b169266fba62d842489378bc9a6e9a63fe24f02ee6f5de419f  LICENSES/Apache-2.0-WITH-LLVM-exception.txt
+5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177  LICENSES/MIT-Zig.txt
+8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee  packaging/zig-toolchain/licenses/LLVM-LICENSE.TXT
+b870108ec5e7790e9f9919064f1b9421d62d5f9b0e6c230c6adf7ea2da62e97b  packaging/zig-toolchain/licenses/musl-COPYRIGHT.txt
+845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243  packaging/zig-toolchain/licenses/zlib-LICENSE.txt
+7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8  packaging/zig-toolchain/licenses/zstd-LICENSE.txt

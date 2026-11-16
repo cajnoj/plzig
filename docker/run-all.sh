@@ -119,7 +119,7 @@ all_layers="unit regress security leaks isolation tap"
 job_main() {
     local v=$1
     echo "### main layers"
-    drun -e PLZIG_LAYERS="$all_layers" "plzig-test:$v"
+    drun -e PLZIG_LAYERS="$all_layers licenses" "plzig-test:$v"
     local rc1=$?
     echo "### no-Landlock"
     drun -e PLZIG_NO_LANDLOCK=1 --security-opt "seccomp=$PWD/docker/seccomp-no-landlock.json" "plzig-test:$v" |

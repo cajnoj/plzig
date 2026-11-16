@@ -5,3 +5,10 @@
 # interpreter or DT_NEEDED), not a shared library: the backend runs it under
 # Landlock, whose file rules give it no dynamic loader or shared libraries.
 postgresql-*-plzig: shared-library-lacks-prerequisites [usr/lib/postgresql/*/lib/plzig/plzig-validate]
+# The license files are deliberately also installed outside /usr/share/doc
+# (and outside debian/copyright): minimal container images configure dpkg to
+# drop /usr/share/doc except the copyright files, and THIRD-PARTY-NOTICES
+# with WAMR's attribution has to survive that (doc/packaging.md, "License
+# material").  debian/copyright still holds all license information.
+postgresql-*-plzig: extra-license-file [usr/share/licenses/postgresql-*-plzig/*]
+postgresql-*-plzig: package-contains-documentation-outside-usr-share-doc [usr/share/licenses/postgresql-*-plzig/*]

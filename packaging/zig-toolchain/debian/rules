@@ -28,9 +28,14 @@ ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
 	test "$$($(DEB_HOST_ARCH)/zig version)" = "$(ZIG_VERSION)"
 endif
 
-execute_after_dh_installdocs:
-	install -d debian/plzig-zig-toolchain/usr/share/doc/plzig-zig-toolchain/licenses
-	install -m 0644 licenses/* debian/plzig-zig-toolchain/usr/share/doc/plzig-zig-toolchain/licenses/
+# NOTICE, upstream's LICENSE and the license texts of the components linked
+# into the compiler go to /usr/share/licenses/plzig-zig-toolchain/ (the path
+# and file names of the RPM), not below /usr/share/doc: minimal container
+# images configure dpkg to drop that directory except for the copyright file.
+LICDIR := debian/plzig-zig-toolchain/usr/share/licenses/plzig-zig-toolchain
+execute_after_dh_auto_install:
+	install -d $(LICDIR)
+	install -m 0644 $(DEB_HOST_ARCH)/LICENSE NOTICE licenses/* $(LICDIR)/
 
 # Ship the upstream files byte for byte: the compiler's SHA-256 stays the
 # official one (usable for plzig.zig_sha256); it is static, no shlibs.

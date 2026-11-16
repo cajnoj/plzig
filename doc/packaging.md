@@ -162,7 +162,9 @@ the compiler is a package of its own:
   the binary (`clang version 22.1.8`, zlib 1.3.1 strings, zstd symbols) and
   the zig-bootstrap component list. `NOTICE` and the license texts in
   `packaging/zig-toolchain/licenses/` (fetched from the projects' own
-  repositories) are installed with the package.
+  repositories) are installed with the package, together with the
+  `LICENSE` of the upstream tarball, in
+  `/usr/share/licenses/plzig-zig-toolchain/` (RPM and Debian alike).
 * **Sources**: RPM `Source0`/`Source1` are both architectures' upstream
   tarballs (checked in `%prep`); the Debian source has them as component
   tarballs `orig-amd64` and `orig-arm64`, plus a small main tarball with
@@ -221,8 +223,11 @@ untested.
   Apache-2.0 WITH LLVM-exception AND MIT` (plzig.so contains WAMR;
   plzig-validate contains Zig standard library code), `Provides:
   bundled(wamr) = 2.4.5`, `Requires: postgresql<major>-server,
-  plzig-zig-toolchain = 0.17.1`, license files as `%license`. `%check` runs
-  the validator and SDK unit tests.
+  plzig-zig-toolchain = 0.17.1`, license files as `%license`. The
+  generated `debuginfo` and `debugsource` subpackages get their own copies
+  (a hook after `find-debuginfo`): they do not depend on the main package
+  and hold WAMR's debugging data and sources. `%check` runs the validator
+  and SDK unit tests and `make check-licenses`.
 * Hardening: PGXS compiles with PostgreSQL's own `CFLAGS` (PGDG builds with
   the distribution's flags); the spec adds `%set_build_flags` as `COPT` and
   `PG_LDFLAGS`, and WAMR's cmake gets the flags from the environment. The
@@ -272,7 +277,10 @@ untested.
   needs a server with Landlock ABI ≥ 6 and is run by the package test
   instead (`override_dh_pgxs_test`).
 * `debian/copyright` is DEP-5; it reproduces `LICENSE`, which names the
-  copyright holder.
+  copyright holder. `LICENSE`, `THIRD-PARTY-NOTICES` and the two texts of
+  `LICENSES/` are also installed in
+  `/usr/share/licenses/postgresql-<major>-plzig/`, outside `/usr/share/doc`
+  (see *License material*).
 * `lintian --pedantic --info` runs in the builder; overrides are in
   `debian/source/lintian-overrides`,
   `debian/postgresql-plzig.lintian-overrides.in` (copied per major) and
@@ -315,6 +323,7 @@ tarball is mounted only for its tests. Steps (`STEP` lines in
 | `install` | the packages install from local files with PGDG as the only other repository; afterwards nothing of PL/Python or PL/Perl is installed |
 | `upgrade` | with the release-0 build installed, a function is created and called; after upgrading to release 1 and restarting the server it still runs and a new function compiles |
 | `files` | the compiled-in `plzig.zig_path` is the toolchain's compiler, which exists, is root-owned, mode 0755, and reports the pinned version; hardening of `plzig.so` (above); no exported test helpers |
+| `licenses` | `packaging/pkgtest-licenses.sh`: every binary, debug and source package of this major and of the toolchain carries the license files and notices of the source tarball, byte-identical, also as installed (see *License material*) |
 | `sandbox` | `CREATE EXTENSION plzig`, a compilation, `plzig_sandbox_status()` = `enforced` |
 | `regress` | the full pg_regress suite of the source tarball against the installed package |
 | `sqlupgrade` | `test/upgrade/check-upgrade-scripts.sh --selftest` |
@@ -397,9 +406,71 @@ creates the extension and a function with the packaged defaults, checks
 `plzig_sandbox_status()` and that `plzig.compiler_sandbox` is still
 `require`, and checks that no PL/Python, PL/Perl, PL/Tcl (or other PL)
 package, library or extension file is present and that the only languages
-are PL/pgSQL and PL/Zig. The image is built locally only and never pushed;
+are PL/pgSQL and PL/Zig. It also copies the two packages' license
+directories and `copyright` files out of the image and compares them with
+this tree (*License material*). The image is built locally only and never pushed;
 on a host kernel older than 6.12 compilations in it are refused (see
 above).
+
+## License material
+
+What must travel with each artifact, and what checks it. The checker is
+`packaging/check-licenses.sh`; every comparison is byte for byte against the
+source tree (or the unpacked source tarball).
+
+| Artifact | License material it carries | Checked by |
+|---|---|---|
+| Source tree, `make dist` tarball | `LICENSE`, `THIRD-PARTY-NOTICES`, `LICENSES/` (WAMR's and Zig's license texts), `third_party/wamr-interrupt.patch` (adds the modification notice), `debian/copyright`, `packaging/zig-toolchain/` (`NOTICE`, four license texts, `debian/copyright`) | `packaging/test-licenses.sh` (CI job `licenses`) |
+| `make install` | the four PL/Zig files in `<docdir>/extension/plzig/` | `make installcheck-licenses` (test layer `licenses`) |
+| `plzig_<major>` RPM, `postgresql-<major>-plzig` deb | the four files in `/usr/share/licenses/<package>/`; deb: also `/usr/share/doc/<package>/copyright` | package test step `licenses` |
+| `plzig-zig-toolchain` (RPM, deb) | `NOTICE`, Zig's `LICENSE`, LLVM, musl, zlib and zstd texts in `/usr/share/licenses/plzig-zig-toolchain/`; deb: also `copyright` | package test step `licenses` |
+| RPM `debuginfo`, `debugsource` | their own copies of the four files; the patched WAMR file with its modification notice | package test step `licenses` |
+| Debian `dbgsym` | none of its own: depends on exactly the main package's version and links its doc directory | package test step `licenses` |
+| Source packages (`.src.rpm`; `.orig*.tar.*`, `.debian.tar.xz`) | the source tarball unchanged, the pinned upstream tarballs, the Debian copyright files | package test step `licenses` |
+| Evaluation image | both packages' `/usr/share/licenses/<package>/` and `copyright` files; the `org.opencontainers.image.licenses` label | `packaging/image/test-image.sh` |
+
+What the checks establish:
+
+* **The texts are the upstream ones.** `packaging/license-files.sha256` pins
+  the six third-party texts. `LICENSES/Apache-2.0-WITH-LLVM-exception.txt`
+  and `LICENSES/MIT-Zig.txt` are compared with the `LICENSE` files inside
+  the pinned WAMR and Zig tarballs. The four texts of the components linked
+  into the official Zig binary are pinned but not compared with an upstream
+  download.
+* **The attribution list is complete for what is compiled in.** `make
+  check-licenses` (run by the test image, by `%check` and by the Debian
+  build) takes the list of WAMR files the compiler read from the build's
+  dependency files (74 or 75, depending on the platform) and requires their
+  copyright lines to be exactly the ones in `THIRD-PARTY-NOTICES`, in both
+  directions; a file without a copyright line must be named there. This
+  check found the list written by hand to be wrong (two lines missing, two
+  that matched no compiled-in file); it is now generated from that output.
+  `debian/copyright` must name the same holders.
+* **The notices are current.** They must name the pinned WAMR version and
+  commit and the pinned Zig version, and contain the statement of changes;
+  the patch must add the modification notice to the one file it changes;
+  the license expressions of the two specs, the SBOM generator, `NOTICE`
+  and the image label must agree.
+* **Nothing is lost on the way.** Each package is unpacked and its files
+  compared; the RPM files must be marked `%license`; the installed copies
+  are compared again.
+* **The checker notices failures**: `check-licenses.sh selftest` removes,
+  changes and truncates files and adds an unlisted copyright line, and
+  requires each to be reported.
+
+Why `/usr/share/licenses` on Debian too: the official `postgres` images
+(and other slim images) configure dpkg to drop everything below
+`/usr/share/doc` except `copyright` files. The first version of the
+packages kept `NOTICE` and the component license texts there, and the
+evaluation image therefore lacked them; the image test now covers this.
+
+Limits: the checks compare files and copyright *lines*; they do not judge
+whether the license analysis itself is right (which components the official
+Zig binary contains was established by hand, see *The Zig toolchain
+package*), they do not cover the Zig standard library's own per-file
+notices beyond Zig's `LICENSE`, and the release directory of
+`make-release.sh` is covered only through the packages it copies. This is
+not legal advice.
 
 ## Release artefacts
 
@@ -432,6 +503,10 @@ packaging/release/make-release.sh build/release/<version>
 * `ci.yml`, job `packages` (every push and pull request): an EL 9 RPM
   (PostgreSQL 17) and a Debian 13 package (PostgreSQL 18), each built
   offline and put through the installed-package test.
+* `ci.yml`, job `licenses`: `packaging/test-licenses.sh` (source tree and
+  source tarball against the pinned upstream tarballs, and the checker's
+  self-test). The test jobs run the layer `licenses`, the package jobs the
+  step `licenses` (*License material*).
 * `packaging.yml` (manual `workflow_dispatch`): the full matrix, one job per
   distribution, packages and logs as workflow artifacts.
 

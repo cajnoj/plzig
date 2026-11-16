@@ -30,11 +30,23 @@ export PG_LDFLAGS = $(LDFLAGS)
 override_dh_pgxs_test:
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
 	$(MAKE) check-zig PG_CONFIG=/usr/lib/postgresql/$(shell pg_buildext supported-versions | tail -1)/bin/pg_config
+	$(MAKE) check-licenses PG_CONFIG=/usr/lib/postgresql/$(shell pg_buildext supported-versions | tail -1)/bin/pg_config
 endif
 
-# license texts are in /usr/share/doc/<package>/copyright instead
+# `make install` puts the license files into PostgreSQL's documentation
+# directory (postgresql-doc-<major>).  The package ships them in
+# /usr/share/licenses/<package>/ instead, besides debian/copyright: minimal
+# container images configure dpkg to drop everything below /usr/share/doc
+# except the copyright files, and THIRD-PARTY-NOTICES (WAMR's attribution and
+# the statement of changes) must survive that.
 execute_after_dh_auto_install:
 	rm -rf debian/postgresql-*-plzig/usr/share/doc/postgresql-doc-*
+	for v in $$(pg_buildext supported-versions); do \
+	    d=debian/postgresql-$$v-plzig/usr/share/licenses/postgresql-$$v-plzig; \
+	    install -d $$d && \
+	    install -m 0644 LICENSE THIRD-PARTY-NOTICES \
+	        LICENSES/Apache-2.0-WITH-LLVM-exception.txt LICENSES/MIT-Zig.txt $$d/ || exit 1; \
+	done
 
 # the same lintian overrides for every postgresql-<major>-plzig
 execute_before_dh_lintian:

@@ -199,6 +199,18 @@ DIST_DIR ?= $(BUILD_DIR)/dist
 dist:
 	sh packaging/make-dist.sh "$(DIST_DIR)" "$(if $(filter 1,$(DIST_WORKTREE)),worktree,head)"
 
+# ---- license material (doc/packaging.md "License material") --------------
+# check-licenses: the source tree's license files, and the copyright lines
+# of every WAMR file this build's compiler read against THIRD-PARTY-NOTICES.
+# installcheck-licenses: what `make install` put into the documentation
+# directory is the source's.
+check-licenses: $(WAMR_LIB)
+	bash packaging/check-licenses.sh source .
+	bash packaging/check-licenses.sh wamr-build '$(BUILD_DIR)/wamr' '$(WAMR_BUILD_SRC)' .
+
+installcheck-licenses:
+	bash packaging/check-licenses.sh plzig '$(DESTDIR)$(docdir)/$(docmoduledir)/plzig' .
+
 # ---- install: validator, SDK (no compiler) -------------------------------
 install: install-plzig
 
@@ -226,4 +238,4 @@ clean-plzig:
 distclean-plzig: clean-plzig
 	rm -rf $(BUILD_DIR)
 
-.PHONY: install-plzig uninstall-plzig clean-plzig distclean-plzig fetch-zig install-zig check-zig installcheck-testing installcheck-isolation dist
+.PHONY: install-plzig uninstall-plzig clean-plzig distclean-plzig fetch-zig install-zig check-zig installcheck-testing installcheck-isolation dist check-licenses installcheck-licenses

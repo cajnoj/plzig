@@ -28,7 +28,7 @@ Copyright: Zig contributors
            2005-2020 Rich Felker, et al. (musl)
 License: Expat and Apache-2.0 with LLVM exception and NCSA and Zlib and BSD-3-Clause
 Comment: Statically linked components of the official build; their license
- texts are also installed in /usr/share/doc/plzig-zig-toolchain/licenses/.
+ texts are also installed in /usr/share/licenses/plzig-zig-toolchain/.
 
 Files: debian/* install-pruned.sh NOTICE zig.sha256sums
 Copyright: 2026 PL/Zig maintainers
@@ -57,12 +57,12 @@ License: Apache-2.0 with LLVM exception
  On Debian systems, the full text of the Apache License, Version 2.0 can be
  found in /usr/share/common-licenses/Apache-2.0. The LLVM exception and the
  rest of LLVM's license file are in
- /usr/share/doc/plzig-zig-toolchain/licenses/LLVM-LICENSE.TXT.
+ /usr/share/licenses/plzig-zig-toolchain/LLVM-LICENSE.TXT.
 
 License: NCSA
  University of Illinois/NCSA Open Source License (legacy LLVM license); the
  full text is part of
- /usr/share/doc/plzig-zig-toolchain/licenses/LLVM-LICENSE.TXT.
+ /usr/share/licenses/plzig-zig-toolchain/LLVM-LICENSE.TXT.
 
 License: Zlib
  This software is provided 'as-is', without any express or implied

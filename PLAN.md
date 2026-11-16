@@ -2582,3 +2582,43 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
     25 -> 16 ms; an empty function 4.4 ms in both. `memmove` (overlapping
     copies) is unchanged.
 
+56. **License material verified in CI (2026-11-16).** Owner's request:
+    verify, also in CI, that all artifacts retain license material
+    including attributions. `packaging/check-licenses.sh` compares each
+    artifact's license files byte for byte with the source
+    (doc/packaging.md, *License material*): the source tree and the `make
+    dist` tarball (CI job `licenses`, against the pinned WAMR and Zig
+    tarballs), `make install` and the attribution list (test layer
+    `licenses`, `make check-licenses` also in `%check` and the Debian
+    build), every binary, debug and source package (package test step
+    `licenses`), and the evaluation image. A self-test proves that it
+    reports missing, changed and truncated files. Writing it found three
+    defects, all fixed:
+    * `THIRD-PARTY-NOTICES` listed WAMR's copyright lines by hand and was
+      wrong: two lines of compiled-in files were missing (`Amazon Inc.` and
+      `Amazon.com, Inc. or its affiliates`, 2024) and two listed lines
+      matched no compiled-in file. The list is now the output of the build's
+      dependency files and the build fails when it differs.
+    * The RPM `debuginfo` and `debugsource` subpackages, which do not
+      depend on the main package and contain WAMR's source files, carried
+      no license file. They now get their own copies.
+    * The Debian packages kept `NOTICE` and the license texts of the
+      components linked into Zig below `/usr/share/doc`, which the official
+      `postgres` images drop (dpkg `path-exclude`), so the evaluation image
+      lacked them; `postgresql-<major>-plzig` shipped no
+      `THIRD-PARTY-NOTICES` at all (only `copyright`). Both packages now
+      install their license files in `/usr/share/licenses/<package>/`.
+    Not covered: whether the license analysis itself is right, and the
+    four component texts of the Zig binary against an upstream download
+    (they are pinned by checksum only).
+57. **Wording of security statements (2026-11-16).** Owner's rule: no
+    absolute statements ("guaranteed secure", "impossible to escape the
+    sandbox"); describe implemented defences and tested properties, with
+    explicit limitations. README (introduction, *Security model*),
+    `doc/security.md` (new paragraph *How to read this document*, §3, §4.7,
+    §6, §8 items 5, 11 and 13) and `docs/index.md` were reworded
+    accordingly. Stale facts found on the way and corrected in
+    `doc/security.md`: 24 host imports (not 21), ABI version 5 (not 4), and
+    aarch64 (tested in CI on PostgreSQL 18.7 only, not "untested").
+    Sentences that state a plain mechanism ("`PATH` is not searched") were
+    left as they are.

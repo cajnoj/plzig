@@ -3,3 +3,9 @@
 # PL/Zig's default Landlock sandbox needs a statically linked compiler.
 plzig-zig-toolchain: statically-linked-binary [usr/libexec/plzig-zig-toolchain/*/zig]
 plzig-zig-toolchain: embedded-library zlib [usr/libexec/plzig-zig-toolchain/*/zig]
+# NOTICE, upstream's LICENSE and the license texts of the components linked
+# into the compiler are deliberately installed outside /usr/share/doc:
+# minimal container images configure dpkg to drop that directory except the
+# copyright files (PL/Zig's doc/packaging.md, "License material").
+plzig-zig-toolchain: extra-license-file [usr/share/licenses/plzig-zig-toolchain/*]
+plzig-zig-toolchain: package-contains-documentation-outside-usr-share-doc [usr/share/licenses/plzig-zig-toolchain/*]

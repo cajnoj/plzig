@@ -120,6 +120,24 @@ jobs:
             build/packages/*/r1/lintian.txt
           if-no-files-found: ignore
 
+  # License files and attributions of the source tree and of the source
+  # tarball, against upstream's own files (pinned downloads).  The built
+  # artifacts are checked where they are built: layer "licenses" of the test
+  # jobs (make install, and the attribution list against the files WAMR's
+  # build read) and step "licenses" of the package jobs (every binary, debug
+  # and source package).
+  licenses:
+    name: License material (source tree and tarball)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check
+        run: packaging/test-licenses.sh
+
   fuzz-smoke:
     name: Fuzz smoke (every target, 60 s)
     runs-on: ubuntu-24.04

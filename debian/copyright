@@ -16,10 +16,14 @@ License: PostgreSQL
 
 Files: wamr/*
 Copyright: 2019 Intel Corporation
-           2019-2021 Intel Corporation and others
-           2023 Amazon Inc.
+           2021 Intel Corporation
+           2022 Tencent Corporation
+           2023 Amazon Inc
+           2023 Amazon.com, Inc. or its affiliates
+           2023 Intel Corporation
            2023 Midokura Japan KK
-           2024 Tencent Corporation
+           2024 Amazon Inc
+           2024 Amazon.com, Inc. or its affiliates
            and others (see the individual source files)
 License: Apache-2.0 with LLVM exception
 

@@ -27,11 +27,18 @@ License:  Apache License 2.0 with LLVM Exceptions
 
 Copyright notices of the compiled-in files:
     Copyright (C) 2019 Intel Corporation. All rights reserved.
-    Copyright (C) 2019-21 Intel Corporation and others. All rights reserved.
+    Copyright (C) 2021 Intel Corporation. All rights reserved.
+    Copyright (C) 2022 Tencent Corporation. All rights reserved.
     Copyright (C) 2023 Amazon Inc. All rights reserved.
+    Copyright (C) 2023 Amazon.com, Inc. or its affiliates. All rights reserved.
+    Copyright (C) 2023 Intel Corporation. All rights reserved.
     Copyright (C) 2023 Midokura Japan KK. All rights reserved.
-    Copyright (C) 2024 Tencent Corporation. All rights reserved.
-    (see the individual source files for the exact notices)
+    Copyright (C) 2024 Amazon Inc. All rights reserved.
+    Copyright (C) 2024 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+
+These are the copyright lines of every WAMR source and header file the
+compiler reads when PL/Zig is built; the build verifies the list
+(make check-licenses).
 
 Statement of changes (Apache License 2.0, section 4(b)): the PL/Zig project
 modified one file of WAMR,
