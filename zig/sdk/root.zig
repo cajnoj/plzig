@@ -213,3 +213,77 @@ fn callFunction(args: [*]const Slot, nargs: u32, result: *Slot) u32 {
     }
     return STATUS_OK;
 }
+
+/// memset and memcpy for the module.  The compiler calls these for every
+/// fill and copy whose size it does not know: `@memset`, `@memcpy`, slice
+/// copies, and the 0xAA fill of `undefined` memory that ReleaseSafe does
+/// (stack variables, and `std.mem.Allocator`'s alloc, realloc and free).
+/// Zig's own versions (compiler-rt, weak symbols these replace) move one
+/// 32-bit word per loop iteration on wasm32; the interpreter pays per
+/// instruction, so these move 32 bytes per iteration with 64-bit loads and
+/// stores (unaligned ones are valid in WebAssembly).  Same results byte for
+/// byte; zig/sdk/test.zig compares them with a byte loop for every length
+/// and alignment.  `@disableIntrinsics` keeps the compiler from turning the
+/// loops back into calls of memset/memcpy (that is, of themselves).
+pub fn memsetImpl(dest: ?[*]u8, c: u8, len: usize) callconv(.c) ?[*]u8 {
+    @disableIntrinsics();
+    @setRuntimeSafety(false);
+    const d = dest orelse return dest;
+    if (len < 8) {
+        var i: usize = 0;
+        while (i < len) : (i += 1) d[i] = c;
+        return dest;
+    }
+    const v: u64 = @as(u64, c) *% 0x0101010101010101;
+    var i: usize = 0;
+    while (len - i >= 32) : (i += 32) {
+        @as(*align(1) u64, @ptrCast(d + i)).* = v;
+        @as(*align(1) u64, @ptrCast(d + i + 8)).* = v;
+        @as(*align(1) u64, @ptrCast(d + i + 16)).* = v;
+        @as(*align(1) u64, @ptrCast(d + i + 24)).* = v;
+    }
+    while (len - i >= 8) : (i += 8) {
+        @as(*align(1) u64, @ptrCast(d + i)).* = v;
+    }
+    // the last 8 bytes, overlapping what is already set (len >= 8)
+    @as(*align(1) u64, @ptrCast(d + len - 8)).* = v;
+    return dest;
+}
+
+/// See memsetImpl.  The ranges do not overlap (memcpy's contract), so
+/// copying the last 8 bytes again at the end is harmless.
+pub fn memcpyImpl(noalias dest: ?[*]u8, noalias src: ?[*]const u8, len: usize) callconv(.c) ?[*]u8 {
+    @disableIntrinsics();
+    @setRuntimeSafety(false);
+    const d = dest orelse return dest;
+    const f = src orelse return dest;
+    if (len < 8) {
+        var i: usize = 0;
+        while (i < len) : (i += 1) d[i] = f[i];
+        return dest;
+    }
+    var i: usize = 0;
+    while (len - i >= 32) : (i += 32) {
+        const a = @as(*align(1) const u64, @ptrCast(f + i)).*;
+        const b = @as(*align(1) const u64, @ptrCast(f + i + 8)).*;
+        const e = @as(*align(1) const u64, @ptrCast(f + i + 16)).*;
+        const g = @as(*align(1) const u64, @ptrCast(f + i + 24)).*;
+        @as(*align(1) u64, @ptrCast(d + i)).* = a;
+        @as(*align(1) u64, @ptrCast(d + i + 8)).* = b;
+        @as(*align(1) u64, @ptrCast(d + i + 16)).* = e;
+        @as(*align(1) u64, @ptrCast(d + i + 24)).* = g;
+    }
+    while (len - i >= 8) : (i += 8) {
+        @as(*align(1) u64, @ptrCast(d + i)).* = @as(*align(1) const u64, @ptrCast(f + i)).*;
+    }
+    @as(*align(1) u64, @ptrCast(d + len - 8)).* = @as(*align(1) const u64, @ptrCast(f + len - 8)).*;
+    return dest;
+}
+
+comptime {
+    // only in a compiled module: the native SDK tests keep their libc's
+    if (@import("builtin").cpu.arch == .wasm32) {
+        @export(&memsetImpl, .{ .name = "memset", .linkage = .strong, .visibility = .hidden });
+        @export(&memcpyImpl, .{ .name = "memcpy", .linkage = .strong, .visibility = .hidden });
+    }
+}

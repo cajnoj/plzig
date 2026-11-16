@@ -845,18 +845,20 @@ free in native code have a price. Measured with small PL/Zig functions on
 PostgreSQL 18.7 (Intel Core Ultra 7 155H, one backend, per operation, loop
 overhead subtracted; the figures are a guide, not a contract):
 
-* **Large `undefined` arrays cost time.** In `ReleaseSafe` (the only mode)
-  Zig fills `undefined` memory with `0xAA`. Up to 64 bytes that is a few
-  stores (under 0.1 µs); from about 128 bytes on it is a byte loop of
-  about **10 ns per byte** (a `[1024]u8` scratch buffer: 9.7 µs every time
-  its declaration runs). Initialising it with `@splat(0)` costs the same,
-  and so does `Allocator.alloc` (it fills too). Keep scratch buffers small,
-  make large ones `var` declarations at container level (a `struct { var
-  buf: [4096]u8 = undefined; }` costs nothing per call: it is static
-  data), or take arena memory with `plzig.allocator.rawAlloc` when you
-  write all of it right away. Copying is a byte loop as well (`@memcpy` of
-  1 kB: about 14 µs), so pass slices rather than large arrays or structs by
-  value.
+* **Fills and copies cost about 1 ns per byte.** In `ReleaseSafe` (the only
+  mode) Zig fills `undefined` memory with `0xAA`: stack variables, and
+  everything `std.mem.Allocator` hands out, takes back or moves (`alloc`,
+  `free`, `realloc`, and so every growing `ArrayList`). Up to 64 bytes a
+  fill is a few stores; larger fills and copies go through the SDK's
+  `memset`/`memcpy`, which move 32 bytes per loop iteration: about
+  **0.75 ns per byte** for a fill and **1 ns per byte** for a copy
+  (allocating 4 kB: 3 µs; duplicating a 4 kB text: 7 µs). That is cheap but
+  not free: a large scratch buffer that is filled on every call can be a
+  `var` declaration at container level instead (a `struct { var buf:
+  [4096]u8 = undefined; }` is static data and costs nothing per call), and
+  `plzig.allocator.rawAlloc` returns arena memory without the fill when
+  you write all of it right away. Pass slices rather than large arrays or
+  structs by value.
 * **Avoid 128-bit division and formatting.** `u128`/`i128` division is a
   library routine that is itself interpreted: 0.3–0.6 µs per division
   against 0.02 µs for `u64`; a 64×64→128-bit multiplication is about

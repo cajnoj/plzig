@@ -622,6 +622,8 @@ v1 is expected to be slower than PL/pgSQL; neither weakens the sandbox.
     backend. Both stay rejected (D2); the benchmark numbers are the
     baseline if this is ever reconsidered.
 11. *Optional.* **Skip the `ReleaseSafe` 0xAA fill of guest allocations**
+    **Closed (2026-11-16): not possible as described; the fill was made
+    about 12x cheaper instead, see Deviations from plan, 55.**
     (`@memset(undefined)` in `Allocator.alloc`, ~8 ns per byte in the
     interpreter). Harmless to the host (guest memory only), but it changes
     what a buggy function sees: uninitialised memory would hold leftovers
@@ -2549,3 +2551,34 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
     - Verification: `docker/run-all.sh` (all 17 jobs, six versions and every
       variant, fuzz smoke included: loader 616 700 executions, pipeline
       133 bodies) passes; coverage 91.1 %.
+55. **Fills and copies: `memset`/`memcpy` in the SDK (2026-11-16).** The
+    owner asked for the 0xAA fill of heap allocations to be skipped (§12
+    item 11). That is not possible in the SDK: the fill is not in the
+    allocator but in `std.mem.Allocator`'s wrappers (`allocBytesAligned`,
+    `realloc`, `free`: `@memset(..., undefined)` after `rawAlloc` returns),
+    which are compiled with the standard library's safety setting. The only
+    switch is to compile the whole `std` module without safety checks
+    (`-O ReleaseFast -Mstd`), which also removes every bounds, overflow and
+    `unreachable` check inside the standard library: a buggy function would
+    then return wrong data where it now raises an error. Rejected (data
+    integrity before speed). §12 item 11 is closed as "not possible as
+    described".
+    Instead the fill was made cheap. The compiler emits calls of `memset`
+    and `memcpy` for fills and copies of unknown size; Zig's compiler-rt
+    versions (weak symbols) move one 32-bit word per loop iteration on
+    wasm32. `zig/sdk/root.zig` now defines both (strong, hidden: not wasm
+    exports) with 64-bit loads and stores, 32 bytes per iteration, and an
+    overlapping 8-byte tail; `@disableIntrinsics` keeps the loops from
+    being turned back into calls of themselves. Same results byte for byte:
+    `zig/sdk/test.zig` compares them with a byte loop for every length
+    0..300, nine destination offsets, three source offsets and four fill
+    values, including that nothing outside the range changes. No
+    interpreter change (bulk-memory stays off), no ABI change; the SDK
+    digest changes, so modules are recompiled once.
+    Measured (PG 18.7, 20 000 calls, best of 5, before -> after):
+    `allocator.alloc(u8, 4096)` 761 -> 65 ms (9.2 -> 0.75 ns per byte);
+    `allocator.dupe` of a 4 kB text 1776 -> 146 ms; an `ArrayList` built
+    with 60 appends of 37 bytes 181 -> 167 ms; a 24-byte copy plus `dupe`
+    25 -> 16 ms; an empty function 4.4 ms in both. `memmove` (overlapping
+    copies) is unchanged.
+

@@ -1727,3 +1727,37 @@ test "Numeric.toF64: the exact fast path agrees with correctly rounded parsing" 
         };
     }
 }
+
+test "memset and memcpy replacements: every length, offset and value against a byte loop" {
+    var buf: [400]u8 = undefined;
+    var ref: [400]u8 = undefined;
+    var src: [400]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = @truncate(i *% 131 +% 7);
+    var off: usize = 0;
+    while (off < 9) : (off += 1) {
+        var len: usize = 0;
+        while (len <= 300) : (len += 1) {
+            for ([_]u8{ 0, 0xAA, 0xFF, 0x5C }) |c| {
+                for (&buf, &ref) |*b, *r| {
+                    b.* = 0x11;
+                    r.* = 0x11;
+                }
+                for (ref[off .. off + len]) |*r| r.* = c;
+                const ret = sdk_root.memsetImpl(buf[off..].ptr, c, len);
+                try testing.expect(ret == buf[off..].ptr);
+                try testing.expectEqualSlices(u8, &ref, &buf); // nothing outside the range changed
+            }
+            var soff: usize = 0;
+            while (soff < 9) : (soff += 4) {
+                for (&buf, &ref) |*b, *r| {
+                    b.* = 0x22;
+                    r.* = 0x22;
+                }
+                for (ref[off .. off + len], src[soff .. soff + len]) |*r, x| r.* = x;
+                const ret = sdk_root.memcpyImpl(buf[off..].ptr, src[soff..].ptr, len);
+                try testing.expect(ret == buf[off..].ptr);
+                try testing.expectEqualSlices(u8, &ref, &buf);
+            }
+        }
+    }
+}
