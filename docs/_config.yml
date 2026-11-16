@@ -1,0 +1,4 @@
+# GitHub Pages site (Settings -> Pages: branch master, folder /docs)
+title: PL/Zig
+description: Zig as a PostgreSQL procedural language, compiled to sandboxed WebAssembly
+theme: jekyll-theme-minimal

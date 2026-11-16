@@ -20,8 +20,8 @@ reasoning behind every decision are in [PLAN.md](PLAN.md); the host/guest
 interface is in [doc/abi.md](doc/abi.md).
 
 Supported servers: PostgreSQL 14, 15, 16, 17, 18 and 19 (tested: 14.25,
-15.20, 16.16, 17.12, 18.7, 19rc2) on Linux x86_64 (aarch64 should work:
-pinned checksums are included, but it is untested).
+15.20, 16.16, 17.12, 18.7, 19rc2) on Linux x86_64; aarch64 is tested in
+CI on PostgreSQL 18.7 only.
 
 ### Compatibility
 

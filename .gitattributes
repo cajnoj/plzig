@@ -6,3 +6,6 @@
 /.github/** export-ignore
 /bench export-ignore
 /bench/** export-ignore
+# the GitHub Pages site (not documentation: that is doc/)
+/docs export-ignore
+/docs/** export-ignore
