@@ -726,7 +726,15 @@ pub const Numeric = struct {
         if (s.math.isNan(v)) return nan;
         if (s.math.isInf(v)) return if (v > 0) infinity else neg_infinity;
         if (v == 0) return zero;
-        var d: [15]u8 = undefined;
+        if (decimal15Fast(@abs(v))) |dec| return fromDecimal15(gpa, v < 0, dec);
+        return fromF64Exact(gpa, v);
+    }
+
+    /// fromF64Alloc of a finite nonzero v through the exact big-integer
+    /// digit generator (the fallback of the fast path; also what the unit
+    /// tests check the fast path against).
+    fn fromF64Exact(gpa: s.mem.Allocator, v: f64) error{OutOfMemory}!Numeric {
+        var d: [15]u8 = @splat(0);
         const e10 = decimalDigits15(@abs(v), &d);
         var n: usize = 15;
         while (d[n - 1] == 0) n -= 1;
@@ -736,6 +744,35 @@ pub const Numeric = struct {
             error.OutOfMemory => return error.OutOfMemory,
             else => unreachable, // 15 digits and |exponent| < 330 always fit
         };
+    }
+
+    /// The numeric of dec.m * 10^dec.e (0 < m < 10^15, no trailing decimal
+    /// zero) with the dscale numeric_in gives its %.15g text: max(0, -e).
+    /// The same value and layout as buildDecimal makes of those digits
+    /// (normalised: no leading or trailing zero base-10000 digit), without
+    /// a digit buffer.
+    fn fromDecimal15(gpa: s.mem.Allocator, negative: bool, dec: Decimal15) error{OutOfMemory}!Numeric {
+        // value = mm * 10000^(e4 / 4), e4 = floor(e / 4) * 4; mm < 10^18
+        const e4: i32 = @divFloor(dec.e, 4) * 4;
+        var mm: u64 = dec.m * pow10_u64[@intCast(dec.e - e4)];
+        var ng: usize = 0; // base-10000 digits of mm
+        var t = mm;
+        while (t != 0) : (t /= 10000) ng += 1;
+        const w: i32 = @as(i32, @intCast(ng)) - 1 + @divExact(e4, 4);
+        var lo: usize = 0; // trailing zero digits are not stored
+        while (mm % 10000 == 0) : (mm /= 10000) lo += 1;
+        const nd = ng - lo;
+        const out = try allocBytes(gpa, 8 + 2 * nd);
+        put16(out, 0, @intCast(nd));
+        put16(out, 2, @bitCast(@as(i16, @intCast(w))));
+        put16(out, 4, if (negative) sign_neg else sign_pos);
+        put16(out, 6, if (dec.e < 0) @intCast(-dec.e) else 0);
+        var i = nd;
+        while (i > 0) : (mm /= 10000) {
+            i -= 1;
+            put16(out, 8 + 2 * i, @intCast(mm % 10000));
+        }
+        return .{ .wire = out };
     }
 
     pub const ParseError = error{ InvalidCharacter, Overflow, OutOfMemory };
@@ -1191,6 +1228,132 @@ fn allocBytes(gpa: s.mem.Allocator, n: usize) error{OutOfMemory}![]u8 {
     return p[0..n];
 }
 
+/// m * 10^e: what %.15g makes of a double, without trailing zeros.
+const Decimal15 = struct { m: u64, e: i32 };
+
+const pow10_u64 = blk: {
+    var t: [20]u64 = undefined;
+    t[0] = 1;
+    for (1..20) |i| t[i] = t[i - 1] * 10;
+    break :blk t;
+};
+
+/// a * b as a 128-bit (hi, lo) pair, in 64-bit arithmetic only (a u128
+/// multiplication is a compiler-rt call, interpreted in the guest)
+fn mulWide(a: u64, b: u64) struct { hi: u64, lo: u64 } {
+    const m32: u64 = 0xffff_ffff;
+    const a0 = a & m32;
+    const a1 = a >> 32;
+    const b0 = b & m32;
+    const b1 = b >> 32;
+    const p00 = a0 * b0;
+    const p01 = a0 * b1;
+    const p10 = a1 * b0;
+    const p11 = a1 * b1;
+    const mid = (p00 >> 32) + (p01 & m32) + (p10 & m32);
+    return .{ .hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32), .lo = (p00 & m32) | (mid << 32) };
+}
+
+/// The fast path of Numeric.fromF64: %.15g of `av` (> 0, finite), rounded
+/// half to even from the exact binary value, for normal values with
+/// 1e-8 <= av < 2^64; null otherwise (the caller then uses the exact
+/// big-integer path, decimalDigits15).  Exact: av = m * 2^e2 is scaled by a
+/// power of ten into [10^14, 10^15) in 64-bit arithmetic (one 64x64->128
+/// multiplication done in halves, shifts on the two words; no 128-bit
+/// division and no compiler-rt call), and the bits shifted out decide the
+/// rounding.
+fn decimal15Fast(av: f64) ?Decimal15 {
+    const bits: u64 = @bitCast(av);
+    const ef: i32 = @intCast(bits >> 52); // av > 0: no sign bit
+    if (ef == 0 or ef >= 1023 + 64) return null; // subnormal, or >= 2^64 (or not finite)
+    const m: u64 = (bits & ((@as(u64, 1) << 52) - 1)) | (@as(u64, 1) << 52);
+    const e2: i32 = ef - 1075; // av = m * 2^e2, 2^52 <= m < 2^53
+    var q: u64 = 0;
+    var e: i32 = 0;
+    if (av >= 1e15) {
+        // an integer part I of 16..20 digits (av < 2^64); drop j = digits - 15
+        // of them: q = I / 10^j, rounded by the remainder and the binary
+        // fraction below I (av >= 1e15 > 2^49, so -e2 <= 3)
+        var int: u64 = 0;
+        var frac = false;
+        if (e2 >= 0) {
+            int = m << @intCast(e2);
+        } else {
+            const sh: u6 = @intCast(-e2);
+            int = m >> sh;
+            frac = m & ((@as(u64, 1) << sh) - 1) != 0;
+        }
+        var j: usize = 1;
+        while (j < 5 and int / pow10_u64[j] >= 1_000_000_000_000_000) j += 1;
+        const p = pow10_u64[j];
+        q = int / p;
+        const r = int % p;
+        const half = p / 2;
+        if (r > half or (r == half and (frac or q & 1 == 1))) q += 1;
+        e = @intCast(j);
+    } else {
+        // av < 1e15 < 2^50, so e2 <= -3.  k10 = floor(log10 av), estimated
+        // from the binary exponent (one off at most; corrected below)
+        var k10: i32 = @min(14, @divFloor((ef - 1023) * 78913, 262144));
+        var tries: u32 = 0;
+        while (true) : (tries += 1) {
+            if (tries == 3) return null;
+            const p = 14 - k10; // av * 10^p should lie in [10^14, 10^15)
+            if (p < 0 or p > 22) return null; // (av < 1e-8)
+            const pu: u32 = @intCast(p);
+            // num = m * 10^p < 2^53 * 10^22 < 2^127
+            const num = if (pu <= 19) mulWide(m, pow10_u64[pu]) else mulWide(m * pow10_u64[pu - 19], pow10_u64[19]);
+            const sh: u32 = @intCast(-e2);
+            if (sh >= 128) return null;
+            // qq = num >> sh (must fit in 64 bits), round = bit sh-1,
+            // sticky = any bit below it
+            var qq: u64 = 0;
+            var round = false;
+            var sticky = false;
+            if (sh >= 64) {
+                const s2: u6 = @intCast(sh - 64);
+                qq = num.hi >> s2;
+                const b = sh - 1; // >= 63
+                round = if (b < 64) (num.lo >> 63) != 0 else ((num.hi >> @intCast(b - 64)) & 1) != 0;
+                sticky = if (b < 64)
+                    (num.lo & ((@as(u64, 1) << 63) - 1)) != 0
+                else
+                    num.lo != 0 or (num.hi & ((@as(u64, 1) << @intCast(b - 64)) - 1)) != 0;
+            } else {
+                const s1: u6 = @intCast(sh); // 3..63
+                if ((num.hi >> s1) != 0) { // >= 2^64: k10 too small
+                    k10 += 1;
+                    continue;
+                }
+                qq = (num.lo >> s1) | (num.hi << @intCast(64 - sh));
+                round = ((num.lo >> @intCast(sh - 1)) & 1) != 0;
+                sticky = (num.lo & ((@as(u64, 1) << @intCast(sh - 1)) - 1)) != 0;
+            }
+            if (qq >= 1_000_000_000_000_000) {
+                k10 += 1;
+                continue;
+            }
+            if (qq < 100_000_000_000_000) {
+                k10 -= 1;
+                continue;
+            }
+            q = qq;
+            if (round and (sticky or q & 1 == 1)) q += 1;
+            e = k10 - 14;
+            break;
+        }
+    }
+    if (q == 1_000_000_000_000_000) {
+        q = 100_000_000_000_000;
+        e += 1;
+    }
+    while (q % 10 == 0) {
+        q /= 10;
+        e += 1;
+    }
+    return .{ .m = q, .e = e };
+}
+
 /// The 15 significant decimal digits of `v` (> 0, finite), rounded half to
 /// even from its exact binary value, as glibc's printf("%.15e") does; `d`
 /// gets the digits (d[0] in 1..9), the result is the decimal exponent of
@@ -1201,38 +1364,42 @@ fn decimalDigits15(v: f64, d: *[15]u8) i64 {
     const frac: u64 = bits & ((@as(u64, 1) << 52) - 1);
     const m: u64 = if (exp_field == 0) frac else frac | (@as(u64, 1) << 52);
     const e2: i64 = if (exp_field == 0) -1074 else @as(i64, @intCast(exp_field)) - 1075;
-    // v = r / sc
-    var r = Big.fromU64(m);
-    var sc = Big.fromU64(1);
+    // v = r / sc.  The big integers are static: a Big on the stack would
+    // be filled (ReleaseSafe) and copied byte by byte by the interpreter,
+    // which cost most of this function's time.  Only limbs[0..len] are used.
+    const r = &big_store.r;
+    const sc = &big_store.sc;
+    const ten = &big_store.ten;
+    r.set(m);
+    sc.set(1);
     if (e2 >= 0) r.shl(@intCast(e2)) else sc.shl(@intCast(-e2));
     var k: i64 = @intFromFloat(@floor(@log10(v)));
     if (k >= 0) sc.mulPow10(@intCast(k)) else r.mulPow10(@intCast(-k));
     // make sc <= r < 10 sc (the estimate can be off by one)
     while (true) {
-        var ten = sc;
+        ten.copyFrom(sc);
         ten.mulSmall(10);
-        if (r.cmp(&ten) != .lt) {
-            sc = ten;
+        if (r.cmp(ten) != .lt) {
+            sc.copyFrom(ten);
             k += 1;
         } else break;
     }
-    while (r.cmp(&sc) == .lt) {
+    while (r.cmp(sc) == .lt) {
         r.mulSmall(10);
         k -= 1;
     }
     for (0..15) |i| {
         if (i > 0) r.mulSmall(10);
         var q: u8 = 0;
-        while (r.cmp(&sc) != .lt) {
-            r.sub(&sc);
+        while (r.cmp(sc) != .lt) {
+            r.sub(sc);
             q += 1;
         }
         d[i] = q;
     }
     // round half to even on the exact remainder r / sc
-    var r2 = r;
-    r2.shl(1);
-    const c = r2.cmp(&sc);
+    r.shl(1);
+    const c = r.cmp(sc);
     if (c == .gt or (c == .eq and d[14] % 2 == 1)) {
         var i: usize = 15;
         while (i > 0) {
@@ -1251,18 +1418,25 @@ fn decimalDigits15(v: f64, d: *[15]u8) i64 {
     return k;
 }
 
-/// Unsigned big integer for decimalDigits15: little-endian u32 limbs.
+/// decimalDigits15's working storage (static: see there)
+var big_store: struct { r: Big = .{}, sc: Big = .{}, ten: Big = .{} } = .{};
+
+/// Unsigned big integer for decimalDigits15: little-endian u32 limbs, of
+/// which limbs[0..len] are the value (the rest is never read).
 /// 2^1074 * 10^340 < 2^2224 = 70 limbs; 80 is plenty.
 const Big = struct {
     limbs: [80]u32 = @splat(0),
     len: usize = 0,
 
-    fn fromU64(x: u64) Big {
-        var b: Big = .{};
-        b.limbs[0] = @truncate(x);
-        b.limbs[1] = @truncate(x >> 32);
-        b.len = if (b.limbs[1] != 0) 2 else if (b.limbs[0] != 0) 1 else 0;
-        return b;
+    fn set(self: *Big, x: u64) void {
+        self.limbs[0] = @truncate(x);
+        self.limbs[1] = @truncate(x >> 32);
+        self.len = if (self.limbs[1] != 0) 2 else if (self.limbs[0] != 0) 1 else 0;
+    }
+
+    fn copyFrom(self: *Big, b: *const Big) void {
+        @memcpy(self.limbs[0..b.len], b.limbs[0..b.len]);
+        self.len = b.len;
     }
 
     fn mulSmall(self: *Big, f: u32) void {
@@ -2896,3 +3070,122 @@ pub const spi = struct {
 };
 
 const plzig_root = @This();
+
+// ---------------------------------------------------------------------------
+// Unit tests of private SDK internals.  Run by `make check-zig` with this
+// file as the root module (zig test compiles `test` blocks only then; they
+// are never part of a function build).  The public API is tested by
+// zig/sdk/test.zig.
+
+const testing = s.testing;
+
+/// free a Numeric made with testing.allocator (the constants are static)
+fn testFreeNum(n: Numeric) void {
+    for ([_]Numeric{ Numeric.nan, Numeric.infinity, Numeric.neg_infinity, Numeric.zero }) |c| {
+        if (n.wire.ptr == c.wire.ptr) return;
+    }
+    testing.allocator.free(n.wire);
+}
+
+/// fromF64Alloc (fast path where it applies) must give the same bytes as
+/// the exact big-integer path; returns whether the fast path applied
+fn checkFromF64(v: f64) !bool {
+    const fast = decimal15Fast(@abs(v)) != null;
+    const got = try Numeric.fromF64Alloc(testing.allocator, v);
+    defer testFreeNum(got);
+    const want = try Numeric.fromF64Exact(testing.allocator, v);
+    defer testFreeNum(want);
+    testing.expectEqualSlices(u8, want.wire, got.wire) catch |err| {
+        s.debug.print("fromF64({e}) bits 0x{x}: fast path differs from the exact path\n", .{ v, @as(u64, @bitCast(v)) });
+        return err;
+    };
+    return fast;
+}
+
+test "Numeric.fromF64: the fast path agrees with the exact path" {
+    var prng = s.Random.DefaultPrng.init(0xf64f64);
+    const r = prng.random();
+    var fast_hits: usize = 0;
+    // random bit patterns over the whole double range, and random values in
+    // the fast path's range [1e-8, 2^64)
+    for (0..100000) |_| {
+        const v: f64 = @bitCast(r.int(u64));
+        if (s.math.isNan(v) or s.math.isInf(v) or v == 0) continue;
+        _ = try checkFromF64(v);
+    }
+    for (0..100000) |_| {
+        const v = s.math.pow(f64, 10, r.float(f64) * 27.2 - 8) * (if (r.boolean()) @as(f64, -1) else 1);
+        if (try checkFromF64(v)) fast_hits += 1;
+    }
+    // nearly every value in the range takes the fast path
+    try testing.expect(fast_hits > 99000);
+    // powers of two (subnormals included) and their neighbours
+    var e: i32 = -1074;
+    while (e <= 1023) : (e += 1) {
+        const p = s.math.ldexp(@as(f64, 1), e);
+        for ([_]f64{ p, s.math.nextAfter(f64, p, 0), s.math.nextAfter(f64, p, s.math.inf(f64)), 3 * p, 5 * p, 7 * p }) |v| {
+            if (v != 0 and !s.math.isInf(v)) _ = try checkFromF64(v);
+        }
+    }
+    // powers of ten and their neighbours (the decimal exponent estimate and
+    // the rounding carry to a new power of ten)
+    var k: i32 = -323;
+    while (k <= 308) : (k += 1) {
+        const p = s.math.pow(f64, 10, @floatFromInt(k));
+        if (p == 0 or s.math.isInf(p)) continue;
+        var v = p;
+        for (0..4) |_| v = s.math.nextAfter(f64, v, 0);
+        for (0..9) |_| {
+            if (v != 0) _ = try checkFromF64(v);
+            const w = v * 9.999999999999995;
+            if (w != 0 and !s.math.isInf(w)) _ = try checkFromF64(w);
+            v = s.math.nextAfter(f64, v, s.math.inf(f64));
+        }
+    }
+    // the range boundaries of the fast path and of its two branches
+    const edges = [_]f64{ 1e-8, 1e-9, 1.0000000000000001e-8, 1e14, 1e15, 2e15, 9007199254740992.0, 4503599627370496.0, 18446744073709551616.0, 1e19, 1e20, s.math.floatMin(f64), s.math.floatMax(f64), 5e-324, 2.225073858507201e-308 };
+    for (edges) |c| {
+        var v = c;
+        for (0..6) |_| v = s.math.nextAfter(f64, v, 0);
+        for (0..13) |_| {
+            if (v != 0 and !s.math.isInf(v)) _ = try checkFromF64(v);
+            v = s.math.nextAfter(f64, v, s.math.inf(f64));
+        }
+    }
+    // exact ties at the 16th significant digit: integers of 16 digits ending
+    // in 5 and of 17 digits ending in 50 (exact doubles), and dyadic
+    // fractions a * 2^-j whose exact expansion a * 5^j has 16 digits
+    var ties: usize = 0;
+    for (0..20000) |_| {
+        const n16 = r.intRangeLessThan(u64, 100_000_000_000_000, 900_719_925_474_099) * 10 + 5;
+        try testing.expect(try checkFromF64(@floatFromInt(n16)));
+        const n17 = r.intRangeLessThan(u64, 100_000_000_000_000, 180_143_985_094_819) * 100 + 50;
+        try testing.expect(try checkFromF64(@floatFromInt(n17)));
+        ties += 2;
+    }
+    var j: u32 = 1;
+    while (j <= 22) : (j += 1) { // 5^j < 10^16
+        const p5 = s.math.pow(u128, 5, j);
+        const lo = (1_000_000_000_000_000 + p5 - 1) / p5; // a * 5^j in [10^15, 10^16)
+        const hi = @min((10_000_000_000_000_000 - 1) / p5, (1 << 53) - 1);
+        if (lo > hi) continue;
+        for (0..200) |_| {
+            var av: u128 = lo + r.uintLessThan(u128, hi - lo + 1);
+            if (av % 2 == 0) av = if (av + 1 <= hi) av + 1 else av - 1;
+            if (av < lo) continue;
+            const v = s.math.ldexp(@as(f64, @floatFromInt(av)), -@as(i32, @intCast(j)));
+            try testing.expect(try checkFromF64(v)); // v >= 1e-7: the fast path
+            try testing.expect(try checkFromF64(-v));
+            ties += 1;
+        }
+    }
+    try testing.expect(ties > 42000);
+    // a tie rounds to even, from the exact value
+    for ([_]struct { f64, []const u8 }{ .{ 1234567890123455.0, "1234567890123460" }, .{ 1234567890123445.0, "1234567890123440" } }) |c| {
+        const got = try Numeric.fromF64Alloc(testing.allocator, c[0]);
+        defer testFreeNum(got);
+        const want = try Numeric.parseAlloc(testing.allocator, c[1]);
+        defer testFreeNum(want);
+        try testing.expectEqualSlices(u8, want.wire, got.wire);
+    }
+}

@@ -173,6 +173,10 @@ check-zig:
 	    --dep plzig -Mplzig_test_env=zig/sdk/test_env.zig \
 	    --dep plzig --dep user -Msdk_root=zig/sdk/root.zig \
 	    --dep plzig -Muser=zig/sdk/test_user.zig
+# private SDK internals: the SDK's own `test` blocks, with it as the root
+	"$(ZIG)" test $(ZIG_TEST_CACHE) \
+	    --dep plzig_test_env -Mroot=zig/sdk/plzig.zig \
+	    --dep plzig=root -Mplzig_test_env=zig/sdk/test_env.zig
 
 # ---- optional: obtain the pinned Zig (never part of build or install) ----
 fetch-zig:

@@ -88,6 +88,28 @@ SELECT count(*) > 2900 AS enough, count(*) FILTER (WHERE nm_from_f64(x)::text <>
 FROM (SELECT nm_bits_to_f64((floor(random() * 2147483648)::int8 << 32) | floor(random() * 4294967296)::int8) AS x
         FROM generate_series(1, 3000)) s
 WHERE x = x AND abs(x) <> 'Infinity';
+-- the guest's fast path (1e-8 <= |x| < 2^64) against float8::numeric (text,
+-- so the scale counts): ordinary values; exact ties at the 16th significant
+-- digit (integers of 16 digits ending in 5, of 17 digits ending in 50, and
+-- odd a * 2^-j whose exact expansion a * 5^j has 16 digits); powers of two
+-- and of ten, the range boundaries, and their neighbours (+-3 ulps)
+CREATE FUNCTION nm_f64_bits(x float8) RETURNS int8 STRICT LANGUAGE plzig AS $$ return @bitCast(x); $$;
+SELECT count(*) > 11000 AS enough, count(*) FILTER (WHERE nm_from_f64(x)::text <> x::numeric::text) AS fast_mismatches
+FROM (SELECT (CASE WHEN random() < 0.5 THEN -1 ELSE 1 END) * 10 ^ (random() * 27.2 - 8) AS x FROM generate_series(1, 4000)
+      UNION ALL
+      SELECT ((100000000000000 + floor(random() * 800000000000000)::int8) * 10 + 5)::float8 FROM generate_series(1, 2000)
+      UNION ALL
+      SELECT ((100000000000000 + floor(random() * 80000000000000)::int8) * 100 + 50)::float8 FROM generate_series(1, 2000)
+      UNION ALL
+      SELECT (a - (a % 2) + 1)::float8 / 2::float8 ^ j
+      FROM (SELECT j, ceil(1e15 / 5::numeric ^ j) + floor(random()::numeric * (least(1e16 / 5::numeric ^ j, 9007199254740991) - ceil(1e15 / 5::numeric ^ j) - 1)) AS a
+            FROM generate_series(1, 22) j, generate_series(1, 100)) s
+      UNION ALL
+      SELECT nm_bits_to_f64(nm_f64_bits(p) + d)
+      FROM (SELECT 2::float8 ^ g AS p FROM generate_series(-30, 66) g
+            UNION ALL SELECT 10::float8 ^ k FROM generate_series(-9, 20) k
+            UNION ALL SELECT unnest('{1e-8, 1e14, 1e15, 9007199254740992, 18446744073709551616, 0.5, 123456789012345.5}'::float8[])) p,
+           generate_series(-3, 3) d) s;
 -- parsing: numeric_in's result for the same text
 SELECT t, nm_err(format('SELECT nm_parse(%L)', t)) AS guest, nm_err(format('SELECT %L::numeric', t)) AS sql,
        CASE WHEN nm_err(format('SELECT %L::numeric', t)) = 'ok' THEN nm_parse(t)::text = t::numeric::text END AS same
