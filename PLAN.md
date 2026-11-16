@@ -622,12 +622,12 @@ v1 is expected to be slower than PL/pgSQL; neither weakens the sandbox.
     backend. Both stay rejected (D2); the benchmark numbers are the
     baseline if this is ever reconsidered.
 11. *Optional.* **Skip the `ReleaseSafe` 0xAA fill of guest allocations**
-    **Closed (2026-11-16): not possible as described; the fill was made
-    about 12x cheaper instead, see Deviations from plan, 55.**
     (`@memset(undefined)` in `Allocator.alloc`, ~8 ns per byte in the
     interpreter). Harmless to the host (guest memory only), but it changes
     what a buggy function sees: uninitialised memory would hold leftovers
     of earlier calls of the same instance instead of 0xAA.
+    **Closed (2026-11-16): not possible as described; the fill was made
+    about 12x cheaper instead, see Deviations from plan, 55.**
 12. **Native mappings for more built-in types** (owner decision,
     2026-11-15; before the extension port of item 13 and before packaging).
     **Steps 1–4 done (2026-11-15), see Deviations from plan, 29; step 5
