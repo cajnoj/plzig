@@ -1,7 +1,10 @@
 {
+  "plzig_so_sha256": "818e4f09b062fa78e6ca39625efa711130ca5dee2f38943514916397385e918a",
+  "interp_addr": "0x39dc0",
   "cpu_model": "Intel(R) Core(TM) Ultra 7 155H",
   "cpus_visible": 12,
   "cpu_list": "0-11",
+  "pin": 8,
   "online_cpus": 22,
   "mem_total_gb": 93.9,
   "kernel": "7.2.15-200.fc44.x86_64",
@@ -33,7 +36,7 @@
     "max_stack_depth": "2048kB",
     "max_wal_size": "1024MB",
     "min_wal_size": "80MB",
-    "plzig.zig_path": "/opt/zig-0.17.1/zig",
+    "plzig.zig_path": "/opt/zig/zig",
     "shared_buffers": "655368kB",
     "synchronous_commit": "off",
     "unix_socket_directories": "/tmp",
@@ -53,7 +56,7 @@
     "csv_rows": 20000,
     "blob_kb": 1024
   },
-  "started": "2026-11-15 04:49:24 +0000",
+  "started": "2026-11-18 21:52:53 +0000",
   "defaults_of_interest": {
     "jit_above_cost": "100000",
     "jit_inline_above_cost": "500000",
@@ -70,7 +73,7 @@
     "plzig.max_prepared_plans": "64",
     "plzig.max_source_size": "1024",
     "plzig.zig_lib_dir": "",
-    "plzig.zig_path": "/opt/zig-0.17.1/zig",
+    "plzig.zig_path": "/opt/zig/zig",
     "plzig.zig_sha256": ""
   }
 }

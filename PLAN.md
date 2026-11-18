@@ -2841,3 +2841,62 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       lists the SDK's public declarations, changes;
       `test/expected/sandbox.out` names line 37 of `sdk/plzig.zig` (was
       22); the SDK digest changes, so cached modules are rebuilt once.
+
+62. **Benchmark variation pinned down; report regenerated (2026-11-19).**
+    Owner's observation: on the same laptop, later builds ran the
+    compute-bound tasks (mandelbrot, primes, the FNV checksum) ~10 % slower
+    than the published numbers, with no relevant source change. The
+    hypothesis — build-to-build code placement of the WAMR interpreter loop,
+    not a regression — was confirmed with `perf` counters
+    (`bench/variation.sh`, `variation.py`; new, benchmark-only, Docker like
+    `bench/run.sh`, container as root with `CAP_PERFMON`/`SYS_PTRACE`/
+    `SYS_NICE` for `perf stat` and for pinning the backend; no host sysctl,
+    governor or hardware change). Measured on the one laptop (Intel Core
+    Ultra 7 155H, `powersave`/intel_pstate, turbo and SMT on), not server
+    hardware:
+    * **Noise** (same binary, one pinned performance core, 35 runs): median
+      interquartile range 1–3 %, cycles within 1 % across rounds. The 10 %
+      is not noise.
+    * **Core** (same binary, pinned): 6–13 % across the six performance
+      cores (each a different turbo frequency); an efficiency core is ~40 %
+      slower on the float loop and mispredicts the dispatch branch far more;
+      the slow efficiency cluster ~50 % slower on the integer loop.
+    * **Build to build** (the ~10 %): four builds from the published-run
+      source and from master, measured back to back on one core, retire the
+      *same* number of instructions (within 0.1 %) but differ by up to 22 %
+      in cycles (IPC 3.75 → 3.06 on mandelbrot); the published build landed
+      on a faster placement of `wasm_interp_call_func_bytecode`. Relinking
+      `plzig.so` with 0–96 bytes of never-executed code in front (identical
+      objects and flags) reproduces the whole spread from address alone, and
+      padding the fast build makes it slower. Front-end counters rule out
+      I-cache/decode (uops come from the µop cache; resteers near zero): it
+      is µop-cache and branch-predictor packing at the loop's address.
+    * **Conclusion:** the variation is interpreter-loop placement, not a
+      source regression and not governor/thermal/background load. High
+      confidence (same instruction count, cycles tracked to layout by
+      deliberate perturbation, measurement noise an order of magnitude
+      smaller). WAMR fast interpreter, AOT and JIT stay rejected (D2) and
+      were not proposed.
+    * **Report** (`doc/benchmarks.md`) regenerated from current master with
+      the repo's method, now pinning each single-session timed backend to
+      one performance core (`bench/run.sh --pin`, so this variation does not
+      also move numbers between tasks within a run); machine/method
+      unchanged otherwise. New section *How much the numbers vary* states the
+      noise, core and build-to-build spreads and that the compute and
+      per-call ratios should be read with ~±10 % tolerance (direction stable,
+      exact multiplier not). The prose (`bench/notes.md`) and all tables were
+      updated to this run; several numbers moved for real reasons since the
+      last publish (task 4 2.0× → 1.5× and the jsonb text path 40× → 11×
+      from Deviations 54/55 and the native-type work), which the notes say.
+    * **Proposed, not applied:** compiling WAMR with `-falign-functions=64
+      -falign-labels=64` removes the placement swing (recovers the faster
+      layout, makes it address-insensitive) at ~70 % more `.text` in
+      `libiwasm.a`. It is a product build-flag change, so it is left for the
+      owner to decide and would be judged against every test and packaging
+      layer first; not applied here. No product code or build flags were
+      changed. Not measured: other CPUs/microarchitectures, server hardware,
+      and tasks other than 2 and 5 for the variation study (the report's
+      full task set is the regenerated run). `bench/variation.*` and the
+      `--pin` option are the only new code; both are benchmark-only and
+      excluded from every shipped and test artifact (`.gitattributes`,
+      `.dockerignore`).

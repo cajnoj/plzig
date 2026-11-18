@@ -33,17 +33,19 @@ rendered into `build/bench/<timestamp>/report/`; `--publish` writes it to
 `doc/benchmarks.md` and `doc/benchmarks/` (SVG charts, CSV copies) instead.
 The exit status is non-zero if a build, a run or the correctness gate fails.
 
-The published report was produced by (last done 2026-11-15 for the native
-type mappings, with `n13-` directory names; the history directories are
-those of phase D)
+The published report was produced by (last done 2026-11-19, with `v62-`
+directory names; the history directories are those of phase D). `--pin 8`
+pins every single-session timed backend to one performance core, so the
+build-to-build and core-to-core variation of *How much the numbers vary* in
+the report does not also move the numbers between tasks within one run:
 
 ```sh
-bench/run.sh --cpus 0-11 --clients 1,2,4,8 --out build/bench/n13-pg18
-bench/run.sh --cpus 0-11 --versions "14.25 19rc2" --jit off --runs 10 --clients "" --out build/bench/n13-xver
-bench/run.sh --cpus 0-11 --tasks 1,2,8 --jit off,on,force --clients "" --out build/bench/n13-jit
-# combined: build/bench/n13-pg18 plus the two version directories of n13-xver,
-# and build/bench/n13-jit/18.7 as n13-pg18/jit/18.7
-bench/run.sh --report-only build/bench/n13-pg18 --history build/bench/t10-history \
+bench/run.sh --cpus 0-11 --pin 8 --clients 1,2,4,8 --out build/bench/v62-pg18
+bench/run.sh --cpus 0-11 --pin 8 --versions "14.25 19rc2" --jit off --runs 10 --clients "" --out build/bench/v62-xver
+bench/run.sh --cpus 0-11 --pin 8 --tasks 1,2,8 --jit off,on,force --clients "" --out build/bench/v62-jit
+# combined: build/bench/v62-pg18 plus the two version directories of v62-xver,
+# and build/bench/v62-jit/18.7 as v62-pg18/jit/18.7
+bench/run.sh --report-only build/bench/v62-pg18 --history build/bench/t10-history \
     --call-history build/bench/abc-history --publish
 ```
 
@@ -70,6 +72,7 @@ which perf needs.
 | `report.py` | CSV → `benchmarks.md` + SVG charts (standard library only). |
 | `notes.md` | The hand-written analysis inserted into the report. |
 | `profile-in-container.sh` | The perf side of `--profile`. |
+| `variation.sh`, `variation.py` | Not part of a normal run: measure how much the compute tasks (2 and 5) vary run to run, between CPU cores, and between builds of `plzig.so` placed differently in memory (`perf stat`: user-space cycles, instructions, branches, branch misses, and the performance cores' front-end events). The findings are the report's *How much the numbers vary*. `bench/variation.sh --help`. |
 | `tasks/NN_name/` | `task.json` (queries, sizes, variants) and one file per language: `sql.sql`, `plpgsql.sql`, `plpython.sql`, `plperl.sql`, `plzig.sql`. |
 
 A task variant names a function prefix (`t07`); every function
@@ -87,7 +90,9 @@ parameters.
 * Per task variant: each implementation in its own session; `warmup`
   untimed runs each, then `runs` rounds in which every implementation runs
   once, the order rotated every round; client-side wall clock around
-  `execute` + `fetchall`. Reported: median and interquartile range.
+  `execute` + `fetchall`. Reported: median and interquartile range. With
+  `--pin CPU` each of these backends is pinned to that one core (the cores of
+  one machine differ in speed; see the report's *How much the numbers vary*).
 * JIT: every task with `jit = off` and with `jit = on` (server default
   thresholds), set per session.
 * pgbench (tasks 1 and 7): `-M prepared -T <s>`, clients = threads, JIT off,

@@ -13,6 +13,7 @@ something else went wrong (the partial results are still written).
 import argparse
 import csv
 import glob
+import hashlib
 import json
 import os
 import platform
@@ -216,7 +217,7 @@ def explain_jit(tasks, mode, jits, writer, version):
         conn.close()
 
 
-def timed(tasks, mode, jits, warmup, runs, writer, version):
+def timed(tasks, mode, jits, warmup, runs, writer, version, pin=None):
     for jit in jits:
         for t in tasks:
             params = t.get("params", {}).get(mode, {})
@@ -225,6 +226,12 @@ def timed(tasks, mode, jits, warmup, runs, writer, version):
                 impls = impls_for(probe, v["fn"])
                 probe.close()
                 conns = {i: connect(jit) for i in impls}
+                if pin is not None:
+                    # every timed backend on the same CPU: the CPUs of one
+                    # machine differ in speed (doc/benchmarks.md, *How much
+                    # the numbers vary*); only one backend runs at a time
+                    for i in impls:
+                        os.sched_setaffinity(conns[i].get_backend_pid(), {pin})
                 curs = {i: conns[i].cursor() for i in impls}
                 qs = {i: fmt(v["query"], f"{v['fn']}_{i}", params) for i in impls}
                 before = v.get("before_each")
@@ -428,10 +435,18 @@ def metadata(args):
     def q(sql):
         cur.execute(sql)
         return cur.fetchone()[0]
+    so = os.path.join(sh(["pg_config", "--pkglibdir"]).strip(), "plzig.so")
+    with open(so, "rb") as f:
+        so_digest = hashlib.sha256(f.read()).hexdigest()
+    interp = [l.split()[0] for l in sh(["nm", so]).splitlines()
+              if l.endswith(" wasm_interp_call_func_bytecode")]
     meta = {
+        "plzig_so_sha256": so_digest,
+        "interp_addr": "0x" + interp[0].lstrip("0") if interp else None,
         "cpu_model": cpu,
         "cpus_visible": len(affinity),
         "cpu_list": args.cpus or "all",
+        "pin": args.pin,
         "online_cpus": os.cpu_count(),
         "mem_total_gb": round(int(mem.group(1)) / 1024 / 1024, 1) if mem else None,
         "kernel": platform.release(),
@@ -478,6 +493,8 @@ def main():
     ap.add_argument("--cold-runs", type=int, default=10)
     ap.add_argument("--memory-runs", type=int, default=5)
     ap.add_argument("--cpus", default="", help="recorded only (the container's cpuset)")
+    ap.add_argument("--pin", type=int, default=None,
+                    help="pin the backends of the single-session timed runs to this CPU")
     ap.add_argument("--profile", default="", help="perf-profile this query instead of benchmarking")
     ap.add_argument("--profile-repeat", type=int, default=20)
     args = ap.parse_args()
@@ -531,7 +548,7 @@ def main():
 
         log("--- timed runs")
         f, w = open_csv("timings.csv", ["version", "jit", "task", "variant", "impl", "lang", "run", "ms"])
-        timed(query_tasks, args.mode, args.jit, args.warmup, args.runs, w, version)
+        timed(query_tasks, args.mode, args.jit, args.warmup, args.runs, w, version, args.pin)
         f.close()
 
         if args.clients and any(t.get("pgbench") for t in query_tasks):

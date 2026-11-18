@@ -428,7 +428,13 @@ def main():
       f"measured off, with the server default (on, `jit_above_cost` = "
       f"{meta['defaults_of_interest'].get('jit_above_cost')}) and forced (see *JIT*) |")
     w(f"| Runs | {meta['warmup']} warm-up + {meta['runs']} timed runs per task and implementation, "
-      "interleaved round-robin across implementations, each implementation in its own session |")
+      "interleaved round-robin across implementations, each implementation in its own session"
+      + (f"; the backends of these runs pinned to CPU {meta['pin']} (pgbench, start-up and memory "
+         "measurements not pinned)" if meta.get("pin") is not None else "") + " |")
+    if meta.get("interp_addr"):
+        w(f"| Build | `plzig.so` SHA-256 `{meta['plzig_so_sha256'][:16]}…`; the interpreter loop "
+          f"(`wasm_interp_call_func_bytecode`) at offset {meta['interp_addr']}, modulo 64: "
+          f"{int(meta['interp_addr'], 16) % 64} (see *How much the numbers vary*) |")
     w("")
     w("Server settings (identical for every language; everything else is the default):")
     w("")

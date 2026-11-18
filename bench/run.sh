@@ -17,6 +17,9 @@
 #   --clients LIST       pgbench client counts (default 1,4,8; empty: no pgbench)
 #   --pgbench-seconds N  (default 15)
 #   --cpus LIST          docker --cpuset-cpus for the benchmark container
+#   --pin CPU            pin the backends of the single-session timed runs to
+#                        this CPU (one of --cpus); pgbench, start-up and
+#                        memory measurements are not pinned
 #   --out DIR            run directory (default build/bench/<timestamp>)
 #   --no-build           use the existing plzig-test:<V> images
 #   --history DIR        a directory of labelled run directories (1-head, 2-...;
@@ -55,6 +58,7 @@ runs=""
 clients="1,4,8"
 pgsecs=""
 cpus=""
+pin=""
 out=""
 build=1
 history=""
@@ -74,6 +78,7 @@ while [ $# -gt 0 ]; do
         --clients) clients="$2"; shift 2 ;;
         --pgbench-seconds) pgsecs="$2"; shift 2 ;;
         --cpus) cpus="$2"; shift 2 ;;
+        --pin) pin="$2"; shift 2 ;;
         --out) out="$2"; shift 2 ;;
         --no-build) build=0; shift ;;
         --history) history="$2"; shift 2 ;;
@@ -146,6 +151,7 @@ for v in $versions; do
     dargs=(--out /tmp/out --mode "$mode" --jit "$jit" --warmup "$warmup" --runs "$runs"
            --clients "$clients" --pgbench-seconds "$pgsecs" --cpus "$cpus")
     [ -n "$tasks" ] && dargs+=(--tasks "$tasks")
+    [ -n "$pin" ] && dargs+=(--pin "$pin")
     [ $quick = 1 ] && dargs+=(--startup-runs 5 --cold-runs 2 --memory-runs 2)
     copts=(--init --shm-size=1g)
     [ -n "$cpus" ] && copts+=(--cpuset-cpus "$cpus")

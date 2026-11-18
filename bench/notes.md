@@ -2,8 +2,11 @@
 
 * **One machine, one run per version.** A laptop-class CPU (hybrid
   performance/efficiency cores; the benchmark container was pinned to the
-  six performance cores, 12 hardware threads) with frequency scaling left
-  on. Ratios between languages are more meaningful than absolute times.
+  six performance cores, 12 hardware threads, and each single-session timed
+  backend to one of those cores) with frequency scaling left on. These are
+  not server numbers. Ratios between languages are more meaningful than
+  absolute times, and even those carry a build-to-build and run-to-run
+  spread — read them with the tolerance in *How much the numbers vary*.
 * **PL/Python (`plpython3u`) is untrusted and unsandboxed**: its functions
   run with the full rights of the server OS user. It is here as a speed
   reference, not as a like-for-like alternative to PL/Zig. **PL/Perl
@@ -28,59 +31,65 @@
 ## What the numbers say
 
 (The figures quoted in this section are those of the published run in
-`doc/benchmarks.md`, PostgreSQL 18.7, JIT off.)
+`doc/benchmarks.md`, PostgreSQL 18.7, JIT off. The compute and per-call
+ratios carry a build-to-build component of roughly ±10 % that is not a code
+change; see *How much the numbers vary* for what that means for reading
+them.)
 
 **Where PL/Zig wins: computation inside one call.** Integer loops (task 2
-primes: 0.26× PL/pgSQL's time), floating point (Mandelbrot row: 0.18×), a
-checksum loop over a 1 MB `bytea` (task 5: 0.24×) and edit distance against
-10 000 rows fetched through a cursor (task 6: 0.50×). In all of these PL/Zig
-is also faster than PL/Python and PL/Perl (1.8–4.9× on task 2, 5.7–7.5× on task 5). This is
+primes: 0.28× PL/pgSQL's time), floating point (Mandelbrot row: 0.22×), a
+checksum loop over a 1 MB `bytea` (task 5: 0.23×) and edit distance against
+10 000 rows fetched through a cursor (task 6: 0.30×). In all of these PL/Zig
+is also faster than PL/Python and PL/Perl (1.7–4.0× on task 2, 5.9–7.9× on task 5). This is
 the case the design predicts: compiled Zig is interpreted at roughly
-10–15 ns per byte for a simple loop (task 5: 11 ms for 1 MB; one call), which
+10 ns per byte for a simple loop (task 5: 10 ms for 1 MB; one call), which
 beats PL/pgSQL's per-statement expression evaluation, but is far from native
 code: compiled C would be one to two orders of magnitude faster still.
 
 **About even: per-call overhead and SPI-heavy loops with prepared
-statements.** Task 1 (one million calls of a trivial function: 1.03×, about
-0.23 µs per call against 0.22 µs), task 7 (100 000 lookups by key: 1.01×),
-task 9 (20 000 inserts + 20 000 updates: 1.05×), and under concurrency
-(pgbench: task 7 within 2 % of PL/pgSQL at 1–8 clients, task 1 within 5 %).
+statements.** Task 1 (one million calls of a trivial function: 1.10×, about
+0.24 µs per call against 0.22 µs), task 7 (100 000 lookups by key: 1.02×),
+task 9 (20 000 inserts + 20 000 updates: 1.07×), and under concurrency
+(pgbench: task 7 within 2 % of PL/pgSQL at 1–8 clients, task 1 within 8 %).
 For SPI the time goes into the executor, which every language shares;
 PL/Zig's boundary crossing (host import, typed parameter and row encoding)
 costs about as much as PL/pgSQL's own statement overhead. A call now enters
 the interpreter once and reuses its instance's memory contexts (see
 *Per-call and per-row overhead before and after*: task 1 went from about 1.6× to
-1.03×). Without a prepared statement (`spi.execute`: parse, plan, text
-parameters, text result for every lookup) PL/Zig is 5.3× slower than with
-one: prepare anything that runs in a loop.
+near parity — the 1.10× here is within the build-to-build spread of
+*How much the numbers vary*). Without a prepared statement (`spi.execute`:
+parse, plan, text parameters, text result for every lookup) PL/Zig is 5.4×
+slower than with one: prepare anything that runs in a loop.
 
 **Where PL/Zig loses, and why (measured, see *Profiling*):**
 
-* **Row-at-a-time cursor loops (task 8: 1.27×).** Every row crosses the
+* **Row-at-a-time cursor loops (task 8: 1.32×).** Every row crosses the
   boundary once (`spi_cursor_fetch` writes it into the cursor's guest
-  buffer) and is encoded on the way (one `Value` per column); ~0.19 µs per
+  buffer) and is encoded on the way (one `Value` per column); ~0.20 µs per
   row against ~0.15 µs for PL/pgSQL's `FOR r IN SELECT`. Before the
   per-row change it was two host calls and a per-row allocation (about 1.7×).
 * **String building with `std.fmt` (task 3: 3.8×) and parsing (task 4:
-  2.0×).** Here the competitors run their inner work in C: PL/pgSQL's
+  1.5×).** Here the competitors run their inner work in C: PL/pgSQL's
   `string_to_array`, `btrim`, `lower` and regular expressions, Perl's and
   Python's string primitives. PL/Zig runs it all as interpreted code: task 4
   makes about four passes over ~9 MB of input at ~13–23 ns per byte and pass
-  (a loop that only counts commas already costs 13 ns per byte), and in
-  `ReleaseSafe` every allocation is first filled with `0xAA` byte by byte
-  (another ~8 ns per byte for the output buffer). Formatting an integer with
-  `std.fmt` costs about 0.8 µs in the interpreter (task 3: 200 000 items,
-  149 ms). PL/Python is 4× faster than PL/Zig on task 4 and 6× on task 3.
-* **Large values (task 10): 1.06× for `bytea`, 1.29× for `text`.** One copy
+  (a loop that only counts commas already costs 13 ns per byte); the
+  `ReleaseSafe` `0xAA` fill of each allocation, once a byte-by-byte loop,
+  is now a fast `memset` (PLAN.md Deviations 55), which is most of why task 4
+  improved from 2.0× to 1.5× since the first published run. Formatting an
+  integer with `std.fmt` costs about 0.7 µs in the interpreter (task 3:
+  200 000 items, 142 ms). PL/Python is 3× faster than PL/Zig on task 4 and
+  6× on task 3.
+* **Large values (task 10): 1.04× for `bytea`, 1.27× for `text`.** One copy
   in, one copy out (plus the arena), and `text` results are validated
   (UTF-8, no NUL), which PL/pgSQL, returning its argument unchanged, does
   not need to do. Before this phase these were 20× and 8× (see *Task 10
   before and after*).
 * **Start-up and compile (task 11).** The first call in a new session costs
-  ~1.2 ms (WAMR initialisation, reading and validating the cached module,
+  ~1.4 ms (WAMR initialisation, reading and validating the cached module,
   instantiation) against ~0.4 ms for PL/pgSQL, but less than the ~7–8 ms that
   PL/Python and PL/Perl need to start their interpreters. `CREATE FUNCTION`
-  compiles: **~160 ms with a warm Zig cache, ~1.8 s with a cold one** (the
+  compiles: **~180 ms with a warm Zig cache, ~1.9 s with a cold one** (the
   first function of a new cluster, or after the Zig cache directory is
   removed), against well under a millisecond for PL/pgSQL. Compilations are
   serialised cluster-wide (PLAN.md D9), so a deployment that creates many
@@ -93,15 +102,15 @@ one: prepare anything that runs in a loop.
   beyond `plzig.instance_cache_max_memory` (4 MB) is destroyed after the call.
 
 **The natively mapped types (task 13, added with ABI version 4).** A
-`timestamp` column summed over a cursor (100 000 rows) takes 0.87× PL/pgSQL's
+`timestamp` column summed over a cursor (100 000 rows) takes 0.90× PL/pgSQL's
 time: the raw value arrives in the row's `Value`, nothing is formatted or
 parsed. One field of a jsonb document per row (100 000 rows, `doc ->>
-'qty'`) is 5.0× (1.4 µs per row against 0.29 µs): the document is copied
+'qty'`) is 5.4× (1.6 µs per row against 0.30 µs): the document is copied
 into the guest once and read in place (container header, a pass over the
 keys, the on-disk numeric converted in place); through the text
 representation (a domain over `jsonb`: `jsonb_out` on the host, a scan in
-the guest) it is 40×. Numeric arithmetic in a loop (200 000 iterations of
-`s + i * 1.25`) is 9.9×: two host calls per iteration, each validating its
+the guest) it is 11×. Numeric arithmetic in a loop (200 000 iterations of
+`s + i * 1.25`) is 10×: two host calls per iteration, each validating its
 operands with `numeric_recv` and converting the result with
 `numeric_send`, about 0.6 µs per operation against PL/pgSQL working on
 `Numeric` values directly. Exactness and the never-trust-the-guest rule
@@ -140,6 +149,73 @@ statement only adds compile time (task 8's SQL baseline: 1.6×).
 clients; at 8 clients the six physical cores (shared with the pgbench
 threads) are saturated. PL/Zig's relative position matches the
 single-session results.
+
+## How much the numbers vary
+
+The numbers above are one run of one build on one laptop. Three sources of
+variation were measured on this machine (`bench/variation.sh`, tasks 2 and 5;
+`perf stat`, user-space counters, backend pinned to one performance core
+unless stated). The short version: **measurement noise is small (≈1–3 %),
+which performance core the work lands on matters (≈6–13 % across the P-cores,
+more against an efficiency core), and rebuilding `plzig.so` from the same
+source moves the compute tasks by about ±10 % — up to ±20 % for the float
+loop — with no change to what the code does.** Read the compute and per-call
+ratios with roughly ±10 % tolerance; the direction of each result is stable,
+the exact multiplier to two significant figures is not.
+
+**Noise (same binary, same core).** 35 timed executions of each query over
+five rounds: interquartile range 1–3 % of the median; the cycle count per
+round varied by under 1 %. The ~10 % the owner saw between builds is well
+outside this.
+
+**Which core.** Pinned to one core, same binary: among the six performance
+cores the medians differ by 6–13 % (each reaches a different turbo
+frequency); an efficiency core runs the float loop ~40 % slower and mispredicts
+the interpreter's dispatch branch far more often, and the slow efficiency
+cluster (2.5 GHz) is ~50 % slower on the integer loop. The benchmark pins the
+container to the performance cores (`--cpus 0-11`) and now pins each timed
+backend to one of them (`--pin`), which removes the scheduler's core choice
+from the single-session runs; pgbench deliberately uses all of them.
+
+**Build to build (the ~10 %).** The dominant term. Four builds from the
+source the published numbers came from and from current master, all measured
+back to back on the same core, run the *same* guest bytecode and so retire the
+*same* number of host instructions (primes 1023 M, mandelbrot 383 M, fnv1a
+167 M to within 0.1 %), yet differ in cycles:
+
+| Build (interpreter loop offset) | primes Mcyc / IPC | mandelbrot Mcyc / IPC | fnv1a Mcyc / IPC |
+|---|---:|---:|---:|
+| `81cfb3f` (the published run's code), 0x2f0e0 | 237 / 4.31 | 102 / 3.75 | 33.9 / 4.91 |
+| `af1a8b4`, 0x32ca0 | 237 / 4.31 | 102 / 3.75 | 33.9 / 4.92 |
+| `1e697c6`, 0x331b0 | 268 / 3.81 | 120 / 3.19 | 37.4 / 4.46 |
+| current master, 0x37a00 | 261 / 3.93 | 125 / 3.06 | 39.2 / 4.25 |
+
+Same instructions, up to 22 % more cycles, IPC down from 3.75 to 3.06: this is
+microarchitectural, not extra work — the published build happened to land on a
+faster placement of the interpreter loop (`wasm_interp_call_func_bytecode`,
+the WAMR classic interpreter's computed-goto dispatch over the bytecode) than
+master does. The front-end counters confirm it is not an I-cache or decode
+problem (the uops come from the decoded-uop cache, legacy-decoder and resteer
+events are near zero); it is how the dispatch's instructions and indirect
+branch pack into the micro-op cache and the branch predictor at a given
+address.
+
+Moving nothing but the address proves it. Relinking master's `plzig.so` with
+0/16/32/48/64/96 bytes of never-executed code in front of all other code
+(identical objects, flags and `libiwasm.a`) shifts mandelbrot between 115 and
+125 Mcycles and fnv1a between 34.5 and 39.9 Mcycles — the whole build-to-build
+spread, from layout alone. Padding the *fast* `81cfb3f` build the same way
+makes it slower (mandelbrot 102 → 120 Mcycles), i.e. it loses its lucky
+placement. So the ~10 % is build-to-build code placement, not a regression
+from any source change, and not governor, thermal or background load (the
+counts above are from a pinned core with the counts stable across rounds).
+
+A cheap mitigation exists but is not applied (it is a product build-flag
+change; see *Recommendations*): compiling WAMR with
+`-falign-functions=64 -falign-labels=64` aligns every branch target, recovers
+the fast placement on master (mandelbrot 125 → 103 Mcycles) and makes the
+result insensitive to the padding above — at the cost of ~70 % more `.text`
+in the interpreter library. Proposed, not decided.
 
 ## Profiling and what was changed
 
@@ -196,8 +272,17 @@ the start of phase D:
 * **Skip the `ReleaseSafe` `0xAA` fill of guest allocations** (~8 ns per
   byte in the interpreter; would help tasks 3 and 4): harmless to the host,
   but a buggy function would then see leftovers of earlier calls instead of
-  `0xAA` in uninitialised memory.
-* These three are optional to-do items in PLAN.md §12 (9–11).
+  `0xAA` in uninitialised memory. (Closed as not possible in the SDK as
+  described; the fill was instead made cheap, PLAN.md Deviations 55.)
+* **Align the interpreter's branch targets** (`-falign-functions=64
+  -falign-labels=64` for the WAMR object). It removes the build-to-build
+  placement swing of *How much the numbers vary* (recovers the faster
+  layout on current master: mandelbrot 125 → 103 Mcycles, and makes the
+  result insensitive to where the loop lands) at the cost of about 70 % more
+  `.text` in `libiwasm.a`. It is a product build-flag change, so it is only
+  proposed here, not applied, and it would be judged against all the test
+  and packaging layers before any change.
+* The first three are optional to-do items in PLAN.md §12 (9–11).
 
 ## Compiled-in calls (`//#use`)
 
