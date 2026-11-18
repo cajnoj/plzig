@@ -2699,8 +2699,11 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       VM, `CREATE FUNCTION` and a call with the server in `postgresql_t`
       and as installed. Limits: without the seccomp filter (`off`, or `try`
       without kernel support) under such a policy the soft limits could be
-      raised by a compromised compiler (doc/security.md); other SELinux
-      policies and AppArmor profiles were not tested.
+      raised by a compromised compiler (doc/security.md).
+    * Also checked by hand: Debian 13.7 with AppArmor, PGDG PostgreSQL 18
+      (the server is not confined by any profile; a compilation and a call
+      worked, no AppArmor message). doc/packaging.md, *SELinux and
+      AppArmor*, has the table and what was not tested.
     * Seen on the same VM and left as it is: in `postgresql_t` each
       compilation writes denials to the audit log, for the refused change
       of the hard limits (`setrlimit`, from the child before it becomes the

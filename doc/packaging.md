@@ -366,16 +366,47 @@ distributions; not tested here, the containers ran on Linux 7.2):
 | Distribution | Stock kernel | `require` works? |
 |---|---|---|
 | EL 8 | 4.18 | no (no Landlock) |
-| EL 9 | 5.14 | no |
-| EL 10 | 6.12 | only if the kernel enables Landlock with ABI 6; check |
+| EL 9 | 5.14 | no on the original kernel; later minor releases may carry a Landlock backport (seen in the CentOS Stream 9 kernel tree, not tested on a system) |
+| EL 10 | 6.12 | yes: tested on AlmaLinux 10.2 (kernel 6.12.0-211, ABI 6), see the next section |
 | Fedora 45 | current mainline | yes |
 | Debian 12 | 6.1 | no (backports kernels ≥ 6.12: yes) |
-| Debian 13 | 6.12 | yes, if Landlock is enabled (Debian's default) |
+| Debian 13 | 6.12 | yes: tested on Debian 13.7 (kernel 6.12.107, ABI 6), see the next section |
 | Ubuntu 22.04 | 5.15 (HWE 6.8) | no |
 | Ubuntu 24.04 | 6.8 (HWE 6.11 no; HWE 6.14 and later yes) | GA kernel: no |
 | Ubuntu 26.04 | ≥ 6.12 | yes |
 
 The package descriptions say the same.
+
+## SELinux and AppArmor
+
+The package tests run in containers, where the host's security module does
+not confine the server the way it does on an installed system. Two virtual
+machines were therefore tested by hand (2026-11-18, x86_64, packages built
+from the tree, `plzig.compiler_sandbox = require`): a function was created
+(which runs the validator and the compiler in the sandbox) and called, and
+the audit or kernel log was read. This is one function on one system each,
+not the package test.
+
+| System | Server confined as | Result |
+|---|---|---|
+| AlmaLinux 10.2, SELinux enforcing, PGDG PostgreSQL 18 as installed | `unconfined_service_t` (PGDG's server binary is labelled `bin_t`) | works; status `enforced (landlock ABI 6, seccomp; ...)` |
+| the same, server binary relabelled `postgresql_exec_t` | `postgresql_t` | works since deviation 59 of PLAN.md; before it every compilation failed with "setrlimit failed" |
+| Debian 13.7, AppArmor enabled, PGDG PostgreSQL 18 | unconfined (the PostgreSQL packages ship no AppArmor profile) | works; no AppArmor message in the kernel log |
+
+* **SELinux, `postgresql_t`.** The policy does not let this domain change a
+  hard resource limit, so the compiler gets soft limits only, which the
+  seccomp filter keeps it from raising (doc/security.md). Each compilation
+  leaves denials in the audit log: `setrlimit` (the refused hard limits) and
+  `map` on files of the build and cache directories (the compiler falls
+  back to reading them). They are expected and need no policy change.
+* **AppArmor.** Nothing confines the server by default. A site that writes
+  its own profile for PostgreSQL has to allow it to execute
+  `/usr/libexec/plzig-zig-toolchain/<version>/zig` and
+  `plzig-validate` (in the server's library directory, under `plzig/`) and
+  to read the toolchain's `lib` directory; this was not tried.
+* **Not tested:** the distributions' own PostgreSQL packages, other
+  SELinux policies (MLS, a site's modules), Ubuntu, aarch64, and anything
+  but the default configuration of each system.
 
 ## Removal and the cache directory
 
