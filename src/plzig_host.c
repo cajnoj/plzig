@@ -1658,13 +1658,13 @@ plzig_host_free_plans(PlzigPlanTable *t)
 	t->nlive = 0;
 }
 
-static int64
+static uint64
 host_spi_prepare(wasm_exec_env_t env, uint32 sql_ptr, uint32 sql_len,
 				 uint32 kinds_ptr, uint32 nkinds)
 {
 	PlzigCallCtx *ctx = host_ctx(env);
 	MemoryContext oldcxt = CurrentMemoryContext;
-	int64		result = 0;
+	uint64		result = 0;
 
 	if (ctx == NULL)
 		return 0;
@@ -1751,7 +1751,7 @@ host_spi_prepare(wasm_exec_env_t env, uint32 sql_ptr, uint32 sql_len,
 		t->entries[idx].plan = plan;
 		t->entries[idx].serial = serial;
 		t->nlive++;
-		result = (int64) make_handle(serial, idx);
+		result = make_handle(serial, idx);
 		MemoryContextSwitchTo(oldcxt);
 		MemoryContextReset(ctx->scratch);
 	}
@@ -2005,13 +2005,13 @@ cursor_attach(PlzigCallCtx *ctx, PlzigCursor *c, int idx, Portal portal)
 	return make_handle(c->serial, idx);
 }
 
-static int64
+static uint64
 host_spi_cursor_open(wasm_exec_env_t env, uint32 sql_ptr, uint32 sql_len,
 					 uint32 params_ptr, uint32 nparams)
 {
 	PlzigCallCtx *ctx = host_ctx(env);
 	MemoryContext oldcxt = CurrentMemoryContext;
-	int64		result = 0;
+	uint64		result = 0;
 
 	if (ctx == NULL)
 		return 0;
@@ -2036,7 +2036,7 @@ host_spi_cursor_open(wasm_exec_env_t env, uint32 sql_ptr, uint32 sql_len,
 		/* forward-only; read-only unless the function is VOLATILE */
 		portal = SPI_cursor_open_with_args(NULL, sql, (int) nparams, types, values,
 										   nulls, ctx->read_only, CURSOR_OPT_NO_SCROLL);
-		result = (int64) cursor_attach(ctx, c, idx, portal);
+		result = cursor_attach(ctx, c, idx, portal);
 		MemoryContextSwitchTo(oldcxt);
 		MemoryContextReset(ctx->scratch);
 	}
@@ -2049,13 +2049,13 @@ host_spi_cursor_open(wasm_exec_env_t env, uint32 sql_ptr, uint32 sql_len,
 	return result;
 }
 
-static int64
+static uint64
 host_spi_cursor_open_plan(wasm_exec_env_t env, uint64 handle, uint32 params_ptr,
 						  uint32 nparams)
 {
 	PlzigCallCtx *ctx = host_ctx(env);
 	MemoryContext oldcxt = CurrentMemoryContext;
-	int64		result = 0;
+	uint64		result = 0;
 
 	if (ctx == NULL)
 		return 0;
@@ -2080,7 +2080,7 @@ host_spi_cursor_open_plan(wasm_exec_env_t env, uint64 handle, uint32 params_ptr,
 		 * prepared statement while the cursor is open is safe.
 		 */
 		portal = SPI_cursor_open(NULL, plan, values, nulls, ctx->read_only);
-		result = (int64) cursor_attach(ctx, c, idx, portal);
+		result = cursor_attach(ctx, c, idx, portal);
 		MemoryContextSwitchTo(oldcxt);
 		MemoryContextReset(ctx->scratch);
 	}
@@ -2485,33 +2485,29 @@ plzig_host_finish_call(PlzigCallCtx *ctx)
  * Registration
  * ---------------------------------------------------------------------
  */
-/* names must match plzig_known_imports in plzig_runtime.c */
+/*
+ * The registration table, from the import list of abi/plzig-abi.table
+ * (PLZIG_HOST_IMPORTS, src/plzig_abi.h): import <name> is host_<name>, with
+ * the table's signature string.  The compiler checks that every import has
+ * its host function and that the function has exactly the C type the table
+ * derives the signature string from (the static assertions below), so the
+ * string WAMR checks the module's imports against describes the function it
+ * calls.  plzig_runtime.c's import allowlist comes from the same list.
+ */
+#define PLZIG_NATIVE_SYMBOL(name, sig, ret, params) \
+	{#name, (void *) host_##name, sig, NULL},
 static NativeSymbol plzig_native_symbols[] = {
-	{"log", (void *) host_log, "(iii)", NULL},
-	{"raise", (void *) host_raise, "(ii)", NULL},
-	{"panic", (void *) host_panic, "(ii)", NULL},
-	{"raise_error", (void *) host_raise_error, "(iiiiiiii)", NULL},
-	{"spi_execute", (void *) host_spi_execute, "(iiii)I", NULL},
-	{"spi_ncols", (void *) host_spi_ncols, "()i", NULL},
-	{"spi_value_len", (void *) host_spi_value_len, "(ii)i", NULL},
-	{"spi_value_copy", (void *) host_spi_value_copy, "(iiii)i", NULL},
-	{"spi_colname_len", (void *) host_spi_colname_len, "(i)i", NULL},
-	{"spi_colname_copy", (void *) host_spi_colname_copy, "(iii)i", NULL},
-	{"spi_row_size", (void *) host_spi_row_size, "(i)I", NULL},
-	{"spi_row_read", (void *) host_spi_row_read, "(iii)i", NULL},
-	{"spi_prepare", (void *) host_spi_prepare, "(iiii)I", NULL},
-	{"spi_plan_free", (void *) host_spi_plan_free, "(I)", NULL},
-	{"spi_execute_plan", (void *) host_spi_execute_plan, "(Iii)I", NULL},
-	{"spi_cursor_open", (void *) host_spi_cursor_open, "(iiii)I", NULL},
-	{"spi_cursor_open_plan", (void *) host_spi_cursor_open_plan, "(Iii)I", NULL},
-	{"spi_cursor_fetch", (void *) host_spi_cursor_fetch, "(Iii)I", NULL},
-	{"spi_cursor_close", (void *) host_spi_cursor_close, "(I)", NULL},
-	{"numeric_op", (void *) host_numeric_op, "(iiiiiiii)i", NULL},
-	{"tz_convert", (void *) host_tz_convert, "(iIii)I", NULL},
-	{"srf_return_next", (void *) host_srf_return_next, "(ii)", NULL},
-	{"commit", (void *) host_commit, "()", NULL},
-	{"rollback", (void *) host_rollback, "()", NULL},
+	PLZIG_HOST_IMPORTS(PLZIG_NATIVE_SYMBOL)
 };
+
+#ifdef HAVE__BUILTIN_TYPES_COMPATIBLE_P
+#define PLZIG_NATIVE_TYPE_CHECK(name, sig, ret, params) \
+	StaticAssertDecl(__builtin_types_compatible_p(__typeof__(&host_##name), ret (*) params), \
+					 "host_" #name ": not the type of import " #name " in abi/plzig-abi.table");
+PLZIG_HOST_IMPORTS(PLZIG_NATIVE_TYPE_CHECK)
+#endif
+StaticAssertDecl(lengthof(plzig_native_symbols) == PLZIG_HOST_IMPORT_COUNT,
+				 "one native symbol per import");
 
 void *
 plzig_host_symbols(int *n)

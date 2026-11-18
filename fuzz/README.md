@@ -46,7 +46,7 @@ fuzz/validator/zig.dict       dictionary (builtins, keywords, punctuation)
 fuzz/validator/corpus/        seeds: every body of the regression suite + lexical corner cases
 fuzz/loader/harness.c         loader target and its structure-aware mutator
 fuzz/loader/pgshim.c, .h      the PostgreSQL services plzig_runtime.c uses, for a standalone process
-fuzz/loader/hoststubs.c       host-import stand-ins (names/signatures checked against src/plzig_host.c)
+fuzz/loader/hoststubs.c       host-import stand-ins (table and C types from abi/plzig-abi.table, checked at compile time)
 fuzz/loader/corpus/           seed modules, made by make-seeds.sh from seeds-src/
 fuzz/loader/findings/         reproducers of WAMR reports (doc/security.md §8)
 fuzz/loader/ubsan.supp        the known WAMR report the loader runs suppress, with reasons

@@ -2,8 +2,8 @@
 # Print the versions and pins of a PL/Zig source tree, one NAME=value per
 # line, for packaging scripts (doc/packaging.md "Versions").  Everything is
 # read from its single source: the Makefile (PLZIG_VERSION, ZIG_VERSION, the
-# checksums), src/plzig.h (the host/guest ABI version) and, in a tarball made
-# by `make dist`, .dist-version.
+# checksums), abi/plzig-abi.table (the host/guest ABI version) and, in a
+# tarball made by `make dist`, .dist-version.
 #
 #   packaging/versions.sh [source tree]       (default: this script's tree)
 #
@@ -24,7 +24,8 @@ plzig=$(get PLZIG_VERSION)
 zig=$(get ZIG_VERSION)
 core=${plzig%%-*}
 ext=$(printf '%s\n' "$core" | cut -d. -f1-2)
-abi=$(sed -n 's/^#define PLZIG_ABI_VERSION[[:space:]]*\([0-9][0-9]*\)$/\1/p' "$top/src/plzig.h")
+abi=$(sed -n 's/^version \([0-9][0-9]*\)$/\1/p' "$top/abi/plzig-abi.table")
+[ -n "$abi" ] || { echo "versions.sh: no 'version <n>' line in $top/abi/plzig-abi.table" >&2; exit 1; }
 dist=$plzig
 [ -f "$top/.dist-version" ] && dist=$(cat "$top/.dist-version")
 pkg=$(printf '%s\n' "$dist" | sed 's/-/~/')

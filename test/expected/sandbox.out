@@ -231,7 +231,7 @@ ERROR:  PL/Zig compilation failed
 DETAIL:  line 2, column 12: error: struct 'plzig.std' has no member named 'fs'
       _ = std.fs;
           ~~~^~~
-  sdk/plzig.zig:20:17: note: struct declared here
+  sdk/plzig.zig:22:17: note: struct declared here
   pub const std = struct {
                   ^~~~~~
   referenced by:

@@ -303,14 +303,15 @@ plzig_guest_ptr(void *module_inst, uint32 ptr, uint32 len)
  * Modules
  * ---------------------------------------------------------------------
  */
-/* must match plzig_native_symbols in plzig_host.c */
+/*
+ * The import allowlist: the names of abi/plzig-abi.table's import list
+ * (PLZIG_HOST_IMPORTS, src/plzig_abi.h), from which plzig_host.c also builds
+ * the registration table (plzig_native_symbols).
+ */
+#define PLZIG_IMPORT_NAME(name, sig, ret, params) #name,
 static const char *const plzig_known_imports[] = {
-	"log", "raise", "raise_error", "panic", "spi_execute", "spi_ncols", "spi_value_len",
-	"spi_value_copy", "spi_colname_len", "spi_colname_copy",
-	"spi_row_size", "spi_row_read", "spi_prepare", "spi_plan_free",
-	"spi_execute_plan", "spi_cursor_open", "spi_cursor_open_plan",
-	"spi_cursor_fetch", "spi_cursor_close", "numeric_op", "tz_convert",
-	"srf_return_next", "commit", "rollback", NULL
+	PLZIG_HOST_IMPORTS(PLZIG_IMPORT_NAME)
+	NULL
 };
 
 static bool

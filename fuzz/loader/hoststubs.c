@@ -2,9 +2,10 @@
  *
  * hoststubs.c
  *	  Stand-ins for the host imports of src/plzig_host.c, for the loader fuzz
- *	  target.  Same names and WAMR signature strings as the production table
- *	  (fuzz/build.sh compares them and refuses to build on any difference),
- *	  so the loader's import allowlist and signature check see exactly what
+ *	  target.  The table is built from the same import list as the
+ *	  production one (PLZIG_HOST_IMPORTS, generated from
+ *	  abi/plzig-abi.table), with a compile-time check of every stand-in's C
+ *	  type, so the loader's import allowlist and signature check see what
  *	  they see in the server.  The SPI imports need a server; here every
  *	  import checks its pointer arguments with the production range check
  *	  (plzig_guest_range, which never throws) and then either returns or
@@ -73,6 +74,13 @@ h_iiii_I(wasm_exec_env_t env, uint32 a, uint32 b, uint32 c, uint32 d)
 	return 0;
 }
 
+/* the same for the imports that return a handle (u64) */
+static uint64
+h_iiii_U(wasm_exec_env_t env, uint32 a, uint32 b, uint32 c, uint32 d)
+{
+	return (uint64) h_iiii_I(env, a, b, c, d);
+}
+
 static uint32
 h_v_i(wasm_exec_env_t env)
 {
@@ -130,6 +138,12 @@ h_Iii_I(wasm_exec_env_t env, uint64 a, uint32 b, uint32 c)
 	return 0;
 }
 
+static uint64
+h_Iii_U(wasm_exec_env_t env, uint64 a, uint32 b, uint32 c)
+{
+	return (uint64) h_Iii_I(env, a, b, c);
+}
+
 /* spi_cursor_fetch: never a row here (no cursor can be opened), so -1 */
 static int64
 h_Iii_I_fetch(wasm_exec_env_t env, uint64 a, uint32 b, uint32 c)
@@ -174,40 +188,54 @@ h_end_xact(wasm_exec_env_t env)
 
 /* tz_convert: zone range checked, then the trap a failing import causes */
 static int64
-h_tz_convert(wasm_exec_env_t env, uint32 op, uint64 value, uint32 zone, uint32 zone_len)
+h_tz_convert(wasm_exec_env_t env, uint32 op, int64 value, uint32 zone, uint32 zone_len)
 {
 	(void) stub_range(env, zone, zone_len > 1024 ? 1024 : zone_len);
 	stub_trap(env, "plzig: host error");
 	return 0;
 }
 
-/* keep in sync with plzig_native_symbols in src/plzig_host.c (checked by fuzz/build.sh) */
+/*
+ * The stand-in of each import (several share one); the table below takes
+ * every import of PLZIG_HOST_IMPORTS, so an import without a stand-in here
+ * does not compile, and a stand-in whose C type is not the import's fails
+ * the static assertion.
+ */
+#define stub_log				h_log
+#define stub_raise				h_raise
+#define stub_panic				h_panic
+#define stub_raise_error		h_raise_error
+#define stub_spi_execute		h_iiii_I
+#define stub_spi_ncols			h_v_i
+#define stub_spi_value_len		h_ii_i
+#define stub_spi_value_copy		h_iiii_i
+#define stub_spi_colname_len	h_i_i
+#define stub_spi_colname_copy	h_iii_i
+#define stub_spi_row_size		h_i_I
+#define stub_spi_row_read		h_iii_i
+#define stub_spi_prepare		h_iiii_U
+#define stub_spi_plan_free		h_I
+#define stub_spi_execute_plan	h_Iii_I
+#define stub_spi_cursor_open	h_iiii_U
+#define stub_spi_cursor_open_plan	h_Iii_U
+#define stub_spi_cursor_fetch	h_Iii_I_fetch
+#define stub_spi_cursor_close	h_I
+#define stub_numeric_op			h_numeric_op
+#define stub_tz_convert			h_tz_convert
+#define stub_srf_return_next	h_srf_return_next
+#define stub_commit				h_end_xact
+#define stub_rollback			h_end_xact
+
+#define STUB_SYMBOL(name, sig, ret, params) \
+	{#name, (void *) stub_##name, sig, NULL},
 static NativeSymbol stub_symbols[] = {
-	{"log", (void *) h_log, "(iii)", NULL},
-	{"raise", (void *) h_raise, "(ii)", NULL},
-	{"panic", (void *) h_panic, "(ii)", NULL},
-	{"raise_error", (void *) h_raise_error, "(iiiiiiii)", NULL},
-	{"spi_execute", (void *) h_iiii_I, "(iiii)I", NULL},
-	{"spi_ncols", (void *) h_v_i, "()i", NULL},
-	{"spi_value_len", (void *) h_ii_i, "(ii)i", NULL},
-	{"spi_value_copy", (void *) h_iiii_i, "(iiii)i", NULL},
-	{"spi_colname_len", (void *) h_i_i, "(i)i", NULL},
-	{"spi_colname_copy", (void *) h_iii_i, "(iii)i", NULL},
-	{"spi_row_size", (void *) h_i_I, "(i)I", NULL},
-	{"spi_row_read", (void *) h_iii_i, "(iii)i", NULL},
-	{"spi_prepare", (void *) h_iiii_I, "(iiii)I", NULL},
-	{"spi_plan_free", (void *) h_I, "(I)", NULL},
-	{"spi_execute_plan", (void *) h_Iii_I, "(Iii)I", NULL},
-	{"spi_cursor_open", (void *) h_iiii_I, "(iiii)I", NULL},
-	{"spi_cursor_open_plan", (void *) h_Iii_I, "(Iii)I", NULL},
-	{"spi_cursor_fetch", (void *) h_Iii_I_fetch, "(Iii)I", NULL},
-	{"spi_cursor_close", (void *) h_I, "(I)", NULL},
-	{"numeric_op", (void *) h_numeric_op, "(iiiiiiii)i", NULL},
-	{"tz_convert", (void *) h_tz_convert, "(iIii)I", NULL},
-	{"srf_return_next", (void *) h_srf_return_next, "(ii)", NULL},
-	{"commit", (void *) h_end_xact, "()", NULL},
-	{"rollback", (void *) h_end_xact, "()", NULL},
+	PLZIG_HOST_IMPORTS(STUB_SYMBOL)
 };
+
+#define STUB_TYPE_CHECK(name, sig, ret, params) \
+	StaticAssertDecl(__builtin_types_compatible_p(__typeof__(&stub_##name), ret (*) params), \
+					 "stand-in of " #name ": not the type of the import in abi/plzig-abi.table");
+PLZIG_HOST_IMPORTS(STUB_TYPE_CHECK)
 
 void *
 plzig_host_symbols(int *n)

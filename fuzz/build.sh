@@ -90,11 +90,12 @@ build_wamr "$work/wamr-asan" "$san -fsanitize-recover=pointer-overflow -fno-sani
 build_wamr "$work/wamr-cov" "-fprofile-instr-generate -fcoverage-mapping -fsanitize=fuzzer-no-link -g"
 
 echo "--- fuzz_loader"
-# the stand-in host table must match the production one exactly
-extract() { grep -oE '\{"[a-z_]+", \(void \*\) [a-z_A-Z]+, "[^"]*"' "$1" | sed -E 's/\(void \*\) [a-z_A-Z]+, //'; }
-if ! diff <(extract "$src/src/plzig_host.c") <(extract "$here/loader/hoststubs.c") >"$work/table.diff"; then
-    cat "$work/table.diff"; echo "fuzz/loader/hoststubs.c does not match plzig_native_symbols in src/plzig_host.c"; exit 1
-fi
+# The stand-in host table (fuzz/loader/hoststubs.c) is built from the same
+# import list as the production one (PLZIG_HOST_IMPORTS in src/plzig_abi.h),
+# and the compiler checks every stand-in's type against it; the list must be
+# what abi/plzig-abi.table generates.
+sh "$src/abi/gen-abi.sh" check "$src" ||
+    { echo "fuzz_loader: the generated ABI files are stale"; exit 1; }
 inc="-I$(pg_config --includedir-server) -I$wamr_src/core/iwasm/include -I$src/src -I$here/loader"
 defs="-DPLZIG_ZIG_VERSION=\"$zig_version\" -Wno-ignored-attributes -Wno-unused-command-line-argument"
 build_loader() {   # build_loader <name> <wamr dir> <cflags>

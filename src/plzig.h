@@ -26,8 +26,13 @@
 #ifndef PLZIG_VERSION_STR
 #define PLZIG_VERSION_STR		"unknown"
 #endif
-/* host/guest ABI version (doc/abi.md), independent of the release version */
-#define PLZIG_ABI_VERSION		5
+/*
+ * The host/guest ABI (doc/abi.md): PLZIG_ABI_VERSION, PlzigSlot, PlzigValue,
+ * the value kinds, the operation codes of numeric_op and tz_convert and the
+ * list of host imports, generated from abi/plzig-abi.table.
+ */
+#include "plzig_abi.h"
+
 /*
  * The Zig version the source validator was built with, from the Makefile
  * (ZIG_VERSION).  The backend runs only a compiler reporting exactly this.
@@ -119,42 +124,6 @@ typedef struct PlzigTypeInfo
 	PlzigRowDesc *row;			/* PLZIG_T_ROW: the composite type's fields */
 } PlzigTypeInfo;
 
-/* Guest argument/result slot, 16 bytes, little endian (doc/abi.md) */
-typedef struct PlzigSlot
-{
-	uint64		val;
-	uint32		len;
-	uint32		is_null;
-} PlzigSlot;
-
-/*
- * Value kinds of the typed SPI interface (doc/abi.md, "Value"): the kind of
- * a result column is derived by the host from the tuple descriptor; the kind
- * of a prepared-statement parameter is one of KIND_BOOL..KIND_BYTEA, chosen
- * by the guest at prepare time and mapped to a fixed type OID by the host.
- */
-#define PLZIG_KIND_NULL		0		/* parameter only: NULL of any type */
-#define PLZIG_KIND_BOOL		1
-#define PLZIG_KIND_INT2		2
-#define PLZIG_KIND_INT4		3
-#define PLZIG_KIND_INT8		4
-#define PLZIG_KIND_FLOAT4	5
-#define PLZIG_KIND_FLOAT8	6
-#define PLZIG_KIND_TEXT		7		/* text, varchar, bpchar: the value's bytes */
-#define PLZIG_KIND_BYTEA	8
-#define PLZIG_KIND_OTHER	9		/* result only: text representation */
-#define PLZIG_KIND_DATE		10
-#define PLZIG_KIND_TIME		11
-#define PLZIG_KIND_TIMETZ	12		/* time in val, zone in len */
-#define PLZIG_KIND_TIMESTAMP	13
-#define PLZIG_KIND_TIMESTAMPTZ	14
-#define PLZIG_KIND_INTERVAL	15		/* 16 bytes, out of line */
-#define PLZIG_KIND_UUID		16		/* 16 bytes, out of line */
-#define PLZIG_KIND_OID		17
-#define PLZIG_KIND_NUMERIC	18		/* wire format (numeric_send), out of line */
-#define PLZIG_KIND_JSONB	19		/* column: on-disk layout; parameter: JSON text */
-#define PLZIG_KIND_MAX		19
-
 /* size of the out-of-line fixed-width values (interval, uuid) */
 #define PLZIG_FIXED16		16
 /*
@@ -163,32 +132,8 @@ typedef struct PlzigSlot
  */
 #define PLZIG_MAX_NUMERIC_WIRE	(8 + 2 * 65535)
 
-/* operations of the numeric_op import (doc/abi.md) */
-#define PLZIG_NUMERIC_ADD		1
-#define PLZIG_NUMERIC_SUB		2
-#define PLZIG_NUMERIC_MUL		3
-#define PLZIG_NUMERIC_DIV		4
-#define PLZIG_NUMERIC_DIV_TRUNC	5
-#define PLZIG_NUMERIC_MOD		6
-#define PLZIG_NUMERIC_ROUND		7
-#define PLZIG_NUMERIC_TRUNC		8
-#define PLZIG_NUMERIC_ABS		9
-#define PLZIG_NUMERIC_NEG		10
-#define PLZIG_NUMERIC_OP_MAX	10
-
-/* operations of the tz_convert import (doc/abi.md) */
-#define PLZIG_TZ_TO_LOCAL		1	/* timestamptz -> local timestamp */
-#define PLZIG_TZ_FROM_LOCAL		2	/* local timestamp -> timestamptz */
-#define PLZIG_MAX_TZ_NAME		1024	/* longest zone name copied */
-
-/* Typed value (params of prepared statements, result rows), 16 bytes */
-typedef struct PlzigValue
-{
-	uint64		val;
-	uint32		len;
-	uint16		kind;
-	uint16		is_null;
-} PlzigValue;
+/* tz_convert: the longest zone name copied (doc/abi.md) */
+#define PLZIG_MAX_TZ_NAME		1024
 
 /*
  * Rows (doc/abi.md, "Rows from the guest"): the fields of a composite

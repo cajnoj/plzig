@@ -8,8 +8,10 @@
 
 const s = @import("std");
 
+// @plzig-abi begin version -- generated from abi/plzig-abi.table (make abi), do not edit
 /// ABI version implemented by this SDK. Checked by the host at load time.
 pub const abi_version: u32 = 5;
+// @plzig-abi end
 
 /// Size of the argument buffer (root.zig, plzig_init): argument blocks up to
 /// this size need no allocation and no extra guest entry.
@@ -46,8 +48,8 @@ pub const std = struct {
 };
 
 /// Host imports and linear memory.  In the wasm module these are the real
-/// imports (module "plzig"; keep in sync with src/plzig_host.c and
-/// doc/abi.md) and the wasm memory builtins.  Only the native unit tests
+/// imports (module "plzig", generated from abi/plzig-abi.table; doc/abi.md)
+/// and the wasm memory builtins.  Only the native unit tests
 /// (zig/sdk/test.zig, `zig test` sets builtin.is_test) supply a stand-in
 /// module "plzig_test_env" instead; it is never part of a function build.
 const env = if (@import("builtin").is_test) @import("plzig_test_env") else wasm_env;
@@ -65,6 +67,7 @@ const wasm_env = struct {
         return @wasmMemoryGrow(0, pages);
     }
 
+    // @plzig-abi begin imports -- generated from abi/plzig-abi.table (make abi), do not edit
     const host = struct {
         extern "plzig" fn log(level: u32, ptr: [*]const u8, len: u32) void;
         extern "plzig" fn raise(ptr: [*]const u8, len: u32) void;
@@ -85,29 +88,82 @@ const wasm_env = struct {
         extern "plzig" fn spi_cursor_open_plan(handle: u64, params_ptr: [*]const Value, nparams: u32) u64;
         extern "plzig" fn spi_cursor_fetch(cursor: u64, buf: [*]u8, buf_len: u32) i64;
         extern "plzig" fn spi_cursor_close(cursor: u64) void;
-        extern "plzig" fn tz_convert(op: u32, value: i64, zone_ptr: [*]const u8, zone_len: u32) i64;
         extern "plzig" fn numeric_op(op: u32, a_ptr: [*]const u8, a_len: u32, b_ptr: [*]const u8, b_len: u32, arg: i32, out_ptr: [*]u8, out_cap: u32) i32;
+        extern "plzig" fn tz_convert(op: u32, value: i64, zone_ptr: [*]const u8, zone_len: u32) i64;
         extern "plzig" fn srf_return_next(values_ptr: [*]const Value, n: u32) void;
         extern "plzig" fn commit() void;
         extern "plzig" fn rollback() void;
     };
+    // @plzig-abi end
 };
 
+// @plzig-abi begin import-types -- generated from abi/plzig-abi.table (make abi), do not edit
+/// The host imports' function types. The native unit tests' stand-in host
+/// (zig/sdk/test_env.zig) must declare every import with exactly this type:
+/// checked when the SDK is compiled by `zig test`.
+const host_import_types = .{
+    .{ "log", fn (u32, [*]const u8, u32) void },
+    .{ "raise", fn ([*]const u8, u32) void },
+    .{ "panic", fn ([*]const u8, u32) void },
+    .{ "raise_error", fn ([*]const u8, u32, [*]const u8, u32, [*]const u8, u32, [*]const u8, u32) void },
+    .{ "spi_execute", fn ([*]const u8, u32, [*]const Slot, u32) i64 },
+    .{ "spi_ncols", fn () u32 },
+    .{ "spi_value_len", fn (u32, u32) i32 },
+    .{ "spi_value_copy", fn (u32, u32, [*]u8, u32) i32 },
+    .{ "spi_colname_len", fn (u32) i32 },
+    .{ "spi_colname_copy", fn (u32, [*]u8, u32) i32 },
+    .{ "spi_row_size", fn (u32) i64 },
+    .{ "spi_row_read", fn (u32, [*]u8, u32) i32 },
+    .{ "spi_prepare", fn ([*]const u8, u32, [*]const u32, u32) u64 },
+    .{ "spi_plan_free", fn (u64) void },
+    .{ "spi_execute_plan", fn (u64, [*]const Value, u32) i64 },
+    .{ "spi_cursor_open", fn ([*]const u8, u32, [*]const Slot, u32) u64 },
+    .{ "spi_cursor_open_plan", fn (u64, [*]const Value, u32) u64 },
+    .{ "spi_cursor_fetch", fn (u64, [*]u8, u32) i64 },
+    .{ "spi_cursor_close", fn (u64) void },
+    .{ "numeric_op", fn (u32, [*]const u8, u32, [*]const u8, u32, i32, [*]u8, u32) i32 },
+    .{ "tz_convert", fn (u32, i64, [*]const u8, u32) i64 },
+    .{ "srf_return_next", fn ([*]const Value, u32) void },
+    .{ "commit", fn () void },
+    .{ "rollback", fn () void },
+};
+comptime {
+    if (@import("builtin").is_test) {
+        for (host_import_types) |t| {
+            if (@TypeOf(@field(host, t[0])) != t[1])
+                @compileError("host import " ++ t[0] ++ ": the stand-in's type is not the one of abi/plzig-abi.table");
+        }
+    }
+}
+// @plzig-abi end
+
+// @plzig-abi begin structs -- generated from abi/plzig-abi.table (make abi), do not edit
 /// 16-byte argument/result slot shared with the host (see doc/abi.md).
 pub const Slot = extern struct {
     val: u64,
     len: u32,
     is_null: u32,
+
+    comptime {
+        if (@sizeOf(Slot) != 16 or @offsetOf(Slot, "val") != 0 or @offsetOf(Slot, "len") != 8 or @offsetOf(Slot, "is_null") != 12)
+            @compileError("Slot: layout differs from abi/plzig-abi.table");
+    }
 };
 
-/// 16-byte typed value shared with the host: parameters of prepared
-/// statements and columns of result rows (see doc/abi.md, "Value").
+/// 16-byte typed value shared with the host: parameters of prepared statements
+/// and columns of result rows (see doc/abi.md, "Value").
 pub const Value = extern struct {
     val: u64,
     len: u32,
     kind: u16,
     is_null: u16,
+
+    comptime {
+        if (@sizeOf(Value) != 16 or @offsetOf(Value, "val") != 0 or @offsetOf(Value, "len") != 8 or @offsetOf(Value, "kind") != 12 or @offsetOf(Value, "is_null") != 14)
+            @compileError("Value: layout differs from abi/plzig-abi.table");
+    }
 };
+// @plzig-abi end
 
 // ---------------------------------------------------------------------------
 // Natively mapped fixed-width SQL types (doc/abi.md, "Kinds").
@@ -405,7 +461,15 @@ pub const TimestampTz = extern struct {
     }
 };
 
-const TzOp = enum(u32) { to_local = 1, from_local = 2 };
+// @plzig-abi begin enum tz_op -- generated from abi/plzig-abi.table (make abi), do not edit
+/// operations of the tz_convert import (doc/abi.md)
+const TzOp = enum(u32) {
+    /// timestamptz -> local timestamp
+    to_local = 1,
+    /// local timestamp -> timestamptz
+    from_local = 2,
+};
+// @plzig-abi end
 
 fn tzConvert(op: TzOp, usecs: i64, zone: ?[]const u8) i64 {
     const z: []const u8 = zone orelse "";
@@ -1021,7 +1085,21 @@ pub const Numeric = struct {
 
     // -- arithmetic, by the host (PostgreSQL's numeric functions) ----------
 
-    const Op = enum(u32) { add = 1, sub = 2, mul = 3, div = 4, div_trunc = 5, mod = 6, round = 7, trunc = 8, abs = 9, neg = 10 };
+    // @plzig-abi begin enum numeric_op -- generated from abi/plzig-abi.table (make abi), do not edit
+    /// operations of the numeric_op import (doc/abi.md)
+    const Op = enum(u32) {
+        add = 1,
+        sub = 2,
+        mul = 3,
+        div = 4,
+        div_trunc = 5,
+        mod = 6,
+        round = 7,
+        trunc = 8,
+        abs = 9,
+        neg = 10,
+    };
+    // @plzig-abi end
 
     /// The host writes the result straight into arena memory taken without
     /// the 0xAA fill (64 bytes: up to 28 base-10000 digits), whose unused
@@ -2209,6 +2287,7 @@ pub fn panicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {
 //   * spi.open(sql, text_params) / plan.open(args) -> Cursor: rows fetched
 //     one at a time.
 
+// @plzig-abi begin kinds -- generated from abi/plzig-abi.table (make abi), do not edit
 /// Kind of a result column, derived by the host from the column's type.
 pub const Kind = enum(u16) {
     boolean = 1,
@@ -2217,21 +2296,25 @@ pub const Kind = enum(u16) {
     int8 = 4,
     float4 = 5,
     float8 = 6,
-    /// text, varchar, char(n): the value's bytes
+    /// text, varchar, bpchar (char(n)): the value's bytes
     text = 7,
     bytea = 8,
-    /// any other type: its text representation
+    /// result only: any other type, its text representation
     other = 9,
     date = 10,
     time = 11,
+    /// time in val, zone in len
     timetz = 12,
     timestamp = 13,
     timestamptz = 14,
+    /// 16 bytes, out of line
     interval = 15,
+    /// 16 bytes, out of line
     uuid = 16,
     oid = 17,
+    /// wire format (numeric_send), out of line
     numeric = 18,
-    /// the value's on-disk layout (plzig.Jsonb); as a parameter: JSON text
+    /// column: the value's on-disk layout (plzig.Jsonb); parameter: JSON text
     jsonb = 19,
     _,
 };
@@ -2260,6 +2343,7 @@ pub const Type = enum(u32) {
     /// other values are rejected by the host
     _,
 };
+// @plzig-abi end
 
 /// Marks a byte slice as a `bytea` parameter (plain slices are `text`).
 pub const Bytea = struct { bytes: []const u8 };

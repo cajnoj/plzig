@@ -25,6 +25,10 @@
 #   make dist                                 reproducible source tarball (build/dist/)
 #   make PLZIG_DEFAULT_ZIG_PATH=/abs/zig ...  compiled-in default of plzig.zig_path
 #   sh packaging/versions.sh                  the versions, for scripts
+#
+# Host/guest ABI (abi/plzig-abi.table, see below):
+#   make abi                                  regenerate src/plzig_abi.h and zig/sdk/plzig.zig's regions
+#   make check-abi                            fail if they are stale (also part of every build)
 
 EXTENSION = plzig
 MODULE_big = plzig
@@ -138,7 +142,7 @@ $(VALIDATOR): zig/validate/main.zig third_party/check-zig.sh
 	    --cache-dir $(BUILD_DIR)/zig-cache-local \
 	    zig/validate/main.zig --name plzig-validate -femit-bin=$@
 
-$(OBJS): $(WAMR_LIB) src/plzig.h
+$(OBJS): $(WAMR_LIB) src/plzig.h src/plzig_abi.h
 $(shlib): $(WAMR_LIB)
 
 # The control file, with the pinned Zig version in its comment (which becomes
@@ -149,7 +153,27 @@ plzig.control: plzig.control.in Makefile
 	sed -e 's/@ZIG_VERSION@/$(ZIG_VERSION)/g' -e 's/@EXT_VERSION@/$(EXT_VERSION)/g' plzig.control.in > $@.tmp
 	mv $@.tmp $@
 
-all: $(VALIDATOR) plzig.control
+all: $(VALIDATOR) plzig.control $(BUILD_DIR)/abi-check.stamp
+
+# ---- host/guest ABI: one table, generated C and Zig (doc/abi.md) ----------
+# abi/plzig-abi.table is the single source of the ABI definitions shared by
+# host and guest; src/plzig_abi.h and the marked regions of zig/sdk/plzig.zig
+# are generated from it and committed (so the build, `make dist`, the
+# packages and the fuzz build need no generator step).  `make abi`
+# regenerates them; `make check-abi` (and every build, through the stamp)
+# fails if they are not what the table generates, or if doc/abi.md lacks an
+# import.  POSIX sh and awk only.
+ABI_GEN := abi/plzig-abi.table abi/gen-abi.awk abi/gen-abi.sh
+abi:
+	sh abi/gen-abi.sh update .
+
+check-abi:
+	sh abi/gen-abi.sh check .
+
+$(BUILD_DIR)/abi-check.stamp: $(ABI_GEN) src/plzig_abi.h zig/sdk/plzig.zig doc/abi.md
+	sh abi/gen-abi.sh check .
+	@mkdir -p $(BUILD_DIR)
+	touch $@
 
 # ---- isolation tests (test/isolation) -------------------------------
 PLZIG_ISOLATION = concurrent_create replace_during_call cache_clear
@@ -238,4 +262,4 @@ clean-plzig:
 distclean-plzig: clean-plzig
 	rm -rf $(BUILD_DIR)
 
-.PHONY: install-plzig uninstall-plzig clean-plzig distclean-plzig fetch-zig install-zig check-zig installcheck-testing installcheck-isolation dist check-licenses installcheck-licenses
+.PHONY: install-plzig uninstall-plzig clean-plzig distclean-plzig fetch-zig install-zig check-zig abi check-abi installcheck-testing installcheck-isolation dist check-licenses installcheck-licenses

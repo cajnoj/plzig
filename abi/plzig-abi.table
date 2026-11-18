@@ -1,0 +1,115 @@
+# PL/Zig host/guest ABI: the single source of the definitions that the host
+# (C, src/) and the guest SDK (Zig, zig/sdk/) share.  doc/abi.md describes
+# what they mean.
+#
+# abi/gen-abi.sh generates from this file
+#   src/plzig_abi.h            the C header (entirely generated)
+#   zig/sdk/plzig.zig          the regions between "// @plzig-abi begin <what>"
+#                              and "// @plzig-abi end" (the rest is hand-written)
+# Both are committed.  After editing this file run `make abi`; every build
+# runs `make check-abi`, which fails if the generated text is not current.
+#
+# Format: one record per line, fields separated by blanks; "#" starts a
+# comment line; "-- text" at the end of a record is its description, which
+# becomes a comment in both languages.
+#
+#   version <n>
+#   struct <Zig name> <C name> -- text      a 16-byte extern struct ...
+#     field <name> <u16|u32|u64>            ... its fields in order ...
+#   end                                     (offsets: natural alignment)
+#   kind <code> <C suffix> <Zig name> <set> -- text
+#       a value kind: C PLZIG_KIND_<suffix>; <set> "-" (C only), "K" (also in
+#       plzig.Kind, a column's kind) or "KT" (also in plzig.Type, a
+#       prepared-statement parameter type)
+#   typedoc <code> -- text
+#       the description of a kind as a member of plzig.Type (default: none)
+#   enum <key> <pub|priv> <Zig name> <u32> <C prefix> <C max name|-> -- text
+#     value <code> <C suffix> <Zig name> -- text
+#   end
+#   import <name> <return> <param>:<type>... -- text
+#       a host import (module "plzig"); <return> void, u32, i32, u64 or
+#       i64; parameter types u32, i32, u64, i64, or a guest pointer:
+#       in(T) (Zig [*]const T: read by the host), out(T) (Zig [*]T: written
+#       by the host).  In C every guest pointer is a uint32, and the WAMR
+#       signature string is derived (32-bit "i", 64-bit "I").  The order is
+#       the order of the registration table.
+
+version 5
+
+struct Slot PlzigSlot -- 16-byte argument/result slot shared with the host (see doc/abi.md).
+field val u64
+field len u32
+field is_null u32
+end
+
+struct Value PlzigValue -- 16-byte typed value shared with the host: parameters of prepared statements and columns of result rows (see doc/abi.md, "Value").
+field val u64
+field len u32
+field kind u16
+field is_null u16
+end
+
+kind 0 NULL null - -- parameter only: NULL of any type
+kind 1 BOOL boolean KT
+kind 2 INT2 int2 KT
+kind 3 INT4 int4 KT
+kind 4 INT8 int8 KT
+kind 5 FLOAT4 float4 KT
+kind 6 FLOAT8 float8 KT
+kind 7 TEXT text KT -- text, varchar, bpchar (char(n)): the value's bytes
+kind 8 BYTEA bytea KT
+kind 9 OTHER other K -- result only: any other type, its text representation
+kind 10 DATE date KT
+kind 11 TIME time KT
+kind 12 TIMETZ timetz KT -- time in val, zone in len
+kind 13 TIMESTAMP timestamp KT
+kind 14 TIMESTAMPTZ timestamptz KT
+kind 15 INTERVAL interval KT -- 16 bytes, out of line
+kind 16 UUID uuid KT -- 16 bytes, out of line
+kind 17 OID oid KT
+kind 18 NUMERIC numeric KT -- wire format (numeric_send), out of line
+kind 19 JSONB jsonb KT -- column: the value's on-disk layout (plzig.Jsonb); parameter: JSON text
+typedoc 19 -- the value is JSON text (plzig.JsonText), parsed by jsonb_in
+
+enum numeric_op priv Op u32 PLZIG_NUMERIC_ PLZIG_NUMERIC_OP_MAX -- operations of the numeric_op import (doc/abi.md)
+value 1 ADD add
+value 2 SUB sub
+value 3 MUL mul
+value 4 DIV div
+value 5 DIV_TRUNC div_trunc
+value 6 MOD mod
+value 7 ROUND round
+value 8 TRUNC trunc
+value 9 ABS abs
+value 10 NEG neg
+end
+
+enum tz_op priv TzOp u32 PLZIG_TZ_ - -- operations of the tz_convert import (doc/abi.md)
+value 1 TO_LOCAL to_local -- timestamptz -> local timestamp
+value 2 FROM_LOCAL from_local -- local timestamp -> timestamptz
+end
+
+import log void level:u32 ptr:in(u8) len:u32
+import raise void ptr:in(u8) len:u32
+import panic void ptr:in(u8) len:u32
+import raise_error void code_ptr:in(u8) code_len:u32 msg_ptr:in(u8) msg_len:u32 detail_ptr:in(u8) detail_len:u32 hint_ptr:in(u8) hint_len:u32
+import spi_execute i64 sql_ptr:in(u8) sql_len:u32 params_ptr:in(Slot) nparams:u32
+import spi_ncols u32
+import spi_value_len i32 row:u32 col:u32
+import spi_value_copy i32 row:u32 col:u32 buf:out(u8) buf_len:u32
+import spi_colname_len i32 col:u32
+import spi_colname_copy i32 col:u32 buf:out(u8) buf_len:u32
+import spi_row_size i64 row:u32
+import spi_row_read i32 row:u32 buf:out(u8) buf_len:u32
+import spi_prepare u64 sql_ptr:in(u8) sql_len:u32 kinds_ptr:in(u32) nkinds:u32
+import spi_plan_free void handle:u64
+import spi_execute_plan i64 handle:u64 params_ptr:in(Value) nparams:u32
+import spi_cursor_open u64 sql_ptr:in(u8) sql_len:u32 params_ptr:in(Slot) nparams:u32
+import spi_cursor_open_plan u64 handle:u64 params_ptr:in(Value) nparams:u32
+import spi_cursor_fetch i64 cursor:u64 buf:out(u8) buf_len:u32
+import spi_cursor_close void cursor:u64
+import numeric_op i32 op:u32 a_ptr:in(u8) a_len:u32 b_ptr:in(u8) b_len:u32 arg:i32 out_ptr:out(u8) out_cap:u32
+import tz_convert i64 op:u32 value:i64 zone_ptr:in(u8) zone_len:u32
+import srf_return_next void values_ptr:in(Value) n:u32
+import commit void
+import rollback void

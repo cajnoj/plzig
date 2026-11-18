@@ -5,7 +5,8 @@
 # layers, print one line per layer and a result line.
 #
 # PLZIG_LAYERS (space separated; default "unit regress security leaks"):
-#   unit       Zig unit tests of the validator and the SDK (make check-zig)
+#   unit       the generated ABI files are current (make check-abi), and the
+#              Zig unit tests of the validator and the SDK (make check-zig)
 #   licenses   license files of the source and of `make install`, and the
 #              attribution list against the files WAMR's build read
 #              (make check-licenses installcheck-licenses, and the self-test)
@@ -55,8 +56,8 @@ layer() {   # layer <name> <PASS|FAIL> <detail>
 
 # the Zig unit tests need no server
 if has unit; then
-    echo "--- Zig unit tests"
-    if make -s -C /src check-zig ZIG="$PLZIG_TEST_ZIG" >/tmp/check-zig.log 2>&1; then
+    echo "--- ABI table (make check-abi), Zig unit tests"
+    if make -s -C /src check-abi check-zig ZIG="$PLZIG_TEST_ZIG" >/tmp/check-zig.log 2>&1; then
         layer unit PASS "$(grep -aE '^All [0-9]+ tests passed' /tmp/check-zig.log | awk '{ s += $2 } END { print s " tests" }')"
     else
         tail -40 /tmp/check-zig.log

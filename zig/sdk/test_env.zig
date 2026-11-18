@@ -207,6 +207,8 @@ fn textOf(c: Col, out: []u8) ?[]const u8 {
     };
 }
 
+/// The host imports.  Each must have the type abi/plzig-abi.table gives it
+/// (a compile-time check in plzig.zig, region "import-types").
 pub const host = struct {
     pub fn log(level: u32, ptr: [*]const u8, len: u32) void {
         last_log_level = level;

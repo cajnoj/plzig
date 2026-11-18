@@ -295,7 +295,7 @@ selftest() {
     tmp=$(mktemp -d)
     # a correct copy first: the checks must pass on it
     mkdir -p "$tmp/pl/LICENSES" "$tmp/tc" "$tmp/t"
-    (cd "$tree" && tar -cf - LICENSE THIRD-PARTY-NOTICES LICENSES Makefile debian packaging third_party src/plzig.h $( [ -f .dist-version ] && echo .dist-version)) | tar -xf - -C "$tmp/t"
+    (cd "$tree" && tar -cf - LICENSE THIRD-PARTY-NOTICES LICENSES Makefile debian packaging third_party abi/plzig-abi.table $( [ -f .dist-version ] && echo .dist-version)) | tar -xf - -C "$tmp/t"
     cp "$tree/LICENSE" "$tree/THIRD-PARTY-NOTICES" "$tmp/pl/"
     cp "$tree"/LICENSES/* "$tmp/pl/LICENSES/"
     cp "$tree/packaging/zig-toolchain/NOTICE" "$tree"/packaging/zig-toolchain/licenses/* "$tmp/tc/"
