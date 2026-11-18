@@ -113,15 +113,35 @@ child_close_from(int lowfd)
 	}
 }
 
+/*
+ * Limit a resource for the compiler: hard and soft limit where the kernel
+ * lets this process lower its hard limit, else the soft limit alone.
+ *
+ * SELinux requires the "setrlimit" permission for any change of a hard
+ * limit, lowering included, and the policy of the postgresql_t domain does
+ * not grant it (setrlimit fails with EACCES).  A soft limit is enforced the
+ * same way; what differs is that the process may raise it again, up to the
+ * hard limit.  The seccomp filter refuses the compiler every change of a
+ * resource limit (plzig_sandbox.c), so with the filter installed
+ * (plzig.compiler_sandbox = require always; "try" where available) the soft
+ * limit stays; without the filter a compiler that misbehaves could raise it.
+ */
 static void
 child_setrlimit(int resource, uint64 value, int status_fd)
 {
 	struct rlimit rl;
 
-	if (value == 0)
-		return;
 	rl.rlim_cur = (rlim_t) value;
 	rl.rlim_max = (rlim_t) value;
+	if (setrlimit(resource, &rl) == 0)
+		return;
+	if (errno != EACCES && errno != EPERM)
+		child_fail(status_fd, "setrlimit failed");
+	if (getrlimit(resource, &rl) != 0)
+		child_fail(status_fd, "getrlimit failed");
+	if (rl.rlim_max != RLIM_INFINITY && rl.rlim_max < (rlim_t) value)
+		return;					/* already limited more tightly */
+	rl.rlim_cur = (rlim_t) value;
 	if (setrlimit(resource, &rl) != 0)
 		child_fail(status_fd, "setrlimit failed");
 }
@@ -131,7 +151,6 @@ child_main(const char *prog, char *const argv[], char *const envp[],
 		   const char *cwd, int stdin_fd, int out_fd, int status_fd,
 		   const PlzigSandbox *sb, pid_t parent)
 {
-	struct rlimit core = {0, 0};
 	struct sigaction sa;
 	sigset_t	all;
 	int			sig;
@@ -178,11 +197,13 @@ child_main(const char *prog, char *const argv[], char *const envp[],
 		child_fail(status_fd, "chdir failed");
 	umask(077);
 
-	if (setrlimit(RLIMIT_CORE, &core) != 0)
-		child_fail(status_fd, "setrlimit failed");
-	child_setrlimit(RLIMIT_CPU, sb->rlimit_cpu, status_fd);
-	child_setrlimit(RLIMIT_FSIZE, sb->rlimit_fsize, status_fd);
-	child_setrlimit(RLIMIT_AS, sb->rlimit_as, status_fd);
+	child_setrlimit(RLIMIT_CORE, 0, status_fd);
+	if (sb->rlimit_cpu != 0)
+		child_setrlimit(RLIMIT_CPU, sb->rlimit_cpu, status_fd);
+	if (sb->rlimit_fsize != 0)
+		child_setrlimit(RLIMIT_FSIZE, sb->rlimit_fsize, status_fd);
+	if (sb->rlimit_as != 0)
+		child_setrlimit(RLIMIT_AS, sb->rlimit_as, status_fd);
 
 #ifdef __linux__
 	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)

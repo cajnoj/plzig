@@ -2677,3 +2677,106 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       (`src/plzig_row.c` / `plzig.Trigger`), the `log` levels
       (`plzig.Level`), the `plzig_call` status codes (`root.zig`), the
       argument-buffer limits and the guest export list.
+59. **Resource limits of the compiler under SELinux (2026-11-18).** Found
+    while measuring for a possible native mode, reproduced on AlmaLinux
+    10.2 (SELinux enforcing): with the server in the `postgresql_t` domain
+    every compilation failed with "setrlimit failed". SELinux checks the
+    `setrlimit` permission whenever a hard limit changes, lowering
+    included, and the policy does not grant it to `postgresql_t`. The PGDG
+    server is not affected as installed (its binary is labelled `bin_t`
+    and the service runs as `unconfined_service_t`); a relabelled PGDG
+    server or a distribution's own PostgreSQL is. The container-based
+    package tests cannot see this (no SELinux domain there).
+    * Fix (`src/plzig_spawn.c`): when lowering the hard limit fails with
+      `EACCES`/`EPERM`, the soft limit alone is set. So that the compiler
+      cannot raise it again, the seccomp filter (`src/plzig_sandbox.c`) now
+      refuses `setrlimit`, and `prlimit64` with a new limit, in every case
+      (reading limits stays allowed). Zig's attempt to raise its
+      descriptor limit at start-up is refused; it continues with the
+      limit it has.
+    * Tested: `docker/security-checks.sh` has the compiler stand-in try to
+      set a limit ("set rlimit: Operation not permitted"); on the AlmaLinux
+      VM, `CREATE FUNCTION` and a call with the server in `postgresql_t`
+      and as installed. Limits: without the seccomp filter (`off`, or `try`
+      without kernel support) under such a policy the soft limits could be
+      raised by a compromised compiler (doc/security.md); other SELinux
+      policies and AppArmor profiles were not tested.
+    * Seen on the same VM and left as it is: in `postgresql_t` each
+      compilation writes denials to the audit log, for the refused change
+      of the hard limits (`setrlimit`, from the child before it becomes the
+      compiler) and for the compiler's attempts to map files in its build
+      and cache directories (`map` on `postgresql_db_t`). The compiler
+      falls back to reading the files and the compilation succeeds.
+60. **Decision record: Zig port of the host code, and a native execution
+    mode (owner's decisions, 2026-11-18).** Two studies were made and the
+    owner decided on their results. Neither project is being pursued now;
+    this entry records why and what would reopen each question.
+    * **Porting the C host code to Zig: not now.**
+      * Studied: a mixed build (C shim plus one Zig object in `plzig.so`)
+        was loaded and exercised on PostgreSQL 18.7 x86_64 only.
+        PostgreSQL reports errors with `longjmp`; Zig has no supported
+        `setjmp`, and `defer` blocks are skipped when a `longjmp` passes a
+        Zig frame (observed). Zig code that calls PostgreSQL would need a C
+        trampoline per guarded region. Translated PostgreSQL headers
+        (`zig translate-c` of Zig 0.17.1; `@cImport` no longer exists) did
+        not compile as generated on any of the six majors, and `ereport`,
+        `PG_TRY`, the module magic and, on 14 to 18, the varlena macros do
+        not translate.
+      * If a port is ever made, the owner's choices are: a *narrow* port
+        only (pure code that parses guest-controlled bytes and calls
+        nothing in PostgreSQL: the wasm precheck, range checks of guest
+        values, later row encoding); PostgreSQL-calling code, the WAMR
+        embedding and the spawn/sandbox code stay in C; no `sigsetjmp`
+        from Zig and no translated PostgreSQL headers; a Zig safety panic
+        in the backend is reported as `FATAL`; and before any real code
+        moves, a scaffold (one trivial Zig function in `plzig.so`) must
+        show no measurable slowdown and working packaging (debug packages,
+        license checks, aarch64).
+      * Why not now: the candidates are a few hundred lines that the loader
+        and host-ABI fuzz targets already exercise under ASan; a port puts
+        Zig compiler output and part of Zig's standard library into the
+        backend (a larger trusted base, of a pre-1.0 toolchain), makes
+        every Zig upgrade a change of backend code, and takes the ported
+        code out of the view of ASan, gcov, scan-build and cppcheck.
+      * Reopen if: fuzzing or review finds a memory-safety defect in the
+        candidate parsing code; or Zig reaches a stable release with a
+        supported way to interoperate with `setjmp`/`longjmp` callers.
+    * **An optional native execution mode next to WAMR: not now.**
+      * Studied: the function compiled to a static native image and run in
+        a confined worker process (no_new_privs, a seccomp allowlist,
+        Landlock without rules, rlimits), one worker per function per
+        backend, host calls proxied to the backend over pipes. A prototype
+        was measured on one laptop (PostgreSQL 18.7, x86_64, not server
+        hardware): a confined round trip from a backend took about 4.3 µs
+        with both processes on one CPU and about 8.5 µs unpinned, against
+        0.24–0.27 µs for a call in WAMR; `primes(100000)` took 3.7–4.1 ms
+        against 65–68 ms, a checksum of 1 MB 1.3 ms against 10 ms. Real
+        SPI through the proxy, error unwinding, many concurrent backends
+        and aarch64 performance were not measured. Estimated effort: 10 to
+        13 engineer-weeks, including a split of the host code into a
+        transport-neutral core.
+      * If it is ever built, the owner's choices are: a separate language
+        name (such as `plzig_native`), not TRUSTED at first, behind a
+        switch that can be set only in the configuration file and is off
+        by default; it requires seccomp filters and Landlock ABI 6 and
+        refuses to run without them (no `try` level); `LANGUAGE plzig`
+        stays on WAMR.
+      * Why not now: the gain is limited to compute-heavy functions with
+        few host calls, while trivial and SQL-heavy functions would become
+        slower by an order of magnitude; it adds a second isolation
+        boundary (kernel process isolation, the seccomp filter, a loader,
+        an RPC decoder) to build, fuzz and maintain while the ABI is still
+        changing.
+      * Reopen if: there is a concrete compute-heavy workload for which
+        the interpreter is too slow; or the in-process WAMR boundary gives
+        cause for concern, for example repeated memory-safety defects in
+        the WAMR loader or interpreter found by fuzzing or reported
+        upstream. In that case the out-of-process design is also a
+        security option, since a failure of the first boundary would then
+        leave the code outside the backend's address space. The earlier
+        decision against WAMR's AOT, JIT and fast interpreter inside the
+        backend is unchanged by this.
+    * Done as a result of the studies: the single-source ABI (deviation
+      58), which both projects would need and which is useful without
+      them; and the SELinux resource-limit fix (deviation 59), found
+      during the native-mode measurements.

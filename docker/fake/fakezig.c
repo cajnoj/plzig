@@ -123,6 +123,9 @@ report_state(const char *pgdata)
 			printf("rlimit %s: %llu/%llu\n", lims[i].name,
 				   (unsigned long long) rl.rlim_cur, (unsigned long long) rl.rlim_max);
 	}
+	/* changing a limit, even to its present value, is refused by the filter */
+	if (getrlimit(RLIMIT_AS, &rl) == 0)
+		printf("set rlimit: %s\n", setrlimit(RLIMIT_AS, &rl) == 0 ? "ALLOWED" : strerror(errno));
 	buf[0] = '\0';
 	for (i = 0; environ[i]; i++)
 	{

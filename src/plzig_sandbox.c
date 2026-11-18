@@ -354,6 +354,10 @@ static const int plzig_denied_syscalls[] = {
 #endif
 	__NR_init_module, __NR_finit_module, __NR_delete_module,
 	__NR_open_by_handle_at, __NR_personality,
+#ifdef __NR_setrlimit
+	/* resource limits stay as the child set them (see also prlimit64) */
+	__NR_setrlimit,
+#endif
 };
 
 /* allowed only when the first argument is the compiler's own pid/tgid */
@@ -365,6 +369,7 @@ static const int plzig_self_only_syscalls[] = {
 #define PLZIG_SC_MAX_INSNS 256
 #define PLZIG_SC_ARG_LO(i) \
 	((uint32) (offsetof(struct seccomp_data, args) + (i) * sizeof(uint64)))
+#define PLZIG_SC_ARG_HI(i)	(PLZIG_SC_ARG_LO(i) + (uint32) sizeof(uint32))	/* little-endian */
 #define PLZIG_SC_EPERM		(SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA))
 #define PLZIG_SC_ENOSYS		(SECCOMP_RET_ERRNO | (ENOSYS & SECCOMP_RET_DATA))
 
@@ -462,6 +467,18 @@ plzig_seccomp_apply_in_child(const PlzigSandbox *sb, char *errbuf, size_t errlen
 		EMIT_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
 		EMIT_STMT(BPF_RET | BPF_K, PLZIG_SC_EPERM);
 	}
+	/*
+	 * prlimit64: reading limits (new_limit == NULL) is fine, setting them is
+	 * not, for any process.  The limits set before execve are then final;
+	 * this matters where only soft limits could be set (plzig_spawn.c).
+	 */
+	EMIT_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_prlimit64, 0, 6);
+	EMIT_STMT(BPF_LD | BPF_W | BPF_ABS, PLZIG_SC_ARG_LO(2));
+	EMIT_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 0, 3);
+	EMIT_STMT(BPF_LD | BPF_W | BPF_ABS, PLZIG_SC_ARG_HI(2));
+	EMIT_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 0, 1);
+	EMIT_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+	EMIT_STMT(BPF_RET | BPF_K, PLZIG_SC_EPERM);
 	/* clone: threads and plain fork are fine, namespaces and CLONE_PARENT not */
 	EMIT_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clone, 0, 4);
 	EMIT_STMT(BPF_LD | BPF_W | BPF_ABS, PLZIG_SC_ARG_LO(0));

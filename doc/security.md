@@ -368,7 +368,16 @@ command line or in a path), and before `execve`:
   `LC_ALL=C`, `NO_COLOR=1`;
 * rlimits: `RLIMIT_CORE` 0, `RLIMIT_FSIZE` 256 MB, `RLIMIT_AS`
   `plzig.compile_memory_limit` (default 4 GB), `RLIMIT_CPU` a backstop
-  derived from the timeout and the CPU count;
+  derived from the timeout and the CPU count. Hard and soft limit are both
+  set where the kernel allows it. Under SELinux a process needs the
+  `setrlimit` permission to change a hard limit, even to lower it, and the
+  policy of the `postgresql_t` domain does not grant it; there only the
+  soft limits are set. A soft limit is enforced like a hard one, but the
+  process may raise it again up to the hard limit; the seccomp filter
+  (below) refuses the compiler every change of a resource limit, so with
+  the filter installed the soft limits stay. Without the filter
+  (`plzig.compiler_sandbox = off`, or `try` on a kernel without seccomp
+  filters) and under such a policy, a compromised compiler could raise them;
 * `PR_SET_NO_NEW_PRIVS`;
 * **Landlock** (rules by ABI version, all paths resolved by the backend):
   execute+read on the compiler binary and on `plzig-validate` (file rules,
@@ -385,7 +394,8 @@ command line or in a path), and before `execve`:
   mounts and namespaces, `unshare`/`setns`, `clone` with namespace flags or
   `CLONE_PARENT`, `clone3` (→ `ENOSYS`), `bpf`, `perf_event_open`,
   `io_uring_*`, `userfaultfd`, keyrings, `kexec_*`, module loading,
-  `open_by_handle_at`, `personality`, `fcntl(F_SETOWN/F_SETOWN_EX/F_SETSIG)`;
+  `open_by_handle_at`, `personality`, `fcntl(F_SETOWN/F_SETOWN_EX/F_SETSIG)`,
+  `setrlimit` and `prlimit64` with a new limit (reading limits is allowed);
   `kill`/`tkill`/`tgkill`/`rt_(tg)sigqueueinfo` only towards the child's
   own pid.
 

@@ -134,6 +134,7 @@ if [[ "$status" == "enforced (landlock ABI "*", seccomp"* ]]; then
                   "shmget: Operation not permitted" \
                   "setsid in child: Operation not permitted" \
                   "setpgid in child: Operation not permitted" \
+                  "set rlimit: Operation not permitted" \
                   "signal self: ALLOWED"; do
         if grep -qF "$needle" <<<"$out"; then pass "sandbox: $needle"; else fail "sandbox: $needle"; fi
     done
