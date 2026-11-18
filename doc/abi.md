@@ -6,6 +6,31 @@ from `zig/sdk/root.zig` + `zig/sdk/plzig.zig` + the generated `user.zig`).
 It is what the code implements, not a wish list. All integers are little
 endian; guest pointers are 32-bit offsets into the guest's linear memory.
 
+**Single source.** The definitions both sides share — the ABI version, the
+*Slot* and *Value* layouts, the value kinds (*Kinds*), the operation codes
+of `numeric_op` and `tz_convert`, and the host imports with their parameter
+and result types — are written once, in `abi/plzig-abi.table`.
+`abi/gen-abi.sh` (POSIX sh and awk) generates from it `src/plzig_abi.h`
+(C: constants, structs, and the import list `PLZIG_HOST_IMPORTS` from which
+the host's registration table and the loader's import allowlist are built)
+and the marked regions of `zig/sdk/plzig.zig` (the `extern` declarations,
+`Slot`, `Value`, `Kind`, `Type`, the operation enums); both are committed.
+Change the table, then run `make abi`. What is checked, and where:
+
+* `make check-abi`, which every build runs: the generated text is exactly
+  what the table generates, and this document has a row with the
+  signature string for every import and the number of imports;
+* the C compiler (`src/plzig_host.c`, `fuzz/loader/hoststubs.c`): every
+  import has its host function (`host_<name>`), and each one has the C
+  type the table derives the WAMR signature string from (static
+  assertions with `__builtin_types_compatible_p`, so only with compilers
+  that provide it: GCC and Clang); the struct sizes and offsets;
+* the Zig compiler: the struct layouts, and in `make check-zig` the types
+  of the SDK unit tests' stand-in host (`zig/sdk/test_env.zig`).
+
+The table does not describe what an import does (this document does), and
+nothing checks that the prose here matches the code beyond the import rows.
+
 ## Module shape
 
 The compiler is invoked as (fixed argv, see `plzig_zig_flags` in
@@ -353,9 +378,10 @@ parentheses). Every import:
   guest memory across anything that could run guest code;
 * validates every handle on every use (*Handles*).
 
-24 imports, the complete list (the loader's allowlist,
-`plzig_known_imports` in `src/plzig_runtime.c`, and the registration table
-in `src/plzig_host.c` must match):
+24 imports, the complete list (the import list of `abi/plzig-abi.table`,
+from which the loader's allowlist, `plzig_known_imports` in
+`src/plzig_runtime.c`, and the registration table in `src/plzig_host.c`
+are built; the order here is not the table's):
 
 | Import | Signature | Semantics |
 |--------|-----------|-----------|

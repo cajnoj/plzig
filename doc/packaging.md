@@ -38,7 +38,7 @@ users; this section says where each comes from.
 |---|---|---|---|
 | PL/Zig release (semver) | `1.0.0`, now `1.0.0-dev` | `PLZIG_VERSION` in the `Makefile` | every release |
 | SQL extension version | `1.0` | `MAJOR.MINOR` of `PLZIG_VERSION` (`EXT_VERSION`) | a minor or major release |
-| Host/guest ABI | `5` | `PLZIG_ABI_VERSION` in `src/plzig.h` | the ABI changes (independently) |
+| Host/guest ABI | `5` | `version` in `abi/plzig-abi.table` (generated: `PLZIG_ABI_VERSION`, `plzig.abi_version`) | the ABI changes (independently) |
 | Zig pin | `0.17.1` | `ZIG_VERSION` in the `Makefile` | a Zig upgrade (PLAN.md §14) |
 
 * **Release version.** Semantic versioning (PLAN.md §14): a Zig minor

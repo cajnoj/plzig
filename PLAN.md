@@ -2622,3 +2622,58 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
     aarch64 (tested in CI on PostgreSQL 18.7 only, not "untested").
     Sentences that state a plain mechanism ("`PATH` is not searched") were
     left as they are.
+58. **Host/guest ABI from one table (owner's decision, 2026-11-18).** The
+    ABI definitions that host and guest share were hand-synced copies: the
+    import list in `src/plzig_host.c` (registration table),
+    `src/plzig_runtime.c` (import allowlist), `fuzz/loader/hoststubs.c` and
+    the SDK's `extern` declarations; `PlzigSlot`/`PlzigValue` and `Slot`/
+    `Value`; the kind constants and `plzig.Kind`/`plzig.Type`; the
+    operation codes of `numeric_op` and `tz_convert`; the ABI version.
+    They are now generated from `abi/plzig-abi.table` by `abi/gen-abi.sh`
+    (POSIX sh + awk: no new build dependency, works offline) into
+    `src/plzig_abi.h` and marked regions of `zig/sdk/plzig.zig`. The
+    backend stays C; no ABI behaviour changed (ABI version still 5).
+    * **Committed, not generated at build time**, because that leaves
+      PGXS, `make dist`, the RPM spec, `debian/rules`, the fuzz build and
+      the static-analysis builds unchanged, and keeps the installed SDK at
+      two files (the backend reads, digests and copies exactly `plzig.zig`
+      and `root.zig`; a separate generated Zig file would have changed
+      `src/plzig_build.c` and the install layout). `make abi` regenerates;
+      `make check-abi` fails when the files are stale or `doc/abi.md`
+      lacks an import row or the import count. Every `make` runs it
+      (through a stamp), so the package builds and every Docker image do;
+      the `unit` test layer runs it explicitly, and `fuzz/build.sh`
+      replaces its grep-and-diff of the two C tables with it.
+    * **Checks of the hand-written code against the table:** the host's
+      registration table, the allowlist and the fuzz stand-ins' table are
+      expanded from one X macro (`PLZIG_HOST_IMPORTS`), so a missing
+      `host_<name>` does not compile; a static assertion
+      (`__builtin_types_compatible_p`, GCC/Clang only: skipped where
+      `HAVE__BUILTIN_TYPES_COMPATIBLE_P` is not defined) requires each host
+      function and each fuzz stand-in to have exactly the C type from which
+      the WAMR signature string is derived; an import left in the C code
+      but removed from the table is an unused static function, an error
+      only with `WERROR=1` (as in every Docker build). Struct sizes and
+      offsets are asserted in C and Zig; the SDK unit tests' stand-in host
+      (`zig/sdk/test_env.zig`) must have the table's Zig types (comptime
+      check). Not checked: what an import does, the parameter names in
+      `doc/abi.md`, and the prose of `doc/abi.md` beyond the import rows.
+    * **Differences found between the old copies** (all type spelling, no
+      wire difference): `spi_prepare`, `spi_cursor_open` and
+      `spi_cursor_open_plan` returned `int64` in C but `u64` in the SDK
+      (handles are u64, doc/abi.md *Handles*): the C functions now return
+      `uint64`; the fuzz stand-in of `tz_convert` took the value as
+      `uint64` (host and SDK: signed); the stand-ins shared by imports with
+      differently signed results were split. The order of the allowlist
+      differed from the registration table (no effect). The kind comments
+      of C and Zig were merged.
+    * Side effects: `packaging/versions.sh` reads `ABI_VERSION` from the
+      table (it parsed `src/plzig.h`); `test/expected/sandbox.out` names
+      line 22 of `sdk/plzig.zig` (the version region's markers moved
+      `plzig.std` down by two lines); the SDK digest changes, so cached
+      modules are rebuilt once.
+    * Still hand-written on both sides (not in the table, candidates for
+      a later step): the trigger event, column-flag and action codes
+      (`src/plzig_row.c` / `plzig.Trigger`), the `log` levels
+      (`plzig.Level`), the `plzig_call` status codes (`root.zig`), the
+      argument-buffer limits and the guest export list.
