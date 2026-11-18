@@ -7,13 +7,16 @@
 #   sh abi/gen-abi.sh check <source tree>    exit 1 (with a diff) if either is
 #                                            not exactly what the table
 #                                            generates, or if doc/abi.md lacks
-#                                            an import's row or signature
+#                                            an import's or export's row (with
+#                                            its signature) or has a row for a
+#                                            name the table does not have
 #
 # Needs only POSIX sh and awk, cmp and diff (no build of anything): the
 # Makefile runs `check` in every build (`make check-abi`) and `update` as
-# `make abi`.  That the C host functions and the SDK's test stand-in have the
-# table's types is checked by the compilers (src/plzig_host.c,
-# fuzz/loader/hoststubs.c, the generated Zig region "import-types").
+# `make abi`.  That the C host functions, the SDK's test stand-in and the
+# SDK's entry points have the table's types is checked by the compilers
+# (src/plzig_host.c, fuzz/loader/hoststubs.c, the generated Zig region
+# "import-types", zig/sdk/root.zig against the region "exports").
 set -eu
 mode=${1:-}
 tree=${2:-}
@@ -46,11 +49,11 @@ for f in src/plzig_abi.h zig/sdk/plzig.zig; do
     fi
 done
 
-# doc/abi.md lists every import with its signature string (prose: checked
-# for presence only, never rewritten)
+# doc/abi.md lists every import with its signature string and every export
+# with its signature, and no other (prose: checked, never rewritten)
 if ! "$awk" -v table="$table" -v mode=doc -f "$gen" "$tree/doc/abi.md" >"$work/doc.txt"; then
     cat "$work/doc.txt" >&2
-    echo "gen-abi.sh: doc/abi.md does not describe the imports of abi/plzig-abi.table" >&2
+    echo "gen-abi.sh: doc/abi.md does not describe the imports and exports of abi/plzig-abi.table" >&2
     stale=1
 fi
 [ $stale = 0 ] || exit 1

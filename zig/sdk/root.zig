@@ -9,9 +9,9 @@ const Slot = plzig.Slot;
 
 pub const panic = s.debug.FullPanic(plzig.panicHandler);
 
-/// Status codes returned by plzig_call (see doc/abi.md).
-const STATUS_OK: u32 = 0;
-const STATUS_ERROR: u32 = 1;
+/// Status codes returned by plzig_call (abi/plzig-abi.table, doc/abi.md).
+const STATUS_OK: u32 = @intFromEnum(plzig.CallStatus.ok);
+const STATUS_ERROR: u32 = @intFromEnum(plzig.CallStatus.user_error);
 
 export fn plzig_abi_version() u32 {
     return plzig.abi_version;
@@ -285,5 +285,17 @@ comptime {
     if (@import("builtin").cpu.arch == .wasm32) {
         @export(&memsetImpl, .{ .name = "memset", .linkage = .strong, .visibility = .hidden });
         @export(&memcpyImpl, .{ .name = "memcpy", .linkage = .strong, .visibility = .hidden });
+    }
+}
+
+// The entry points (plzig_abi_version, plzig_init, plzig_alloc_args,
+// plzig_call) are those of abi/plzig-abi.table, with exactly its types.
+// The host links with an --export flag per table entry, so an entry point
+// the table lacks is not exported.  (@field: a missing one does not
+// compile either; @hasDecl does not see these, they are not pub.)
+comptime {
+    for (plzig.guest_export_types) |t| {
+        if (@TypeOf(@field(@This(), t[0])) != t[1])
+            @compileError("guest export " ++ t[0] ++ ": its type is not the one of abi/plzig-abi.table");
     }
 }

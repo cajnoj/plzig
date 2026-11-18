@@ -8,28 +8,51 @@ endian; guest pointers are 32-bit offsets into the guest's linear memory.
 
 **Single source.** The definitions both sides share — the ABI version, the
 *Slot* and *Value* layouts, the value kinds (*Kinds*), the operation codes
-of `numeric_op` and `tz_convert`, and the host imports with their parameter
-and result types — are written once, in `abi/plzig-abi.table`.
-`abi/gen-abi.sh` (POSIX sh and awk) generates from it `src/plzig_abi.h`
-(C: constants, structs, and the import list `PLZIG_HOST_IMPORTS` from which
-the host's registration table and the loader's import allowlist are built)
-and the marked regions of `zig/sdk/plzig.zig` (the `extern` declarations,
-`Slot`, `Value`, `Kind`, `Type`, the operation enums); both are committed.
-Change the table, then run `make abi`. What is checked, and where:
+of `numeric_op` and `tz_convert`, the `log` levels, the status codes of
+`plzig_call`, the layout and the event, column-flag and action codes of
+the trigger information (*Triggers*), the bounds of the argument buffer,
+the host imports and the guest exports with their parameter and result
+types — are written once, in `abi/plzig-abi.table`. `abi/gen-abi.sh`
+(POSIX sh and awk) generates from it `src/plzig_abi.h` (C: constants,
+structs, the import list `PLZIG_HOST_IMPORTS` from which the host's
+registration table and the loader's import allowlist are built, and the
+export list `PLZIG_GUEST_EXPORTS` from which the linker's `--export` flags
+and the host's export lookups are built) and the marked regions of
+`zig/sdk/plzig.zig` (the `extern` declarations, `Slot`, `Value`, the
+trigger information's structs and codes, `Kind`, `Type`, `Level`,
+`CallStatus`, the operation enums, the argument-buffer bounds, and
+`guest_export_types`); both are committed. Change the table, then run
+`make abi`. What is checked, and where:
 
 * `make check-abi`, which every build runs: the generated text is exactly
-  what the table generates, and this document has a row with the
-  signature string for every import and the number of imports;
+  what the table generates; this document has a row with the signature
+  string for every import and the number of imports, and a row with the
+  signature for every export; and the import table and the export table
+  here have no row for a name the table does not have;
 * the C compiler (`src/plzig_host.c`, `fuzz/loader/hoststubs.c`): every
   import has its host function (`host_<name>`), and each one has the C
   type the table derives the WAMR signature string from (static
   assertions with `__builtin_types_compatible_p`, so only with compilers
-  that provide it: GCC and Clang); the struct sizes and offsets;
-* the Zig compiler: the struct layouts, and in `make check-zig` the types
-  of the SDK unit tests' stand-in host (`zig/sdk/test_env.zig`).
+  that provide it: GCC and Clang); the struct sizes and offsets; that
+  `host_log` maps every level of the table and that `plzig_instance_create`
+  looks up as many exports as the table has (static assertions on the
+  counts, not on the code that uses them); an export name the host looks
+  up that is not in the table does not compile;
+* the Zig compiler: the struct layouts; that the SDK's argument buffer
+  lies within the bounds; that `zig/sdk/root.zig` defines every export
+  with exactly the table's type (in every module build and in `make
+  check-zig`); and in `make check-zig` the types of the SDK unit tests'
+  stand-in host (`zig/sdk/test_env.zig`).
 
-The table does not describe what an import does (this document does), and
-nothing checks that the prose here matches the code beyond the import rows.
+The table does not describe what an import or export does (this document
+does), and nothing checks that the prose here matches the code beyond the
+import and export rows: the codes quoted in the prose (for example the
+`log` levels in the import table, or the trigger codes under *Triggers*)
+are not compared with the table. Where the host maps a code to a
+PostgreSQL value (log levels, trigger actions) the mapping itself is
+hand-written. The host-ABI fuzz driver (`fuzz/hostabi/driver.zig`) keeps
+its own literal log levels and trigger actions on purpose: it sends valid
+and invalid values alike.
 
 ## Module shape
 
@@ -69,6 +92,9 @@ A module is accepted by the loader (`plzig_module_load`) only if
 Size limit for the module file: 16 MB.
 
 ## Guest exports
+
+The list and the types are the `export` records of `abi/plzig-abi.table`
+(*Single source*); in WebAssembly every guest pointer is an `i32`.
 
 | Export | Signature | Meaning |
 |--------|-----------|---------|

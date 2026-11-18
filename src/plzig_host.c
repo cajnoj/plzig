@@ -196,6 +196,10 @@ neutralise_controls(char *s)
 	}
 }
 
+/* host_log maps every level of abi/plzig-abi.table (PLZIG_LOG_*) */
+StaticAssertDecl(PLZIG_LOG_MAX == PLZIG_LOG_WARNING,
+				 "host_log: a log level of abi/plzig-abi.table is not mapped");
+
 static void
 host_log(wasm_exec_env_t env, uint32 level, uint32 ptr, uint32 len)
 {
@@ -211,19 +215,19 @@ host_log(wasm_exec_env_t env, uint32 level, uint32 ptr, uint32 len)
 
 		switch (level)
 		{
-			case 0:
+			case PLZIG_LOG_DEBUG:
 				elevel = DEBUG1;
 				break;
-			case 1:
+			case PLZIG_LOG_LOG:
 				elevel = LOG;
 				break;
-			case 2:
+			case PLZIG_LOG_INFO:
 				elevel = INFO;
 				break;
-			case 3:
+			case PLZIG_LOG_NOTICE:
 				elevel = NOTICE;
 				break;
-			case 4:
+			case PLZIG_LOG_WARNING:
 				elevel = WARNING;
 				break;
 			default:

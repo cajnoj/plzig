@@ -620,6 +620,44 @@ plzig_lookup(PlzigInstance *pi, const char *name, uint32 nparams,
 	return f;
 }
 
+/*
+ * plzig_lookup of an export of abi/plzig-abi.table, with the parameter and
+ * result types of its signature string PLZIG_EXPORT_SIG_<name> ('i' i32,
+ * 'I' i64): a name that is not in the table does not compile.  Every
+ * export of the table is looked up in plzig_instance_create.
+ */
+#define plzig_lookup_export(pi, name) \
+	plzig_lookup_sig((pi), #name, PLZIG_EXPORT_SIG_##name)
+StaticAssertDecl(PLZIG_GUEST_EXPORT_COUNT == 4,
+				 "plzig_instance_create looks up the four exports of abi/plzig-abi.table");
+
+static wasm_function_inst_t
+plzig_lookup_sig(PlzigInstance *pi, const char *name, const char *sig)
+{
+	wasm_valkind_t params[4] = {0};
+	wasm_valkind_t results[1] = {0};
+	uint32		nparams = 0;
+	uint32		nresults = 0;
+	const char *p = sig;
+
+	/* the generator allows 4 parameters, one result, 'i' and 'I' */
+	if (*p++ != '(')
+		return NULL;
+	for (; *p != ')'; p++)
+	{
+		if (nparams == lengthof(params) || (*p != 'i' && *p != 'I'))
+			return NULL;
+		params[nparams++] = *p == 'I' ? WASM_I64 : WASM_I32;
+	}
+	for (p++; *p != '\0'; p++)
+	{
+		if (nresults == lengthof(results) || (*p != 'i' && *p != 'I'))
+			return NULL;
+		results[nresults++] = *p == 'I' ? WASM_I64 : WASM_I32;
+	}
+	return plzig_lookup(pi, name, nparams, params, nresults, results);
+}
+
 /* Call a guest function; returns false if it trapped. */
 static bool
 plzig_guest_call(PlzigInstance *pi, wasm_function_inst_t f, uint32 argc, uint32 *argv)
@@ -693,16 +731,14 @@ plzig_instance_create(PlzigModule *mod)
 		problem = "could not create execution environment";
 	else
 	{
-		static const wasm_valkind_t i32x4[4] = {WASM_I32, WASM_I32, WASM_I32, WASM_I32};
-		static const wasm_valkind_t i64x1[1] = {WASM_I64};
 		wasm_function_inst_t fv;
 		wasm_function_inst_t finit;
 
 		wasm_runtime_set_user_data(pi->env, NULL);
-		fv = plzig_lookup(pi, "plzig_abi_version", 0, NULL, 1, i32x4);
-		finit = plzig_lookup(pi, "plzig_init", 0, NULL, 1, i64x1);
-		pi->f_alloc_args = plzig_lookup(pi, "plzig_alloc_args", 1, i32x4, 1, i32x4);
-		pi->f_call = plzig_lookup(pi, "plzig_call", 4, i32x4, 1, i32x4);
+		fv = plzig_lookup_export(pi, plzig_abi_version);
+		finit = plzig_lookup_export(pi, plzig_init);
+		pi->f_alloc_args = plzig_lookup_export(pi, plzig_alloc_args);
+		pi->f_call = plzig_lookup_export(pi, plzig_call);
 
 		if (!fv || !finit || !pi->f_alloc_args || !pi->f_call)
 			problem = "missing or malformed PL/Zig entry points";
@@ -1299,7 +1335,7 @@ plzig_instance_call(PlzigInstance *pi, const PlzigCallSpec *spec, bool *isnull)
 							   sizeof(PlzigSlot)),
 			   sizeof(PlzigSlot));
 
-		if (status == 1)
+		if (status == PLZIG_STATUS_ERROR)
 		{
 			char		name[PLZIG_MAX_ERROR_NAME + 1];
 			uint32		nlen = Min(result.len, PLZIG_MAX_ERROR_NAME);
@@ -1317,7 +1353,7 @@ plzig_instance_call(PlzigInstance *pi, const PlzigCallSpec *spec, bool *isnull)
 					(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
 					 errmsg("plzig function failed: %s", name)));
 		}
-		else if (status != 0)
+		else if (status != PLZIG_STATUS_OK)
 			ereport(ERROR,
 					(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
 					 errmsg("PL/Zig: invalid status %u from guest", status)));

@@ -88,7 +88,11 @@ typedef struct PlzigToolchain
 static PlzigToolchain plzig_tc;
 static bool plzig_tc_show_paths = false;	/* superuser: paths in errdetail */
 
-/* fixed compiler flags (part of the cache key) */
+/*
+ * fixed compiler flags (part of the cache key); one --export flag per guest
+ * export of abi/plzig-abi.table, in its order
+ */
+#define PLZIG_EXPORT_FLAG(name, sig) "--export=" #name,
 static const char *const plzig_zig_flags[] = {
 	"build-exe",
 	"--color", "off",
@@ -100,10 +104,7 @@ static const char *const plzig_zig_flags[] = {
 	"-fno-entry",
 	"-fsingle-threaded",
 	"--stack", "262144",
-	"--export=plzig_abi_version",
-	"--export=plzig_init",
-	"--export=plzig_alloc_args",
-	"--export=plzig_call",
+	PLZIG_GUEST_EXPORTS(PLZIG_EXPORT_FLAG)
 	"--dep", "plzig",
 	"--dep", "user",
 	"-Mroot=sdk/root.zig",

@@ -28,8 +28,11 @@
 #endif
 /*
  * The host/guest ABI (doc/abi.md): PLZIG_ABI_VERSION, PlzigSlot, PlzigValue,
- * the value kinds, the operation codes of numeric_op and tz_convert and the
- * list of host imports, generated from abi/plzig-abi.table.
+ * the value kinds, the operation codes of numeric_op and tz_convert, the
+ * log levels, the plzig_call status codes, the trigger information's layout
+ * and codes, the argument-buffer bounds (PLZIG_MIN_ARGBUF, PLZIG_MAX_ARGBUF),
+ * the list of host imports and the guest exports, generated from
+ * abi/plzig-abi.table.
  */
 #include "plzig_abi.h"
 
@@ -51,9 +54,6 @@
 #define PLZIG_CURSOR_BATCH		50	/* rows fetched from a portal at a time */
 #define PLZIG_MAX_SPI_PARAMS	65535
 #define PLZIG_MAX_ROW_SIZE		((uint64) MaxAllocSize)	/* encoded row (doc/abi.md) */
-/* bounds for the argument buffer a guest reports from plzig_init (doc/abi.md) */
-#define PLZIG_MIN_ARGBUF		16	/* one slot: the result of a call without arguments */
-#define PLZIG_MAX_ARGBUF		(1024 * 1024)
 
 /* Compiler sandbox modes (plzig.compiler_sandbox) */
 typedef enum PlzigSandboxMode

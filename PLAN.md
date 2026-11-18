@@ -2783,3 +2783,61 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       58), which both projects would need and which is useful without
       them; and the SELinux resource-limit fix (deviation 59), found
       during the native-mode measurements.
+61. **The rest of the shared ABI definitions in the table (owner's
+    decision, 2026-11-18).** Follow-up of deviation 58; no wire or
+    behaviour change (ABI version still 5).
+    * **Moved into `abi/plzig-abi.table`** (and generated into
+      `src/plzig_abi.h` and regions of `zig/sdk/plzig.zig`): the `log`
+      levels (`plzig.Level`, `PLZIG_LOG_*`); the status codes of
+      `plzig_call` (`plzig.CallStatus`, used by `root.zig`;
+      `PLZIG_STATUS_*`, used by `src/plzig_runtime.c`); the trigger
+      information's layout (`PlzigTriggerInfo`/`PlzigTriggerCol`, which
+      were private to `src/plzig_row.c`, and the SDK's
+      `TriggerInfo`/`TriggerColumn`) and its event, column-flag and action
+      codes (`PLZIG_TG_*`, `PLZIG_COL_*`; the SDK used bare numbers); the
+      argument-buffer bounds `PLZIG_MIN_ARGBUF`/`PLZIG_MAX_ARGBUF`; the
+      guest exports. Generator extensions: a `consts` block (codes that are
+      not an enumeration: bits, masks, bounds; Zig gets a struct of
+      constants), `priv` structs and field comments, and `export` records.
+    * **Guest exports:** the host's lookups in `plzig_instance_create` now
+      take the parameter and result types from the table's signature
+      string (`plzig_lookup_export`: same exact-type comparison as before,
+      same four exports in the same order, same rejection message); the
+      compiler's `--export` flags (`plzig_zig_flags`, part of the cache
+      key: unchanged strings in the same order) and those of
+      `fuzz/loader/make-seeds.sh` come from the table; `root.zig` checks at
+      compile time that each export has exactly the table's Zig type. The
+      entry points themselves stay hand-written in `root.zig` (no
+      generated region there: the backend copies and digests `plzig.zig`
+      and `root.zig` as they are, and `docker/fake/hostilezig.c` patches
+      their first lines).
+    * **What is checked now:** `make check-abi` also fails when the import
+      table of `doc/abi.md` has a row for an import the table does not
+      have (any row of that section whose second cell is a signature
+      string), and checks the export table both ways (a row with the
+      signature for every export, no row for another name). A name looked
+      up by the host that is not in the table does not compile; static
+      assertions require `host_log` to map exactly the table's levels
+      (`PLZIG_LOG_MAX`) and the host to look up as many exports as the
+      table has (they compare counts, not the code that uses them); the
+      SDK's `arg_buffer_size` must lie within the table's bounds (comptime
+      check). Not checked: the host's mapping of a code to a PostgreSQL
+      value (log level to `elevel`, actions to the trigger result), and the
+      codes quoted in the prose of `doc/abi.md`.
+    * **Left hand-written:** the literal log levels and trigger actions of
+      the host-ABI fuzz driver (`fuzz/hostabi/driver.zig`), which sends
+      valid and invalid values on purpose; the expected values in
+      `zig/sdk/test.zig` (they now test the generated constants);
+      `PLZIG_TRIGGER_NARGS` (3, the number of slots of a trigger call,
+      which `root.zig` checks as a literal; not among the candidates of
+      deviation 58, and generating it would add one more public name to
+      the SDK for a single number); the SDK's
+      `arg_buffer_size` (4096, the SDK's own choice within the bounds).
+    * No discrepancy between the old copies was found. Side effects: the
+      SDK has two new public declarations, `plzig.CallStatus` and
+      `plzig.guest_export_types` (`root.zig` is a separate module and can
+      reach only public ones; both are a type and a list of types, neither
+      reaches the host imports), so `test/expected/adversarial.out`, which
+      lists the SDK's public declarations, changes;
+      `test/expected/sandbox.out` names line 37 of `sdk/plzig.zig` (was
+      22); the SDK digest changes, so cached modules are rebuilt once.

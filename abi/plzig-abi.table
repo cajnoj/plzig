@@ -14,9 +14,10 @@
 # becomes a comment in both languages.
 #
 #   version <n>
-#   struct <Zig name> <C name> -- text      a 16-byte extern struct ...
-#     field <name> <u16|u32|u64>            ... its fields in order ...
-#   end                                     (offsets: natural alignment)
+#   struct <Zig name> <C name> [priv] -- text   an extern struct (Zig: pub
+#     field <name> <u16|u32|u64> -- text      unless priv) and its fields in
+#   end                                       order (offsets: natural
+#                                             alignment; size asserted)
 #   kind <code> <C suffix> <Zig name> <set> -- text
 #       a value kind: C PLZIG_KIND_<suffix>; <set> "-" (C only), "K" (also in
 #       plzig.Kind, a column's kind) or "KT" (also in plzig.Type, a
@@ -26,6 +27,14 @@
 #   enum <key> <pub|priv> <Zig name> <u32> <C prefix> <C max name|-> -- text
 #     value <code> <C suffix> <Zig name> -- text
 #   end
+#       C: #define <C prefix><C suffix> <code> (and <C max name>, the
+#       largest code); Zig: an enum, region "enum <key>"
+#   consts <key> <pub|priv> <Zig name> <u16|u32> <C prefix> -- text
+#     value <code> <C suffix> <Zig name> -- text
+#   end
+#       codes that are not an enumeration (bits, masks, bounds).  C as for
+#       enum; Zig: a struct of `pub const <Zig name>: <type> = <code>`,
+#       region "consts <key>"
 #   import <name> <return> <param>:<type>... -- text
 #       a host import (module "plzig"); <return> void, u32, i32, u64 or
 #       i64; parameter types u32, i32, u64, i64, or a guest pointer:
@@ -33,6 +42,13 @@
 #       by the host).  In C every guest pointer is a uint32, and the WAMR
 #       signature string is derived (32-bit "i", 64-bit "I").  The order is
 #       the order of the registration table.
+#   export <name> <return> <param>:<type>... -- text
+#       a guest export (an entry point of zig/sdk/root.zig, called by the
+#       host); types as for import, and ref(T) (Zig *T); at most 4
+#       parameters and one result (src/plzig_runtime.c).  C: the signature
+#       string PLZIG_EXPORT_SIG_<name> and the list PLZIG_GUEST_EXPORTS
+#       (the linker's --export flags, in this order); Zig: the function
+#       types root.zig is checked against (region "exports")
 
 version 5
 
@@ -47,6 +63,29 @@ field val u64
 field len u32
 field kind u16
 field is_null u16
+end
+
+struct TriggerInfo PlzigTriggerInfo priv -- The fixed part of the trigger information the host passes (doc/abi.md, "Triggers").
+field event u32 -- PLZIG_TG_* / TgEvent: when | row | op
+field relid u32
+field natts u32
+field nargs u32
+field name_ptr u32
+field name_len u32
+field table_ptr u32
+field table_len u32
+field schema_ptr u32
+field schema_len u32
+field args_ptr u32 -- nargs x (ptr, len)
+field cols_ptr u32 -- natts x PlzigTriggerCol / TriggerColumn
+end
+
+struct TriggerColumn PlzigTriggerCol priv -- A column entry of the trigger information.
+field name_ptr u32
+field name_len u32
+field kind u16 -- PLZIG_KIND_* / Kind, as in typed rows
+field flags u16 -- PLZIG_COL_* / TgColumnFlag
+field typid u32
 end
 
 kind 0 NULL null - -- parameter only: NULL of any type
@@ -113,3 +152,51 @@ import tz_convert i64 op:u32 value:i64 zone_ptr:in(u8) zone_len:u32
 import srf_return_next void values_ptr:in(Value) n:u32
 import commit void
 import rollback void
+
+enum log_level pub Level u32 PLZIG_LOG_ PLZIG_LOG_MAX -- levels of the log import (doc/abi.md); anything else is an error
+value 0 DEBUG debug -- DEBUG1
+value 1 LOG log -- LOG
+value 2 INFO info -- INFO
+value 3 NOTICE notice -- NOTICE
+value 4 WARNING warning -- WARNING
+end
+
+enum call_status pub CallStatus u32 PLZIG_STATUS_ - -- status codes of plzig_call (doc/abi.md, "Guest exports"); any other value is rejected by the host
+value 0 OK ok -- the result slot is filled
+value 1 ERROR user_error -- the user function returned a Zig error; the result slot holds its name
+end
+
+consts trigger_event priv TgEvent u32 PLZIG_TG_ -- the event field of the trigger information (doc/abi.md, "Triggers"): when | row | op
+value 0 BEFORE before
+value 1 AFTER after
+value 2 INSTEAD instead_of
+value 3 WHEN_MASK when_mask -- bits 0-1: BEFORE, AFTER or INSTEAD
+value 4 ROW row -- bit 2: row level (else statement level)
+value 16 INSERT insert
+value 32 UPDATE update
+value 48 DELETE delete
+value 64 TRUNCATE truncate
+value 240 OP_MASK op_mask -- bits 4-7: INSERT, UPDATE, DELETE or TRUNCATE
+end
+
+consts column_flag priv TgColumnFlag u16 PLZIG_COL_ -- flags of a column of the trigger information
+value 1 DROPPED dropped
+value 2 GENERATED generated
+end
+
+consts trigger_action priv TgAction u32 PLZIG_TG_ -- actions of a trigger result (in the result slot's is_null)
+value 1 SKIP skip -- NULL: skip the operation for this row
+value 2 NEW new -- the NEW row unchanged
+value 3 OLD old -- the OLD row unchanged
+value 4 MODIFIED modified -- NEW (or OLD) with changed columns
+end
+
+consts arg_buffer priv ArgBufferBounds u32 PLZIG_ -- bounds for the argument buffer a guest reports from plzig_init (doc/abi.md, "Argument buffer")
+value 16 MIN_ARGBUF min -- one slot: the result of a call without arguments
+value 1048576 MAX_ARGBUF max -- 1 MB
+end
+
+export plzig_abi_version u32 -- the ABI version (checked first)
+export plzig_init u64 -- the argument buffer, capacity << 32 | address
+export plzig_alloc_args u32 len:u32 -- an argument block in the arena
+export plzig_call u32 args:in(Slot) nargs:u32 result:ref(Slot) begin:u32 -- run the user function

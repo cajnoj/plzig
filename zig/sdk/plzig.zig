@@ -17,6 +17,21 @@ pub const abi_version: u32 = 5;
 /// this size need no allocation and no extra guest entry.
 pub const arg_buffer_size: u32 = 4096;
 
+// @plzig-abi begin consts arg_buffer -- generated from abi/plzig-abi.table (make abi), do not edit
+/// bounds for the argument buffer a guest reports from plzig_init (doc/abi.md,
+/// "Argument buffer")
+const ArgBufferBounds = struct {
+    /// one slot: the result of a call without arguments
+    pub const min: u32 = 16;
+    /// 1 MB
+    pub const max: u32 = 1048576;
+};
+// @plzig-abi end
+comptime {
+    if (arg_buffer_size < ArgBufferBounds.min or arg_buffer_size > ArgBufferBounds.max)
+        @compileError("arg_buffer_size: outside the bounds the host accepts (abi/plzig-abi.table)");
+}
+
 /// Curated subset of the Zig standard library: pure computation only.
 /// This is a convenience policy, not the security boundary (the wasm sandbox is).
 pub const std = struct {
@@ -137,6 +152,29 @@ comptime {
 }
 // @plzig-abi end
 
+// @plzig-abi begin exports -- generated from abi/plzig-abi.table (make abi), do not edit
+/// The guest exports (zig/sdk/root.zig, which checks at compile time that its
+/// entry points have exactly these types; the host builds the linker's --export
+/// flags and its lookups from the same table).
+pub const guest_export_types = .{
+    .{ "plzig_abi_version", fn () callconv(.c) u32 },
+    .{ "plzig_init", fn () callconv(.c) u64 },
+    .{ "plzig_alloc_args", fn (u32) callconv(.c) u32 },
+    .{ "plzig_call", fn ([*]const Slot, u32, *Slot, u32) callconv(.c) u32 },
+};
+// @plzig-abi end
+
+// @plzig-abi begin enum call_status -- generated from abi/plzig-abi.table (make abi), do not edit
+/// status codes of plzig_call (doc/abi.md, "Guest exports"); any other value is
+/// rejected by the host
+pub const CallStatus = enum(u32) {
+    /// the result slot is filled
+    ok = 0,
+    /// the user function returned a Zig error; the result slot holds its name
+    user_error = 1,
+};
+// @plzig-abi end
+
 // @plzig-abi begin structs -- generated from abi/plzig-abi.table (make abi), do not edit
 /// 16-byte argument/result slot shared with the host (see doc/abi.md).
 pub const Slot = extern struct {
@@ -161,6 +199,47 @@ pub const Value = extern struct {
     comptime {
         if (@sizeOf(Value) != 16 or @offsetOf(Value, "val") != 0 or @offsetOf(Value, "len") != 8 or @offsetOf(Value, "kind") != 12 or @offsetOf(Value, "is_null") != 14)
             @compileError("Value: layout differs from abi/plzig-abi.table");
+    }
+};
+
+/// The fixed part of the trigger information the host passes (doc/abi.md,
+/// "Triggers").
+const TriggerInfo = extern struct {
+    /// PLZIG_TG_* / TgEvent: when | row | op
+    event: u32,
+    relid: u32,
+    natts: u32,
+    nargs: u32,
+    name_ptr: u32,
+    name_len: u32,
+    table_ptr: u32,
+    table_len: u32,
+    schema_ptr: u32,
+    schema_len: u32,
+    /// nargs x (ptr, len)
+    args_ptr: u32,
+    /// natts x PlzigTriggerCol / TriggerColumn
+    cols_ptr: u32,
+
+    comptime {
+        if (@sizeOf(TriggerInfo) != 48 or @offsetOf(TriggerInfo, "event") != 0 or @offsetOf(TriggerInfo, "relid") != 4 or @offsetOf(TriggerInfo, "natts") != 8 or @offsetOf(TriggerInfo, "nargs") != 12 or @offsetOf(TriggerInfo, "name_ptr") != 16 or @offsetOf(TriggerInfo, "name_len") != 20 or @offsetOf(TriggerInfo, "table_ptr") != 24 or @offsetOf(TriggerInfo, "table_len") != 28 or @offsetOf(TriggerInfo, "schema_ptr") != 32 or @offsetOf(TriggerInfo, "schema_len") != 36 or @offsetOf(TriggerInfo, "args_ptr") != 40 or @offsetOf(TriggerInfo, "cols_ptr") != 44)
+            @compileError("TriggerInfo: layout differs from abi/plzig-abi.table");
+    }
+};
+
+/// A column entry of the trigger information.
+const TriggerColumn = extern struct {
+    name_ptr: u32,
+    name_len: u32,
+    /// PLZIG_KIND_* / Kind, as in typed rows
+    kind: u16,
+    /// PLZIG_COL_* / TgColumnFlag
+    flags: u16,
+    typid: u32,
+
+    comptime {
+        if (@sizeOf(TriggerColumn) != 16 or @offsetOf(TriggerColumn, "name_ptr") != 0 or @offsetOf(TriggerColumn, "name_len") != 4 or @offsetOf(TriggerColumn, "kind") != 8 or @offsetOf(TriggerColumn, "flags") != 10 or @offsetOf(TriggerColumn, "typid") != 12)
+            @compileError("TriggerColumn: layout differs from abi/plzig-abi.table");
     }
 };
 // @plzig-abi end
@@ -2176,13 +2255,21 @@ pub fn resetArena() void {
 // ---------------------------------------------------------------------------
 // Logging and errors.
 
+// @plzig-abi begin enum log_level -- generated from abi/plzig-abi.table (make abi), do not edit
+/// levels of the log import (doc/abi.md); anything else is an error
 pub const Level = enum(u32) {
+    /// DEBUG1
     debug = 0,
+    /// LOG
     log = 1,
+    /// INFO
     info = 2,
+    /// NOTICE
     notice = 3,
+    /// WARNING
     warning = 4,
 };
+// @plzig-abi end
 
 /// Emit a message at the given level (as `elog` would). Messages longer than
 /// the host limit are truncated by the host.
@@ -2847,29 +2934,49 @@ pub fn returnNext(comptime T: type, row: ?T) void {
 // columns as they are now, NEW and OLD) comes with the call: no host call
 // is needed to read it.
 
-/// The fixed part of the trigger information the host passes.
-const TriggerInfo = extern struct {
-    event: u32,
-    relid: u32,
-    natts: u32,
-    nargs: u32,
-    name_ptr: u32,
-    name_len: u32,
-    table_ptr: u32,
-    table_len: u32,
-    schema_ptr: u32,
-    schema_len: u32,
-    args_ptr: u32,
-    cols_ptr: u32,
+// The layout of the information (TriggerInfo, TriggerColumn) is in the
+// "structs" region above.
+// @plzig-abi begin consts trigger_event -- generated from abi/plzig-abi.table (make abi), do not edit
+/// the event field of the trigger information (doc/abi.md, "Triggers"): when |
+/// row | op
+const TgEvent = struct {
+    pub const before: u32 = 0;
+    pub const after: u32 = 1;
+    pub const instead_of: u32 = 2;
+    /// bits 0-1: BEFORE, AFTER or INSTEAD
+    pub const when_mask: u32 = 3;
+    /// bit 2: row level (else statement level)
+    pub const row: u32 = 4;
+    pub const insert: u32 = 16;
+    pub const update: u32 = 32;
+    pub const delete: u32 = 48;
+    pub const truncate: u32 = 64;
+    /// bits 4-7: INSERT, UPDATE, DELETE or TRUNCATE
+    pub const op_mask: u32 = 240;
 };
+// @plzig-abi end
 
-const TriggerColumn = extern struct {
-    name_ptr: u32,
-    name_len: u32,
-    kind: u16,
-    flags: u16,
-    typid: u32,
+// @plzig-abi begin consts column_flag -- generated from abi/plzig-abi.table (make abi), do not edit
+/// flags of a column of the trigger information
+const TgColumnFlag = struct {
+    pub const dropped: u16 = 1;
+    pub const generated: u16 = 2;
 };
+// @plzig-abi end
+
+// @plzig-abi begin consts trigger_action -- generated from abi/plzig-abi.table (make abi), do not edit
+/// actions of a trigger result (in the result slot's is_null)
+const TgAction = struct {
+    /// NULL: skip the operation for this row
+    pub const skip: u32 = 1;
+    /// the NEW row unchanged
+    pub const new: u32 = 2;
+    /// the OLD row unchanged
+    pub const old: u32 = 3;
+    /// NEW (or OLD) with changed columns
+    pub const modified: u32 = 4;
+};
+// @plzig-abi end
 
 /// a 32-bit guest address the host wrote (env.memory_base is 0 in a module)
 fn guestAddr(a: u32) usize {
@@ -2892,9 +2999,9 @@ pub const TriggerResult = struct {
     action: u32,
     values: []const Value = &.{},
 
-    pub const skip: TriggerResult = .{ .action = 1 };
-    pub const new: TriggerResult = .{ .action = 2 };
-    pub const old: TriggerResult = .{ .action = 3 };
+    pub const skip: TriggerResult = .{ .action = TgAction.skip };
+    pub const new: TriggerResult = .{ .action = TgAction.new };
+    pub const old: TriggerResult = .{ .action = TgAction.old };
 };
 
 /// A trigger call: PostgreSQL's TG_* data, NEW and OLD.
@@ -2921,22 +3028,22 @@ pub const Trigger = struct {
 
     /// TG_WHEN
     pub fn when(self: Trigger) When {
-        return switch (self.info.event & 3) {
-            0 => .before,
-            1 => .after,
+        return switch (self.info.event & TgEvent.when_mask) {
+            TgEvent.before => .before,
+            TgEvent.after => .after,
             else => .instead_of,
         };
     }
     /// TG_LEVEL = 'ROW'
     pub fn forEachRow(self: Trigger) bool {
-        return self.info.event & 4 != 0;
+        return self.info.event & TgEvent.row != 0;
     }
     /// TG_OP
     pub fn op(self: Trigger) Op {
-        return switch ((self.info.event >> 4) & 15) {
-            1 => .insert,
-            2 => .update,
-            3 => .delete,
+        return switch (self.info.event & TgEvent.op_mask) {
+            TgEvent.insert => .insert,
+            TgEvent.update => .update,
+            TgEvent.delete => .delete,
             else => .truncate,
         };
     }
@@ -2986,17 +3093,17 @@ pub const Trigger = struct {
     }
     pub fn columnDropped(self: Trigger, i: usize) error{ColumnOutOfRange}!bool {
         if (i >= self.info.natts) return error.ColumnOutOfRange;
-        return self.column(i).flags & 1 != 0;
+        return self.column(i).flags & TgColumnFlag.dropped != 0;
     }
     pub fn columnGenerated(self: Trigger, i: usize) error{ColumnOutOfRange}!bool {
         if (i >= self.info.natts) return error.ColumnOutOfRange;
-        return self.column(i).flags & 2 != 0;
+        return self.column(i).flags & TgColumnFlag.generated != 0;
     }
     /// Position of the column called `col_name` (not dropped), or null.
     pub fn columnIndex(self: Trigger, col_name: []const u8) ?usize {
         for (0..self.info.natts) |i| {
             const c = self.column(i);
-            if (c.flags & 1 == 0 and s.mem.eql(u8, guestBytes(c.name_ptr, c.name_len), col_name)) return i;
+            if (c.flags & TgColumnFlag.dropped == 0 and s.mem.eql(u8, guestBytes(c.name_ptr, c.name_len), col_name)) return i;
         }
         return null;
     }
@@ -3070,7 +3177,7 @@ pub const Trigger = struct {
             if (v.kind != want and !(bytes_kind and col_bytes)) return error.TypeMismatch;
             vals[i] = v;
         }
-        return .{ .action = 4, .values = vals };
+        return .{ .action = TgAction.modified, .values = vals };
     }
 };
 

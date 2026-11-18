@@ -602,51 +602,12 @@ plzig_srf_finish(PlzigSrf *srf)
  * ---------------------------------------------------------------------
  */
 
-/* event bits of the trigger information (PLZIG_TG_*) */
-#define PLZIG_TG_BEFORE			0
-#define PLZIG_TG_AFTER			1
-#define PLZIG_TG_INSTEAD		2
-#define PLZIG_TG_ROW			4
-#define PLZIG_TG_INSERT			(1 << 4)
-#define PLZIG_TG_UPDATE			(2 << 4)
-#define PLZIG_TG_DELETE			(3 << 4)
-#define PLZIG_TG_TRUNCATE		(4 << 4)
-
-/* column flags */
-#define PLZIG_COL_DROPPED		1
-#define PLZIG_COL_GENERATED		2
-
-/* actions of a trigger result (in the result slot's is_null) */
-#define PLZIG_TG_SKIP			1	/* NULL: skip the operation for this row */
-#define PLZIG_TG_NEW			2	/* the NEW row unchanged */
-#define PLZIG_TG_OLD			3	/* the OLD row unchanged */
-#define PLZIG_TG_MODIFIED		4	/* NEW (or OLD) with changed columns */
-
-/* the fixed part of the information blob: little-endian u32 fields */
-typedef struct PlzigTriggerInfo
-{
-	uint32		event;
-	uint32		relid;
-	uint32		natts;
-	uint32		nargs;
-	uint32		name_ptr;
-	uint32		name_len;
-	uint32		table_ptr;
-	uint32		table_len;
-	uint32		schema_ptr;
-	uint32		schema_len;
-	uint32		args_ptr;		/* nargs x (ptr, len) */
-	uint32		cols_ptr;		/* natts x PlzigTriggerCol */
-} PlzigTriggerInfo;
-
-typedef struct PlzigTriggerCol
-{
-	uint32		name_ptr;
-	uint32		name_len;
-	uint16		kind;			/* PLZIG_KIND_*, as in typed rows */
-	uint16		flags;			/* PLZIG_COL_* */
-	uint32		typid;
-} PlzigTriggerCol;
+/*
+ * The event bits (PLZIG_TG_BEFORE ...), column flags (PLZIG_COL_*), result
+ * actions (PLZIG_TG_SKIP ...) and the layout of the information blob
+ * (PlzigTriggerInfo, PlzigTriggerCol: little-endian fields) are in
+ * plzig_abi.h, generated from abi/plzig-abi.table.
+ */
 
 struct PlzigTriggerArgs
 {

@@ -48,6 +48,57 @@ StaticAssertDecl(offsetof(PlzigValue, kind) == 12, "PlzigValue.kind: offset");
 StaticAssertDecl(offsetof(PlzigValue, is_null) == 14, "PlzigValue.is_null: offset");
 
 /*
+ * The fixed part of the trigger information the host passes (doc/abi.md,
+ * "Triggers").
+ */
+typedef struct PlzigTriggerInfo
+{
+	uint32		event;			/* PLZIG_TG_* / TgEvent: when | row | op */
+	uint32		relid;
+	uint32		natts;
+	uint32		nargs;
+	uint32		name_ptr;
+	uint32		name_len;
+	uint32		table_ptr;
+	uint32		table_len;
+	uint32		schema_ptr;
+	uint32		schema_len;
+	uint32		args_ptr;		/* nargs x (ptr, len) */
+	uint32		cols_ptr;		/* natts x PlzigTriggerCol / TriggerColumn */
+} PlzigTriggerInfo;
+StaticAssertDecl(sizeof(PlzigTriggerInfo) == 48, "PlzigTriggerInfo: size");
+StaticAssertDecl(offsetof(PlzigTriggerInfo, event) == 0, "PlzigTriggerInfo.event: offset");
+StaticAssertDecl(offsetof(PlzigTriggerInfo, relid) == 4, "PlzigTriggerInfo.relid: offset");
+StaticAssertDecl(offsetof(PlzigTriggerInfo, natts) == 8, "PlzigTriggerInfo.natts: offset");
+StaticAssertDecl(offsetof(PlzigTriggerInfo, nargs) == 12, "PlzigTriggerInfo.nargs: offset");
+StaticAssertDecl(offsetof(PlzigTriggerInfo, name_ptr) == 16, "PlzigTriggerInfo.name_ptr: offset");
+StaticAssertDecl(offsetof(PlzigTriggerInfo, name_len) == 20, "PlzigTriggerInfo.name_len: offset");
+StaticAssertDecl(offsetof(PlzigTriggerInfo, table_ptr) == 24, "PlzigTriggerInfo.table_ptr: offset");
+StaticAssertDecl(offsetof(PlzigTriggerInfo, table_len) == 28, "PlzigTriggerInfo.table_len: offset");
+StaticAssertDecl(offsetof(PlzigTriggerInfo, schema_ptr) == 32, "PlzigTriggerInfo.schema_ptr: offset");
+StaticAssertDecl(offsetof(PlzigTriggerInfo, schema_len) == 36, "PlzigTriggerInfo.schema_len: offset");
+StaticAssertDecl(offsetof(PlzigTriggerInfo, args_ptr) == 40, "PlzigTriggerInfo.args_ptr: offset");
+StaticAssertDecl(offsetof(PlzigTriggerInfo, cols_ptr) == 44, "PlzigTriggerInfo.cols_ptr: offset");
+
+/*
+ * A column entry of the trigger information.
+ */
+typedef struct PlzigTriggerCol
+{
+	uint32		name_ptr;
+	uint32		name_len;
+	uint16		kind;			/* PLZIG_KIND_* / Kind, as in typed rows */
+	uint16		flags;			/* PLZIG_COL_* / TgColumnFlag */
+	uint32		typid;
+} PlzigTriggerCol;
+StaticAssertDecl(sizeof(PlzigTriggerCol) == 16, "PlzigTriggerCol: size");
+StaticAssertDecl(offsetof(PlzigTriggerCol, name_ptr) == 0, "PlzigTriggerCol.name_ptr: offset");
+StaticAssertDecl(offsetof(PlzigTriggerCol, name_len) == 4, "PlzigTriggerCol.name_len: offset");
+StaticAssertDecl(offsetof(PlzigTriggerCol, kind) == 8, "PlzigTriggerCol.kind: offset");
+StaticAssertDecl(offsetof(PlzigTriggerCol, flags) == 10, "PlzigTriggerCol.flags: offset");
+StaticAssertDecl(offsetof(PlzigTriggerCol, typid) == 12, "PlzigTriggerCol.typid: offset");
+
+/*
  * Value kinds (doc/abi.md, "Kinds"): the kind of a result column is
  * derived by the host from the tuple descriptor; the kind of a
  * prepared-statement parameter is chosen by the guest at prepare time and
@@ -92,6 +143,53 @@ StaticAssertDecl(offsetof(PlzigValue, is_null) == 14, "PlzigValue.is_null: offse
 #define PLZIG_TZ_TO_LOCAL		1	/* timestamptz -> local timestamp */
 #define PLZIG_TZ_FROM_LOCAL		2	/* local timestamp -> timestamptz */
 
+/* levels of the log import (doc/abi.md); anything else is an error */
+#define PLZIG_LOG_DEBUG			0	/* DEBUG1 */
+#define PLZIG_LOG_LOG			1	/* LOG */
+#define PLZIG_LOG_INFO			2	/* INFO */
+#define PLZIG_LOG_NOTICE		3	/* NOTICE */
+#define PLZIG_LOG_WARNING		4	/* WARNING */
+#define PLZIG_LOG_MAX			4
+
+/*
+ * status codes of plzig_call (doc/abi.md, "Guest exports"); any other value
+ * is rejected by the host
+ */
+#define PLZIG_STATUS_OK			0	/* the result slot is filled */
+#define PLZIG_STATUS_ERROR		1	/* the user function returned a Zig error; the result slot holds its name */
+
+/*
+ * the event field of the trigger information (doc/abi.md, "Triggers"): when
+ * | row | op
+ */
+#define PLZIG_TG_BEFORE			0
+#define PLZIG_TG_AFTER			1
+#define PLZIG_TG_INSTEAD		2
+#define PLZIG_TG_WHEN_MASK		3	/* bits 0-1: BEFORE, AFTER or INSTEAD */
+#define PLZIG_TG_ROW			4	/* bit 2: row level (else statement level) */
+#define PLZIG_TG_INSERT			16
+#define PLZIG_TG_UPDATE			32
+#define PLZIG_TG_DELETE			48
+#define PLZIG_TG_TRUNCATE		64
+#define PLZIG_TG_OP_MASK		240	/* bits 4-7: INSERT, UPDATE, DELETE or TRUNCATE */
+
+/* flags of a column of the trigger information */
+#define PLZIG_COL_DROPPED		1
+#define PLZIG_COL_GENERATED		2
+
+/* actions of a trigger result (in the result slot's is_null) */
+#define PLZIG_TG_SKIP			1	/* NULL: skip the operation for this row */
+#define PLZIG_TG_NEW			2	/* the NEW row unchanged */
+#define PLZIG_TG_OLD			3	/* the OLD row unchanged */
+#define PLZIG_TG_MODIFIED		4	/* NEW (or OLD) with changed columns */
+
+/*
+ * bounds for the argument buffer a guest reports from plzig_init
+ * (doc/abi.md, "Argument buffer")
+ */
+#define PLZIG_MIN_ARGBUF		16	/* one slot: the result of a call without arguments */
+#define PLZIG_MAX_ARGBUF		1048576 /* 1 MB */
+
 /*
  * The host imports (module "plzig", doc/abi.md "Host imports"), in the
  * order of the registration table, as an X macro:
@@ -128,5 +226,22 @@ StaticAssertDecl(offsetof(PlzigValue, is_null) == 14, "PlzigValue.is_null: offse
 	X(srf_return_next, "(ii)", void, (wasm_exec_env_t env, uint32 values_ptr, uint32 n)) \
 	X(commit, "()", void, (wasm_exec_env_t env)) \
 	X(rollback, "()", void, (wasm_exec_env_t env))
+
+/*
+ * The guest exports (doc/abi.md "Guest exports"): the WAMR-style signature
+ * string of each (the parameter and result types the host requires when
+ * it looks the export up), and the list, in the order of the linker's
+ * --export flags, as an X macro: X(name, signature string)
+ */
+#define PLZIG_EXPORT_SIG_plzig_abi_version	"()i"		/* the ABI version (checked first) */
+#define PLZIG_EXPORT_SIG_plzig_init			"()I"		/* the argument buffer, capacity << 32 | address */
+#define PLZIG_EXPORT_SIG_plzig_alloc_args	"(i)i"		/* an argument block in the arena */
+#define PLZIG_EXPORT_SIG_plzig_call			"(iiii)i"	/* run the user function */
+#define PLZIG_GUEST_EXPORT_COUNT 4
+#define PLZIG_GUEST_EXPORTS(X) \
+	X(plzig_abi_version, PLZIG_EXPORT_SIG_plzig_abi_version) \
+	X(plzig_init, PLZIG_EXPORT_SIG_plzig_init) \
+	X(plzig_alloc_args, PLZIG_EXPORT_SIG_plzig_alloc_args) \
+	X(plzig_call, PLZIG_EXPORT_SIG_plzig_call)
 
 #endif							/* PLZIG_ABI_H */

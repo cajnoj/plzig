@@ -161,8 +161,9 @@ all: $(VALIDATOR) plzig.control $(BUILD_DIR)/abi-check.stamp
 # are generated from it and committed (so the build, `make dist`, the
 # packages and the fuzz build need no generator step).  `make abi`
 # regenerates them; `make check-abi` (and every build, through the stamp)
-# fails if they are not what the table generates, or if doc/abi.md lacks an
-# import.  POSIX sh and awk only.
+# fails if they are not what the table generates, or if doc/abi.md lacks a
+# row for an import or export, or has one for a name the table does not
+# have.  POSIX sh and awk only.
 ABI_GEN := abi/plzig-abi.table abi/gen-abi.awk abi/gen-abi.sh
 abi:
 	sh abi/gen-abi.sh update .
