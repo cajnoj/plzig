@@ -490,7 +490,7 @@ SELECT count(*) FROM pg_cursors;
 CREATE FUNCTION pt_large() RETURNS text LANGUAGE plzig AS $$
     const big = try plzig.allocator.alloc(u8, 3 * 1024 * 1024);
     for (big, 0..) |*b, i| b.* = @intCast(i % 251);
-    var p = try plzig.spi.prepare("SELECT length($1), md5($1), repeat('x', 2000000)", &.{.bytea});
+    var p = try plzig.spi.prepare("SELECT length($1), encode(sha256($1), 'hex'), repeat('x', 2000000)", &.{.bytea});
     defer p.free();
     const r = try p.execute(.{plzig.bytea(big)});
     const row = try r.row(0);
@@ -498,5 +498,5 @@ CREATE FUNCTION pt_large() RETURNS text LANGUAGE plzig AS $$
         try row.get([]const u8, 1), (try row.get([]const u8, 2)).len });
 $$;
 SELECT pt_large();
-SELECT md5(decode(string_agg(lpad(to_hex(i % 251), 2, '0'), '' ORDER BY i), 'hex'))
+SELECT encode(sha256(decode(string_agg(lpad(to_hex(i % 251), 2, '0'), '' ORDER BY i), 'hex')), 'hex')
   FROM generate_series(0, 3 * 1024 * 1024 - 1) i;

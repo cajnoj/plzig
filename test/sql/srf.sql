@@ -137,7 +137,7 @@ CREATE FUNCTION sr_nested(n int) RETURNS SETOF text STRICT LANGUAGE plzig AS $$
 $$;
 SELECT * FROM sr_nested(3);
 -- ... and rows streamed from a cursor
-CREATE TABLE sr_src AS SELECT g AS id, md5(g::text) AS h FROM generate_series(1, 1000) g;
+CREATE TABLE sr_src AS SELECT g AS id, left(encode(sha256(g::text::bytea), 'hex'), 32) AS h FROM generate_series(1, 1000) g;
 CREATE FUNCTION sr_stream(m int) RETURNS TABLE (id int, h text) STRICT LANGUAGE plzig AS $$
     var c = try plzig.spi.open("SELECT id, h FROM sr_src ORDER BY id", &.{});
     while (try c.next()) |row| {
@@ -145,7 +145,7 @@ CREATE FUNCTION sr_stream(m int) RETURNS TABLE (id int, h text) STRICT LANGUAGE 
         if (@mod(id, m) == 0) returnNext(.{ .id = id, .h = try row.get([]const u8, 1) });
     }
 $$;
-SELECT count(*), min(id), max(id), bool_and(h = md5(id::text)) FROM sr_stream(7);
+SELECT count(*), min(id), max(id), bool_and(h = left(encode(sha256(id::text::bytea), 'hex'), 32)) FROM sr_stream(7);
 
 -- large sets: the tuplestore spills to a temporary file beyond work_mem ...
 CREATE FUNCTION sr_many(n int) RETURNS SETOF text STRICT LANGUAGE plzig AS $$

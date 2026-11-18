@@ -9,7 +9,7 @@
 CREATE FUNCTION lk_mem() RETURNS bigint LANGUAGE sql AS $$
   SELECT coalesce(sum(total_bytes), 0)::bigint FROM pg_backend_memory_contexts WHERE name LIKE 'PL/Zig%'
 $$;
-CREATE TABLE lk_t AS SELECT g AS x, md5(g::text) AS t FROM generate_series(1, 100) g;
+CREATE TABLE lk_t AS SELECT g AS x, left(encode(sha256(g::text::bytea), 'hex'), 32) AS t FROM generate_series(1, 100) g;
 
 CREATE FUNCTION lk_scalar(x int) RETURNS int STRICT LANGUAGE plzig AS $$
     return x + 1;

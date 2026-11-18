@@ -192,10 +192,10 @@ $$;
 CREATE TABLE tm_big (id int, t text, b bytea);
 -- compressible (stored compressed), and incompressible (stored out of line)
 INSERT INTO tm_big VALUES (1, repeat('x', 5 * 1024 * 1024), tm_make(5));
-INSERT INTO tm_big SELECT 2, string_agg(md5(i::text), ''), NULL FROM generate_series(1, 100000) i;
+INSERT INTO tm_big SELECT 2, string_agg(left(encode(sha256(i::text::bytea), 'hex'), 32), ''), NULL FROM generate_series(1, 100000) i;
 SELECT id, pg_column_size(t) < octet_length(t) AS compressed,
-       octet_length(tm_echo(t)) AS len, md5(tm_echo(t)) = md5(t) AS same,
-       tm_bytes_len(b) AS blen, tm_bytes_sum(b) AS bsum, md5(b) = md5(tm_make(5)) AS bsame
+       octet_length(tm_echo(t)) AS len, sha256(convert_to(tm_echo(t), 'UTF8')) = sha256(convert_to(t, 'UTF8')) AS same,
+       tm_bytes_len(b) AS blen, tm_bytes_sum(b) AS bsum, sha256(b) = sha256(tm_make(5)) AS bsame
   FROM tm_big ORDER BY id;
 SELECT octet_length(tm_echo(repeat('abcdefgh', 1024 * 1024))) AS len_8mb;
 SELECT tm_bytes_len(tm_make(20)) AS len_20mb;
