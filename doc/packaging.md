@@ -384,8 +384,14 @@ not confine the server the way it does on an installed system. Two virtual
 machines were therefore tested by hand (2026-11-18, x86_64, packages built
 from the tree, `plzig.compiler_sandbox = require`): a function was created
 (which runs the validator and the compiler in the sandbox) and called, and
-the audit or kernel log was read. This is one function on one system each,
-not the package test.
+the audit or kernel log was read. On the AlmaLinux system the regression
+suite of the source tree (26 tests) was also run against the installed
+package through the system's server, with a `trust` line added to
+`pg_hba.conf` for the run: all tests passed with the server in
+`postgresql_t`. That system is in FIPS mode, where PostgreSQL's `md5()`
+fails; the tests therefore make their test data with SHA-256. The other
+steps of the package test were not run there, and on Debian it was one
+function only.
 
 | System | Server confined as | Result |
 |---|---|---|
