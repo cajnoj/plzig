@@ -4,7 +4,7 @@
 # hardened/Valgrind/sanitizer/coverage/compiler/upgrade runs -- is in
 # docker/run-all.sh.)
 #
-#   docker/run-tests.sh                 # all six versions
+#   docker/run-tests.sh                 # all five versions
 #   docker/run-tests.sh 18.7 15.20      # a subset
 #
 # Environment:

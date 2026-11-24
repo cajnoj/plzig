@@ -23,7 +23,7 @@ statements, cursors). These are defences with known limits, not
 guarantees; the security model lists what they rely on, what was tested
 and what remains open.
 
-Supported servers: PostgreSQL 14 to 19 on Linux (x86_64 and aarch64).
+Supported servers: PostgreSQL 15 to 19 on Linux (x86_64 and aarch64).
 
 - [Source code and documentation](https://github.com/cajnoj/plzig)
 - [README: installation, types, examples](https://github.com/cajnoj/plzig#readme)

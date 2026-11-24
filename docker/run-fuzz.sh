@@ -39,7 +39,7 @@ all_targets="validator loader jsonb hostabi marshal pipeline"
 
 pgsrc() {
     case $1 in
-        14.25) echo vendor/pg-REL_14_25 ;; 15.20) echo vendor/pg-REL_15_20 ;;
+        15.20) echo vendor/pg-REL_15_20 ;;
         16.16) echo vendor/pg-REL_16_16 ;; 17.12) echo vendor/pg-REL_17_12 ;;
         18.7) echo vendor/postgres ;; 19.0) echo vendor/pg-REL_19_0 ;;
         *) echo "no vendored source for $1" >&2; return 1 ;;

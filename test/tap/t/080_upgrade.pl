@@ -3,7 +3,7 @@
 # compiled lazily in the new cluster (its own $PGDATA/plzig).
 #
 # Needs a second PostgreSQL installation with PL/Zig built for it:
-#   PLZIG_UPGRADE_OLD_PREFIX   e.g. /usr/lib/postgresql/14 (bin/ below it)
+#   PLZIG_UPGRADE_OLD_PREFIX   e.g. /usr/lib/postgresql/15 (bin/ below it)
 # Run by docker/run-all.sh in the upgrade image (docker/Dockerfile.upgrade);
 # skipped otherwise.
 use strict;

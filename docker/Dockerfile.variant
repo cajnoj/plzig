@@ -15,7 +15,7 @@
 #                                  docker/test-in-container.sh points GCOV_PREFIX
 #                                  at a place the sandboxed child may write
 #   --build-arg VARIANT=compilers  GCC and Clang for docker/compiler-checks.sh
-#   --build-arg VARIANT=upgrade    PostgreSQL 14 from PGDG next to the image's
+#   --build-arg VARIANT=upgrade    PostgreSQL 15 from PGDG next to the image's
 #                                  version, PL/Zig built for both
 #                                  (test/tap/t/080_upgrade.pl)
 #
@@ -34,8 +34,8 @@ RUN set -eux; \
     [ "$VARIANT" = coverage ] && pkgs="lcov"; \
     [ "$VARIANT" = compilers ] && pkgs="clang"; \
     if [ "$VARIANT" = upgrade ]; then \
-        sed -n 's/ main [0-9]*$/ main 14/p' /etc/apt/sources.list.d/pgdg.list > /etc/apt/sources.list.d/pgdg14.list; \
-        pkgs="postgresql-14 postgresql-server-dev-14"; \
+        sed -n 's/ main [0-9]*$/ main 15/p' /etc/apt/sources.list.d/pgdg.list > /etc/apt/sources.list.d/pgdg15.list; \
+        pkgs="postgresql-15 postgresql-server-dev-15"; \
     fi; \
     if [ -n "$pkgs" ]; then \
         apt-get update; \
@@ -63,11 +63,11 @@ RUN set -eux; \
         make -j"$(nproc)" WERROR=1 PLZIG_TESTING=1 ZIG="$PLZIG_TEST_ZIG" COPT="--coverage -O0" $ws; \
         make install PLZIG_TESTING=1 $ws ;; \
       upgrade) \
-        cp -a /src /tmp/plzig14; \
-        make -C /tmp/plzig14 clean; \
-        make -C /tmp/plzig14 -j"$(nproc)" WERROR=1 PG_CONFIG=/usr/lib/postgresql/14/bin/pg_config ZIG="$PLZIG_TEST_ZIG" $ws; \
-        make -C /tmp/plzig14 install PG_CONFIG=/usr/lib/postgresql/14/bin/pg_config $ws; \
-        rm -rf /tmp/plzig14 ;; \
+        cp -a /src /tmp/plzig15; \
+        make -C /tmp/plzig15 clean; \
+        make -C /tmp/plzig15 -j"$(nproc)" WERROR=1 PG_CONFIG=/usr/lib/postgresql/15/bin/pg_config ZIG="$PLZIG_TEST_ZIG" $ws; \
+        make -C /tmp/plzig15 install PG_CONFIG=/usr/lib/postgresql/15/bin/pg_config $ws; \
+        rm -rf /tmp/plzig15 ;; \
     esac; \
     chown -R postgres:postgres /src
 USER postgres

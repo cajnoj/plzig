@@ -462,35 +462,34 @@ pgbench (`-M prepared`, 15 s per client count, one measurement each, so no sprea
 
 Same tasks on the other versions (JIT off; see each version's meta.json for its run count). Median ms for PL/Zig and PL/pgSQL and their ratio; the full tables are in the CSV files.
 
-| Task | 18.7: PL/Zig / PL/pgSQL (ratio) | 14.25: PL/Zig / PL/pgSQL (ratio) | 19rc2: PL/Zig / PL/pgSQL (ratio) |
-|---|---:|---:|---:|
-| 1 x+1 | 241 / 219 (1.10) | 263 / 243 (1.08) | 233 / 217 (1.07) |
-| 2 mandelbrot | 30.2 / 140 (0.22) | 30.6 / 146 (0.21) | 30.1 / 148 (0.20) |
-| 2 primes | 62.9 / 227 (0.28) | 64.1 / 234 (0.27) | 63.4 / 243 (0.26) |
-| 3 build | 142 / 37.7 (3.77) | 145 / 39.6 (3.65) | 144 / 38.2 (3.76) |
-| 4 csv | 421 / 279 (1.51) | 434 / 287 (1.51) | 423 / 277 (1.53) |
-| 5 fnv1a | 10.2 / 44.7 (0.23) | 10.3 / 48.0 (0.21) | 10.4 / 46.3 (0.23) |
-| 6 levenshtein | 60.4 / 199 (0.30) | 61.5 / 199 (0.31) | 60.7 / 198 (0.31) |
-| 7 by_key | 270 / 266 (1.02) | 274 / 270 (1.02) | 259 / 259 (1.00) |
-| 8 cursor_sum | 201 / 152 (1.32) | 222 / 168 (1.32) | 195 / 149 (1.31) |
-| 9 insert_update | 178 / 167 (1.07) | 171 / 158 (1.09) | 169 / 158 (1.07) |
-| 10 bytea_1MB | 12.3 / 11.8 (1.04) | 11.6 / 11.0 (1.05) | 11.6 / 10.8 (1.07) |
-| 10 text_1MB | 41.1 / 32.3 (1.27) | 44.7 / 31.5 (1.42) | 44.5 / 35.8 (1.24) |
-| 13 jsonb_field | 164 / 30.1 (5.44) | 163 / 31.6 (5.15) | 159 / 29.6 (5.35) |
-| 13 numeric_loop | 318 / 30.4 (10.44) | 300 / 34.5 (8.70) | 293 / 28.4 (10.34) |
-| 13 timestamp_sum | 19.3 / 21.5 (0.90) | 20.5 / 22.4 (0.92) | 18.6 / 20.9 (0.89) |
+| Task | 18.7: PL/Zig / PL/pgSQL (ratio) | 19rc2: PL/Zig / PL/pgSQL (ratio) |
+|---|---:|---:|
+| 1 x+1 | 241 / 219 (1.10) | 233 / 217 (1.07) |
+| 2 mandelbrot | 30.2 / 140 (0.22) | 30.1 / 148 (0.20) |
+| 2 primes | 62.9 / 227 (0.28) | 63.4 / 243 (0.26) |
+| 3 build | 142 / 37.7 (3.77) | 144 / 38.2 (3.76) |
+| 4 csv | 421 / 279 (1.51) | 423 / 277 (1.53) |
+| 5 fnv1a | 10.2 / 44.7 (0.23) | 10.4 / 46.3 (0.23) |
+| 6 levenshtein | 60.4 / 199 (0.30) | 60.7 / 198 (0.31) |
+| 7 by_key | 270 / 266 (1.02) | 259 / 259 (1.00) |
+| 8 cursor_sum | 201 / 152 (1.32) | 195 / 149 (1.31) |
+| 9 insert_update | 178 / 167 (1.07) | 169 / 158 (1.07) |
+| 10 bytea_1MB | 12.3 / 11.8 (1.04) | 11.6 / 10.8 (1.07) |
+| 10 text_1MB | 41.1 / 32.3 (1.27) | 44.5 / 35.8 (1.24) |
+| 13 jsonb_field | 164 / 30.1 (5.44) | 159 / 29.6 (5.35) |
+| 13 numeric_loop | 318 / 30.4 (10.44) | 293 / 28.4 (10.34) |
+| 13 timestamp_sum | 19.3 / 21.5 (0.90) | 18.6 / 20.9 (0.89) |
 
 Task 11 on each version, PL/Zig, median ms:
 
-| | 18.7 | 14.25 | 19rc2 |
-|---|---:|---:|---:|
-| new session: first call | 1.35 | 1.80 | 1.28 |
-| CREATE FUNCTION (warm Zig cache) | 176 | 176 | 174 |
-| CREATE FUNCTION (cold Zig cache) | 1,936 | 1,806 | 1,843 |
+| | 18.7 | 19rc2 |
+|---|---:|---:|
+| new session: first call | 1.35 | 1.28 |
+| CREATE FUNCTION (warm Zig cache) | 176 | 174 |
+| CREATE FUNCTION (cold Zig cache) | 1,936 | 1,843 |
 
 ## Correctness gate
 
 * 18.7: 69 results compared against PL/pgSQL, all identical.
-* 14.25: 69 results compared against PL/pgSQL, all identical.
 * 19rc2: 69 results compared against PL/pgSQL, all identical.
 

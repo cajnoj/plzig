@@ -2,7 +2,7 @@
 # optionally with Valgrind support (-DUSE_VALGRIND), and PL/Zig built
 # against it.  --enable-cassert defines USE_ASSERT_CHECKING, and with it
 # pg_config_manual.h defines MEMORY_CONTEXT_CHECKING and CLOBBER_FREED_MEMORY
-# (checked in all six vendored versions); passing them with -D as well would
+# (checked in all five vendored versions); passing them with -D as well would
 # only make every extension build warn about the redefinition.
 #
 #   docker build -f docker/Dockerfile.hardened \

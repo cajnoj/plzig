@@ -25,7 +25,7 @@ interface is in [doc/abi.md](doc/abi.md).
 Supported servers: PostgreSQL 15, 16, 17, 18 and 19 (tested: 15.20,
 16.16, 17.12, 18.7, 19.0) on Linux x86_64; aarch64 is tested in CI on
 PostgreSQL 18.7 only. PostgreSQL 14 is end-of-life and no longer
-supported (pg_upgrade off it is still tested).
+supported.
 
 ### Compatibility
 
@@ -55,8 +55,8 @@ functions with [`plzig_check_all()`](#checking-every-function-plzig_check_all).
 
 RPM and Debian packages are built and tested from this repository
 (`packaging/`, `debian/`; [doc/packaging.md](doc/packaging.md)), but none
-are published yet. Built locally, for PGDG's PostgreSQL 14–19 on EL 8
-(14–18), EL 9, EL 10, Fedora 45, Debian 12 and 13, Ubuntu 22.04, 24.04 and
+are published yet. Built locally, for PGDG's PostgreSQL 15–19 on EL 8
+(15–18), EL 9, EL 10, Fedora 45, Debian 12 and 13, Ubuntu 22.04, 24.04 and
 26.04 (x86_64):
 
 * `plzig_<major>` (RPM) / `postgresql-<major>-plzig` (Debian), plus
@@ -195,8 +195,8 @@ Two entry points, both Docker-based, CI-friendly (no TTY, plain output, exit
 status non-zero on any failure):
 
 ```sh
-docker/run-tests.sh                    # fast matrix: all six versions
-docker/run-tests.sh 18.7 14.25         # a subset
+docker/run-tests.sh                    # fast matrix: all five versions
+docker/run-tests.sh 18.7 15.20         # a subset
 PLZIG_PARALLEL=1 docker/run-tests.sh   # versions in parallel
 
 docker/run-all.sh                      # every layer, every version, all variants
@@ -254,7 +254,7 @@ vendored source with `--enable-cassert` (`docker/Dockerfile.hardened`), a
 Valgrind run, an ASan/UBSan build of PL/Zig and WAMR, a gcov coverage run
 (report in `build/coverage/`), GCC and Clang builds with
 `-Wall -Wextra -Werror` (`docker/compiler-checks.sh`), `pg_upgrade` from
-PostgreSQL 14 (`docker/Dockerfile.variant`), a short run of every fuzz
+PostgreSQL 15 (`docker/Dockerfile.variant`), a short run of every fuzz
 target (`fuzz`), the clang static analyzer, cppcheck and a check of the
 binaries' hardening (`static`, `docker/static-analysis.sh`), and
 compilations on a full file system (`diskfull`,

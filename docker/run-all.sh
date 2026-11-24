@@ -1,7 +1,7 @@
 #!/bin/bash
 # Every test layer of PL/Zig (PLAN.md section 13 B), in Docker:
 #
-#   per version (default: all six), image docker/Dockerfile:
+#   per version (default: all five), image docker/Dockerfile:
 #     main         Zig unit tests, pg_regress, security checks, leak checks,
 #                  isolation tests, TAP tests (Landlock + seccomp required)
 #     no-landlock  checks with the Landlock syscalls blocked
@@ -17,7 +17,7 @@
 #                  (the PGDG server cannot run with libasan preloaded)
 #     coverage     gcov build, all layers, report in build/coverage/
 #     compilers    GCC and Clang, -Wall -Wextra -Werror
-#     upgrade      pg_upgrade from PostgreSQL 14 (PGDG) to the version
+#     upgrade      pg_upgrade from PostgreSQL 15 (PGDG) to the version
 #     fuzz         every fuzz target of fuzz/ for a short budget
 #                  (docker/run-fuzz.sh smoke; PLZIG_FUZZ_SMOKE seconds each)
 #     static       scan-build and cppcheck over src/, and the hardening of
@@ -29,7 +29,7 @@
 #   PLZIG_VERSIONS="18.7" PLZIG_VARIANTS="asan coverage" docker/run-all.sh
 #
 # Environment (all optional):
-#   PLZIG_VERSIONS     versions for the per-version jobs (default: all six)
+#   PLZIG_VERSIONS     versions for the per-version jobs (default: all five)
 #   PLZIG_VARIANTS     which variants to run (default: all; "" = none)
 #   PLZIG_HARDENED     versions for "hardened" (default: 18.7 19.0)
 #   PLZIG_VALGRIND_VERSION, PLZIG_ASAN_VERSION, PLZIG_COVERAGE_VERSION,
@@ -70,7 +70,7 @@ want() { [[ "$variants" == *" $1 "* ]]; }
 
 pgsrc() {   # vendored source tree of a version
     case $1 in
-        14.25) echo vendor/pg-REL_14_25 ;; 15.20) echo vendor/pg-REL_15_20 ;;
+        15.20) echo vendor/pg-REL_15_20 ;;
         16.16) echo vendor/pg-REL_16_16 ;; 17.12) echo vendor/pg-REL_17_12 ;;
         18.7) echo vendor/postgres ;; 19.0) echo vendor/pg-REL_19_0 ;;
         *) echo "no vendored source for $1" >&2; return 1 ;;
@@ -224,7 +224,7 @@ job_upgrade() {
     local v=$1
     build_variant upgrade "$v" || { echo "LAYER build: FAIL"; return 1; }
     drun -e PLZIG_LAYERS=tap -e PLZIG_TAP_TESTS=t/080_upgrade.pl -e PLZIG_PROVE_FLAGS=-v \
-        -e PLZIG_UPGRADE_OLD_PREFIX=/usr/lib/postgresql/14 "plzig-upgrade:$v"
+        -e PLZIG_UPGRADE_OLD_PREFIX=/usr/lib/postgresql/15 "plzig-upgrade:$v"
 }
 
 # ---- phase 1: the per-version images (variants build on them)
@@ -256,7 +256,7 @@ want valgrind && [ -n "$vg_v" ] && spawn "valgrind-$vg_v" job_valgrind "$vg_v"
 want asan && [ -n "$asan_v" ] && spawn "asan-$asan_v" job_asan "$asan_v"
 want coverage && [ -n "$cov_v" ] && spawn "coverage-$cov_v" job_coverage "$cov_v"
 want compilers && [ -n "$cc_v" ] && spawn "compilers-$cc_v" job_compilers "$cc_v"
-want upgrade && [ -n "$up_v" ] && spawn "upgrade-14-to-$up_v" job_upgrade "$up_v"
+want upgrade && [ -n "$up_v" ] && spawn "upgrade-15-to-$up_v" job_upgrade "$up_v"
 want fuzz && [ -n "$fz_v" ] && spawn "fuzz-$fz_v" job_fuzz "$fz_v"
 want static && [ -n "$st_v" ] && spawn "static-$st_v" job_static "$st_v"
 want diskfull && [ -n "$df_v" ] && spawn "diskfull-$df_v" job_diskfull "$df_v"

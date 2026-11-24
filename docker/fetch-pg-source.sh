@@ -3,13 +3,12 @@
 # directory the Docker scripts expect (docker/run-all.sh, run-fuzz.sh:
 # pgsrc()), for machines without the vendored trees, e.g. CI runners.
 # Clones the release tag and verifies the pinned commit.
-#   docker/fetch-pg-source.sh <version>  (14.25 [upgrade source only] 15.20 16.16 17.12 18.7 19.0)
+#   docker/fetch-pg-source.sh <version>       (15.20 16.16 17.12 18.7 19.0)
 # Does nothing if the directory already exists.
 set -eu
 cd "$(dirname "$0")/.."
 v=${1:?usage: docker/fetch-pg-source.sh <version>}
 case $v in
-    14.25) dir=vendor/pg-REL_14_25; tag=REL_14_25; commit=9adcf5f8847e0f485a390b1d3ea40688068d71bd ;;
     15.20) dir=vendor/pg-REL_15_20; tag=REL_15_20; commit=6a84c5137e820f46f0123276f546eec5b9a56e70 ;;
     16.16) dir=vendor/pg-REL_16_16; tag=REL_16_16; commit=c0534eb02de050ac1035ad7b3ad7c3f02980f153 ;;
     17.12) dir=vendor/pg-REL_17_12; tag=REL_17_12; commit=702b3dc86d35bcc08c8e23cffa3c4d9fe9d32c85 ;;

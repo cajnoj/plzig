@@ -164,7 +164,7 @@ CREATE FUNCTION uz.bad(x int) RETURNS int STRICT LANGUAGE plzig AS $f$
     return x;
 $f$;
 \set VERBOSITY terse
--- (PostgreSQL 14 and 15 report a missing schema, later versions a missing function)
+-- (PostgreSQL 15 reports a missing schema, later versions a missing function)
 DO $do$
 BEGIN
   CREATE FUNCTION uz.bad(x int) RETURNS int STRICT LANGUAGE plzig AS $f$

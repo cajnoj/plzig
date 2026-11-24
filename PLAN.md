@@ -25,8 +25,8 @@ git tags and as official Docker images):
 | 18    | 18.7           | `REL_18_7`   |
 | 19    | 19.0           | `REL_19_0`   |
 
-(PostgreSQL 14 is end-of-life and no longer a tested/supported target; the
-pg_upgrade test still upgrades off it. See deviation 63.)
+(PostgreSQL 14 is end-of-life and removed entirely — no longer a tested,
+supported or packaged target. See deviation 63.)
 
 Local reference material (git-ignored, no network needed afterwards):
 
@@ -438,7 +438,7 @@ Regress coverage:
 3. Call handler with scalar types; errors/traps; interrupts.
 4. SPI; text-I/O types; procedures; `DO`.
 5. Sandbox hardening (Landlock, rlimits); LRU; cleanup paths.
-6. Regress suite green on 14.25, 15.20, 16.16, 17.12, 18.7, 19 RC 2.
+6. Regress suite green on 15.20, 16.16, 17.12, 18.7, 19.0.
 7. Docs.
 
 ## 12. To-do after v1
@@ -761,7 +761,7 @@ build with `-Wall -Wextra -Werror`.
 | Unit (C) | SQL-callable test helpers built only with `PLZIG_TESTING` | Source generation, cache-key stability, path builders, error-text sanitising. |
 | Regress | `pg_regress` (existing suite, extended) | Types, NULLs, strict, text-I/O types, domains, procedures, `DO`, SPI, errors, every rejection path. |
 | Isolation | `pg_isolation_regress` | Concurrent compile of the same and of different functions, `CREATE OR REPLACE` while another session is executing, compile-lock waits and cancel. |
-| TAP | `PostgreSQL::Test::Cluster` | Restart and crash recovery (stale build dirs swept), hot standby (lazy compile on a replica), `pg_dump`/restore, `pg_upgrade` 14→19, `DROP EXTENSION`, cache dir deleted or made unwritable, compile timeout, `statement_timeout` and `pg_terminate_backend` during guest loops and during compiles. |
+| TAP | `PostgreSQL::Test::Cluster` | Restart and crash recovery (stale build dirs swept), hot standby (lazy compile on a replica), `pg_dump`/restore, `pg_upgrade` 15→19, `DROP EXTENSION`, cache dir deleted or made unwritable, compile timeout, `statement_timeout` and `pg_terminate_backend` during guest loops and during compiles. |
 | Build variants | Docker | `--enable-cassert` + `MEMORY_CONTEXT_CHECKING` + `CLOBBER_FREED_MEMORY` servers; x86_64 and aarch64; GCC and Clang. |
 | Leak checks | Regress under Valgrind (`USE_VALGRIND` server); fd and child-process counts before/after each test | Memory, descriptors, zombies. |
 
@@ -2910,12 +2910,14 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
     image set). The 19 target moved from `19rc2` to `19.0`
     (`postgres:19.0-bookworm`; vendored source tag `REL_19_0`, commit
     `5c839a2a08b9b87a349be97371fac6c5a2873b10`). PostgreSQL 14 reached
-    end of life and is no longer a tested or packaged target: dropped from
-    the CI matrix, `docker/run-{all,tests}.sh`, `packaging/distros.sh`
-    majors, the README and this table. 14 is kept only as the pg_upgrade
-    *migrate-from* source (`docker/Dockerfile.variant`, the `upgrade`
-    layer), so upgrading off the deprecated version stays tested. The
-    tested set is now 15.20, 16.16, 17.12, 18.7, 19.0.
+    end of life and is removed entirely: dropped from the CI matrix,
+    `docker/run-{all,tests,fuzz}.sh`, `docker/fetch-pg-source.sh`,
+    `packaging/distros.sh` majors, `packaging/image/build-image.sh`, the
+    README, this table, and the 14.25 benchmark data
+    (`doc/benchmarks/14.25/` and its columns in `doc/benchmarks.md`). The
+    pg_upgrade test (`docker/Dockerfile.variant`, the `upgrade` layer) now
+    upgrades from PostgreSQL 15 instead of 14. The tested set is now
+    15.20, 16.16, 17.12, 18.7, 19.0.
     * Not yet done (see TODO.md): regenerate `doc/benchmarks.md` for the
-      new set (drop 14.25, add 19.0 in place of 19rc2). The existing
-      benchmark data/report still shows 14.25 and 19rc2 as historical.
+      new set (measure 19.0 in place of 19rc2). The report still shows
+      19rc2 numbers as historical.
