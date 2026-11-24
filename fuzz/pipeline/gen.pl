@@ -134,7 +134,12 @@ my @fragments = (
 sub tokenize {
     my ($s) = @_;
     my @t;
-    while ($s =~ /\G(\s+|\/\/[^\n]*|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|\\\\[^\n]*|@"(?:\\.|[^"\\\n])*"|@?[A-Za-z_][A-Za-z0-9_]*|0x[0-9a-fA-F_]+|[0-9][0-9_.eE]*|.)/gcs) {
+    # *+ (possessive) on the string-literal groups: a very long literal
+    # otherwise exceeds Perl's regex recursion limit ("Complex regular
+    # subexpression recursion limit exceeded").  No backtracking is wanted
+    # here anyway -- the closing quote is never in the character class -- so
+    # possessive is equivalent and recursion-free.
+    while ($s =~ /\G(\s+|\/\/[^\n]*|"(?:\\.|[^"\\\n])*+"|'(?:\\.|[^'\\\n])*+'|\\\\[^\n]*|@"(?:\\.|[^"\\\n])*+"|@?[A-Za-z_][A-Za-z0-9_]*|0x[0-9a-fA-F_]+|[0-9][0-9_.eE]*|.)/gcs) {
         push @t, $1;
     }
     return @t;
