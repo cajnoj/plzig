@@ -21,8 +21,10 @@
 # (42P13), limits (54000), compile timeout (57014), encoding (22021,
 # 22P05).  A call: the function's own errors (P0001 raise, 38000 panic /
 # trap / returned Zig error, raise_error's 22023), statement_timeout
-# (57014), SQL errors of its queries and of the arguments it passes them
-# (22003, 22012, 42883, 42P01, 42703, 0A000, 25006, 42501, 22P02), memory
+# (57014), an unbound $n in SQL it builds (42P02), non-UTF-8 bytes in a
+# message or query it builds (22021), SQL errors of its queries and of the
+# arguments it passes them (22003, 22012, 42883, 42P01, 42703, 0A000,
+# 25006, 42501, 22P02), memory
 # (53200, 54000, 54001) -- plus, for the families that return values the
 # host checks, the errors of those checks (call_extra below), and for the
 # family with //#use directives a directive moved after code by a mutation
@@ -66,7 +68,10 @@ fz_set_conf cache_size_limit 64MB
 fz_reload
 
 create_ok=" ok 42501 42P13 54000 57014 22021 22P05 "
-call_ok=" ok P0001 38000 22023 57014 22003 22012 53200 54001 54000 42883 42P01 42703 0A000 25006 42501 22P02 "
+# 42P02: an unbound $n in SQL the body builds; 22021: non-UTF-8 bytes in a
+# message or query string the body builds (raise/notice/debug or SPI).  Both
+# are reachable from any family, so they are global, not per-family.
+call_ok=" ok P0001 38000 22023 57014 22003 22012 53200 54001 54000 42883 42P01 42703 0A000 25006 42501 22P02 22021 42P02 "
 declare -A create_extra=(
     # a //#use directive moved after the first line of code
     [use]=" 42601 "
@@ -80,9 +85,7 @@ declare -A call_extra=(
     [nat_ts]=" 22008 "
     # OUT varchar(5): too long for the typmod
     [row]=" 22001 "
-    # invalid UTF-8 from slicing a multibyte character
-    [text]=" 22021 "
-    [opt]=" 22021 "
+    # (22021, invalid UTF-8 from slicing a multibyte character, is in call_ok)
     # modified rows: NOT NULL (executor), varchar(4), numeric(8,2); OLD
     # returned for an INSERT (39P01, trigger protocol violated)
     [tg]=" 23502 22001 39P01 "

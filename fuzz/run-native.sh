@@ -7,7 +7,8 @@
 #
 # Writes to <outdir>: corpus/ (the seed corpus, plus a previous corpus if
 # given, plus everything new), artifacts/ (crash-*, leak-*, timeout-*,
-# oom-*: findings), fuzz.log, and for the loader a coverage report
+# oom-*: findings; slow-unit-*: an input that merely took long, kept for
+# triage but not a finding), fuzz.log, and for the loader a coverage report
 # (coverage.txt) of a replay of the final corpus.  Prints "FUZZ <target>:
 # PASS|FAIL (...)" and exits non-zero on a finding.
 #
@@ -58,10 +59,16 @@ cov=$(grep -aoE 'cov: [0-9]+' "$out/fuzz.log" | tail -1 | awk '{ print $2 }')
 ft=$(grep -aoE 'ft: [0-9]+' "$out/fuzz.log" | tail -1 | awk '{ print $2 }')
 counters=$(sed -n 's/.*(\([0-9]*\) inline 8-bit counters).*/\1/p' "$out/fuzz.log" | head -1)
 ncorp=$(find "$out/corpus" -type f | wc -l)
-nart=$(find "$out/artifacts" -type f | wc -l)
+# libFuzzer writes crash-/leak-/timeout-/oom-* for findings, and slow-unit-*
+# for an input that only took long (informational: the process still exits
+# 0).  Only the former count as findings; slow units are kept and reported.
+nart=$(find "$out/artifacts" -type f ! -name 'slow-unit-*' | wc -l)
+nslow=$(find "$out/artifacts" -type f -name 'slow-unit-*' | wc -l)
+slownote=""
+[ "$nslow" -gt 0 ] && slownote=", $nslow slow unit(s)"
 # cov: counters hit (only reported with a PC table, i.e. not for the Zig
 # target), ft: libFuzzer features (counters x hit-count buckets)
-summary="${elapsed}s, ${execs:-?} executions, coverage ${cov:-n/a} of ${counters:-?} counters, ${ft:-?} features, corpus $ncorp files, jobs $jobs"
+summary="${elapsed}s, ${execs:-?} executions, coverage ${cov:-n/a} of ${counters:-?} counters, ${ft:-?} features, corpus $ncorp files, jobs $jobs$slownote"
 
 if [ "$target" = loader ] && [ -x "$bin/fuzz_loader_cov" ]; then
     # source coverage of the final corpus: plzig_runtime.c and WAMR's loader,
@@ -89,6 +96,10 @@ if [ $rc -ne 0 ]; then
     tail -30 "$out/fuzz.log"
     echo "FUZZ $target: FAIL (libFuzzer exit status $rc; $summary)"
     exit 1
+fi
+if [ "$nslow" -gt 0 ]; then
+    echo "note: $nslow slow unit(s) kept in $out/artifacts (took >10s to run, not a finding); replay with $bin/fuzz_$target <file> to characterise"
+    ls -la "$out"/artifacts/slow-unit-* 2>/dev/null
 fi
 echo "FUZZ $target: PASS ($summary)"
 exit 0

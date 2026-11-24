@@ -64,13 +64,19 @@ run_one() {   # run_one <target> <seconds>
     dest=build/fuzz/$t
     c=plzig-fuzz-run-$t-$$
     docker rm -f "$c" >/dev/null 2>&1
+    # forward a fixed seed so a finding can be replayed (fuzz/README.md); the
+    # SQL targets use it (fz_seed), the native ones ignore it
+    seedenv=()
+    [ -n "${PLZIG_FUZZ_SEED:-}" ] && seedenv=(-e PLZIG_FUZZ_SEED="$PLZIG_FUZZ_SEED")
     case $t in
         validator|loader|jsonb)
             docker create "${plat[@]}" --init --name "$c" -e PLZIG_FUZZ_JOBS="${PLZIG_FUZZ_JOBS:-1}" \
+                "${seedenv[@]}" \
                 "plzig-fuzz:$v" bash /src/fuzz/run-native.sh "$t" "$s" /tmp/fuzz-out /tmp/fuzz-prev >/dev/null ;;
         hostabi|marshal|pipeline)
             docker create "${plat[@]}" --init --name "$c" -e PLZIG_LAYERS=fuzz -e PLZIG_ASAN=1 \
                 -e PLZIG_FUZZ_TARGET="$t" -e PLZIG_FUZZ_SECONDS="$s" -e PLZIG_FUZZ_OUT=/tmp/fuzz-out \
+                "${seedenv[@]}" \
                 "plzig-fuzz:$v" >/dev/null ;;
         *) echo "unknown target $t"; return 2 ;;
     esac || { echo "FUZZ $t: FAIL (could not create the container)"; return 1; }
