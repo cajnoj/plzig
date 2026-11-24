@@ -5,7 +5,7 @@
 # docker/run-all.sh.)
 #
 #   docker/run-tests.sh                 # all six versions
-#   docker/run-tests.sh 18.7 14.25      # a subset
+#   docker/run-tests.sh 18.7 15.20      # a subset
 #
 # Environment:
 #   PLZIG_PARALLEL=1           build/test versions concurrently
@@ -26,7 +26,7 @@ cd "$(dirname "$0")/.."
 
 versions=("$@")
 if [ ${#versions[@]} -eq 0 ]; then
-    versions=(14.25 15.20 16.16 17.12 18.7 19rc2)
+    versions=(15.20 16.16 17.12 18.7 19.0)
 fi
 
 logdir=build/test-logs

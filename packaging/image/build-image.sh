@@ -16,7 +16,7 @@ eval "$(sh packaging/versions.sh)"
 fail=0
 for m in "${majors[@]}"; do
     case $m in
-        14) v=14.25 ;; 15) v=15.20 ;; 16) v=16.16 ;; 17) v=17.12 ;; 18) v=18.7 ;; 19) v=19rc2 ;;
+        15) v=15.20 ;; 16) v=16.16 ;; 17) v=17.12 ;; 18) v=18.7 ;; 19) v=19.0 ;;
         *) echo "unknown major $m" >&2; exit 2 ;;
     esac
     ctx=$(mktemp -d build/image-ctx.XXXXXX)

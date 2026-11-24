@@ -19,12 +19,14 @@ git tags and as official Docker images):
 
 | Major | Version tested | Tag          |
 |-------|----------------|--------------|
-| 14    | 14.25          | `REL_14_25`  |
 | 15    | 15.20          | `REL_15_20`  |
 | 16    | 16.16          | `REL_16_16`  |
 | 17    | 17.12          | `REL_17_12`  |
 | 18    | 18.7           | `REL_18_7`   |
-| 19    | 19 RC 2        | `REL_19_RC2` |
+| 19    | 19.0           | `REL_19_0`   |
+
+(PostgreSQL 14 is end-of-life and no longer a tested/supported target; the
+pg_upgrade test still upgrades off it. See deviation 63.)
 
 Local reference material (git-ignored, no network needed afterwards):
 
@@ -2900,3 +2902,20 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       `--pin` option are the only new code; both are benchmark-only and
       excluded from every shipped and test artifact (`.gitattributes`,
       `.dockerignore`).
+63. **Supported versions: PostgreSQL 19.0 (GA) and PostgreSQL 14 dropped
+    (2026-11-24).** PostgreSQL 19 was released; PGDG removed the
+    `19~rc2-1.pgdg12+1` package, so the `postgres:19rc2-bookworm`-based
+    image no longer built (`E: Version '19~rc2-1.pgdg12+1' ... was not
+    found`), which failed every per-version CI job (each builds the shared
+    image set). The 19 target moved from `19rc2` to `19.0`
+    (`postgres:19.0-bookworm`; vendored source tag `REL_19_0`, commit
+    `5c839a2a08b9b87a349be97371fac6c5a2873b10`). PostgreSQL 14 reached
+    end of life and is no longer a tested or packaged target: dropped from
+    the CI matrix, `docker/run-{all,tests}.sh`, `packaging/distros.sh`
+    majors, the README and this table. 14 is kept only as the pg_upgrade
+    *migrate-from* source (`docker/Dockerfile.variant`, the `upgrade`
+    layer), so upgrading off the deprecated version stays tested. The
+    tested set is now 15.20, 16.16, 17.12, 18.7, 19.0.
+    * Not yet done (see TODO.md): regenerate `doc/benchmarks.md` for the
+      new set (drop 14.25, add 19.0 in place of 19rc2). The existing
+      benchmark data/report still shows 14.25 and 19rc2 as historical.

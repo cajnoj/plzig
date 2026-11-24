@@ -200,18 +200,19 @@ source tarball. The output directory holds the packages, source packages,
 
 | `<distro>` | Image | PostgreSQL majors (PGDG) |
 |---|---|---|
-| `el8` | `almalinux:8` | 14 15 16 17 18 (PGDG has no 19 for EL 8) |
-| `el9` | `almalinux:9` | 14–19 |
-| `el10` | `almalinux:10` | 14–19 |
-| `fedora45` | `fedora:45` | 14–19 |
-| `debian12` | `debian:bookworm` | 14–19 |
-| `debian13` | `debian:trixie` | 14–19 |
-| `ubuntu22.04` | `ubuntu:22.04` | 14–19 |
-| `ubuntu24.04` | `ubuntu:24.04` | 14–19 |
-| `ubuntu26.04` | `ubuntu:26.04` | 14–19 |
+| `el8` | `almalinux:8` | 15 16 17 18 (PGDG has no 19 for EL 8) |
+| `el9` | `almalinux:9` | 15–19 |
+| `el10` | `almalinux:10` | 15–19 |
+| `fedora45` | `fedora:45` | 15–19 |
+| `debian12` | `debian:bookworm` | 15–19 |
+| `debian13` | `debian:trixie` | 15–19 |
+| `ubuntu22.04` | `ubuntu:22.04` | 15–19 |
+| `ubuntu24.04` | `ubuntu:24.04` | 15–19 |
+| `ubuntu26.04` | `ubuntu:26.04` | 15–19 |
 
-PostgreSQL 19 is 19rc2: PGDG publishes it in the yum `testing` tree and in
-the apt component `19`. Only x86_64 was built and tested; the specs and
+PostgreSQL 19 is 19.0 (GA): PGDG publishes it in the yum tree and in the
+apt component `19`. PostgreSQL 14 reached end of life and is dropped from
+the packaged majors. Only x86_64 was built and tested; the specs and
 `debian/control` also declare aarch64/arm64 (both Zig checksums are pinned),
 untested.
 

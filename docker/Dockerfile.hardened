@@ -6,8 +6,8 @@
 # only make every extension build warn about the redefinition.
 #
 #   docker build -f docker/Dockerfile.hardened \
-#       --build-context pgsrc=vendor/pg-REL_14_25 [--build-arg VALGRIND=1] \
-#       -t plzig-hardened:14.25 .
+#       --build-context pgsrc=vendor/pg-REL_15_20 [--build-arg VALGRIND=1] \
+#       -t plzig-hardened:15.20 .
 #
 # The PostgreSQL source comes in as a named build context because the main
 # context (.dockerignore) excludes vendor/postgres and vendor/pg-*.

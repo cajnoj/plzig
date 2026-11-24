@@ -31,10 +31,10 @@
 # Environment (all optional):
 #   PLZIG_VERSIONS     versions for the per-version jobs (default: all six)
 #   PLZIG_VARIANTS     which variants to run (default: all; "" = none)
-#   PLZIG_HARDENED     versions for "hardened" (default: 14.25 18.7 19rc2)
+#   PLZIG_HARDENED     versions for "hardened" (default: 18.7 19.0)
 #   PLZIG_VALGRIND_VERSION, PLZIG_ASAN_VERSION, PLZIG_COVERAGE_VERSION,
 #   PLZIG_COMPILERS_VERSION   one version each (default: 18.7)
-#   PLZIG_UPGRADE_VERSION     the new major for pg_upgrade (default: 19rc2)
+#   PLZIG_UPGRADE_VERSION     the new major for pg_upgrade (default: 19.0)
 #   PLZIG_FUZZ_VERSION, PLZIG_STATIC_VERSION, PLZIG_DISKFULL_VERSION
 #                      one version each (default: 18.7)
 #   PLZIG_FUZZ_SMOKE   seconds per fuzz target in the "fuzz" variant (default 60)
@@ -47,15 +47,15 @@
 set -u
 cd "$(dirname "$0")/.."
 
-all_versions=(14.25 15.20 16.16 17.12 18.7 19rc2)
+all_versions=(15.20 16.16 17.12 18.7 19.0)
 read -r -a versions <<<"${PLZIG_VERSIONS:-${all_versions[*]}}"
 variants=" ${PLZIG_VARIANTS-hardened valgrind asan coverage compilers upgrade fuzz static diskfull} "
-read -r -a hardened <<<"${PLZIG_HARDENED:-14.25 18.7 19rc2}"
+read -r -a hardened <<<"${PLZIG_HARDENED:-18.7 19.0}"
 vg_v=${PLZIG_VALGRIND_VERSION:-18.7}
 asan_v=${PLZIG_ASAN_VERSION:-18.7}
 cov_v=${PLZIG_COVERAGE_VERSION:-18.7}
 cc_v=${PLZIG_COMPILERS_VERSION:-18.7}
-up_v=${PLZIG_UPGRADE_VERSION:-19rc2}
+up_v=${PLZIG_UPGRADE_VERSION:-19.0}
 fz_v=${PLZIG_FUZZ_VERSION:-18.7}
 st_v=${PLZIG_STATIC_VERSION:-18.7}
 df_v=${PLZIG_DISKFULL_VERSION:-18.7}
@@ -72,7 +72,7 @@ pgsrc() {   # vendored source tree of a version
     case $1 in
         14.25) echo vendor/pg-REL_14_25 ;; 15.20) echo vendor/pg-REL_15_20 ;;
         16.16) echo vendor/pg-REL_16_16 ;; 17.12) echo vendor/pg-REL_17_12 ;;
-        18.7) echo vendor/postgres ;; 19rc2) echo vendor/pg-REL_19_RC2 ;;
+        18.7) echo vendor/postgres ;; 19.0) echo vendor/pg-REL_19_0 ;;
         *) echo "no vendored source for $1" >&2; return 1 ;;
     esac
 }

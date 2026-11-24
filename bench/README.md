@@ -21,7 +21,7 @@ is mounted into the containers (files go in and out with `docker cp`).
 ```sh
 bench/run.sh --quick                     # smoke test: small data, 5 runs, minutes
 bench/run.sh --cpus 0-11                 # PG 18.7, full size, JIT off and on, pgbench
-bench/run.sh --versions "14.25 19rc2" --jit off --runs 10 --clients ""
+bench/run.sh --versions "15.20 19.0" --jit off --runs 10 --clients ""
 bench/run.sh --tasks 1,7,10              # a subset (11 = start-up, 12 = memory)
 bench/run.sh --report-only build/bench/<run> --publish   # rewrite doc/benchmarks.md
 bench/run.sh --help                      # every option
@@ -41,7 +41,7 @@ the report does not also move the numbers between tasks within one run:
 
 ```sh
 bench/run.sh --cpus 0-11 --pin 8 --clients 1,2,4,8 --out build/bench/v62-pg18
-bench/run.sh --cpus 0-11 --pin 8 --versions "14.25 19rc2" --jit off --runs 10 --clients "" --out build/bench/v62-xver
+bench/run.sh --cpus 0-11 --pin 8 --versions "15.20 19.0" --jit off --runs 10 --clients "" --out build/bench/v62-xver
 bench/run.sh --cpus 0-11 --pin 8 --tasks 1,2,8 --jit off,on,force --clients "" --out build/bench/v62-jit
 # combined: build/bench/v62-pg18 plus the two version directories of v62-xver,
 # and build/bench/v62-jit/18.7 as v62-pg18/jit/18.7

@@ -22,9 +22,10 @@ what remains open is in [Security model](#security-model) and
 reasoning behind every decision are in [PLAN.md](PLAN.md); the host/guest
 interface is in [doc/abi.md](doc/abi.md).
 
-Supported servers: PostgreSQL 14, 15, 16, 17, 18 and 19 (tested: 14.25,
-15.20, 16.16, 17.12, 18.7, 19rc2) on Linux x86_64; aarch64 is tested in
-CI on PostgreSQL 18.7 only.
+Supported servers: PostgreSQL 15, 16, 17, 18 and 19 (tested: 15.20,
+16.16, 17.12, 18.7, 19.0) on Linux x86_64; aarch64 is tested in CI on
+PostgreSQL 18.7 only. PostgreSQL 14 is end-of-life and no longer
+supported (pg_upgrade off it is still tested).
 
 ### Compatibility
 

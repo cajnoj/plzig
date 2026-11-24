@@ -3,7 +3,7 @@
 #
 #   bench/run.sh                         # PG 18.7, full size, report in the run directory
 #   bench/run.sh --quick                 # small sizes, few runs (a smoke test, minutes)
-#   bench/run.sh --versions "18.7 14.25 19rc2" --tasks 1,7,10
+#   bench/run.sh --versions "18.7 19.0" --tasks 1,7,10
 #   bench/run.sh --publish ...           # also write doc/benchmarks.md and doc/benchmarks/
 #   bench/run.sh --report-only DIR [--publish]   # regenerate the report from a run directory
 #
