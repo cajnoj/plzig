@@ -129,11 +129,24 @@ jobs:
   licenses:
     name: License material (source tree and tarball)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      # test-licenses.sh downloads the pinned WAMR tarball and the Zig
+      # tarballs for both architectures (~100 MB) into build/dl/ unless they
+      # are already there; cache them so the job does not re-download every
+      # run (the download pushed it past its old 15-minute timeout). The pins
+      # live in the Makefile, so it keys the cache; check-licenses.sh still
+      # verifies every tarball's SHA-256, so a stale cache cannot pass.
+      - name: Cache the pinned WAMR and Zig tarballs
+        uses: actions/cache@v6
+        with:
+          path: build/dl
+          key: licenses-dl-${{ hashFiles('Makefile') }}
+          restore-keys: licenses-dl-
 
       - name: Check
         run: packaging/test-licenses.sh
