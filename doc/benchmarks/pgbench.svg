@@ -46,90 +46,90 @@
 <text x="60" y="70" class="lab">Task 1: trivial function, 20 000 rows per transaction</text>
 <line x1="60" y1="320.0" x2="400" y2="320.0" class="grid"/>
 <text x="54" y="324.0" text-anchor="end">0</text>
-<line x1="60" y1="279.0" x2="400" y2="279.0" class="grid"/>
-<text x="54" y="283.0" text-anchor="end">500</text>
-<line x1="60" y1="238.0" x2="400" y2="238.0" class="grid"/>
-<text x="54" y="242.0" text-anchor="end">1,000</text>
-<line x1="60" y1="197.0" x2="400" y2="197.0" class="grid"/>
-<text x="54" y="201.0" text-anchor="end">1,500</text>
-<line x1="60" y1="156.0" x2="400" y2="156.0" class="grid"/>
-<text x="54" y="160.0" text-anchor="end">2,000</text>
-<line x1="60" y1="115.0" x2="400" y2="115.0" class="grid"/>
-<text x="54" y="119.0" text-anchor="end">2,500</text>
+<line x1="60" y1="278.7" x2="400" y2="278.7" class="grid"/>
+<text x="54" y="282.7" text-anchor="end">500</text>
+<line x1="60" y1="237.4" x2="400" y2="237.4" class="grid"/>
+<text x="54" y="241.4" text-anchor="end">1,000</text>
+<line x1="60" y1="196.1" x2="400" y2="196.1" class="grid"/>
+<text x="54" y="200.1" text-anchor="end">1,500</text>
+<line x1="60" y1="154.7" x2="400" y2="154.7" class="grid"/>
+<text x="54" y="158.7" text-anchor="end">2,000</text>
+<line x1="60" y1="113.4" x2="400" y2="113.4" class="grid"/>
+<text x="54" y="117.4" text-anchor="end">2,500</text>
 <text x="60.0" y="338" text-anchor="middle">1</text>
 <text x="173.3" y="338" text-anchor="middle">2</text>
 <text x="286.7" y="338" text-anchor="middle">4</text>
 <text x="400.0" y="338" text-anchor="middle">8</text>
 <text x="230" y="356" text-anchor="middle">clients</text>
 <text x="14" y="200" text-anchor="middle" transform="rotate(-90 14 200)">transactions per second</text>
-<path d="M60.0,264.2 L173.3,219.2 L286.7,147.8 L400.0,97.8" class="s-sql" stroke-width="2"/>
-<circle cx="60.0" cy="264.2" r="4" class="f-sql ring"><title>SQL, 1 clients: 681 tps</title></circle>
-<circle cx="173.3" cy="219.2" r="4" class="f-sql ring"><title>SQL, 2 clients: 1,230 tps</title></circle>
-<circle cx="286.7" cy="147.8" r="4" class="f-sql ring"><title>SQL, 4 clients: 2,100 tps</title></circle>
-<circle cx="400.0" cy="97.8" r="4" class="f-sql ring"><title>SQL, 8 clients: 2,710 tps</title></circle>
-<path d="M60.0,304.4 L173.3,291.0 L286.7,269.3 L400.0,252.8" class="s-plpgsql" stroke-width="2"/>
-<circle cx="60.0" cy="304.4" r="4" class="f-plpgsql ring"><title>PL/pgSQL, 1 clients: 191 tps</title></circle>
-<circle cx="173.3" cy="291.0" r="4" class="f-plpgsql ring"><title>PL/pgSQL, 2 clients: 354 tps</title></circle>
-<circle cx="286.7" cy="269.3" r="4" class="f-plpgsql ring"><title>PL/pgSQL, 4 clients: 619 tps</title></circle>
-<circle cx="400.0" cy="252.8" r="4" class="f-plpgsql ring"><title>PL/pgSQL, 8 clients: 819 tps</title></circle>
-<path d="M60.0,313.3 L173.3,307.2 L286.7,297.0 L400.0,290.8" class="s-plpython" stroke-width="2"/>
-<circle cx="60.0" cy="313.3" r="4" class="f-plpython ring"><title>PL/Python, 1 clients: 82 tps</title></circle>
-<circle cx="173.3" cy="307.2" r="4" class="f-plpython ring"><title>PL/Python, 2 clients: 156 tps</title></circle>
-<circle cx="286.7" cy="297.0" r="4" class="f-plpython ring"><title>PL/Python, 4 clients: 280 tps</title></circle>
-<circle cx="400.0" cy="290.8" r="4" class="f-plpython ring"><title>PL/Python, 8 clients: 356 tps</title></circle>
-<path d="M60.0,314.0 L173.3,308.6 L286.7,299.8 L400.0,293.9" class="s-plperl" stroke-width="2"/>
-<circle cx="60.0" cy="314.0" r="4" class="f-plperl ring"><title>PL/Perl, 1 clients: 73 tps</title></circle>
-<circle cx="173.3" cy="308.6" r="4" class="f-plperl ring"><title>PL/Perl, 2 clients: 139 tps</title></circle>
-<circle cx="286.7" cy="299.8" r="4" class="f-plperl ring"><title>PL/Perl, 4 clients: 246 tps</title></circle>
-<circle cx="400.0" cy="293.9" r="4" class="f-plperl ring"><title>PL/Perl, 8 clients: 319 tps</title></circle>
-<path d="M60.0,306.2 L173.3,293.9 L286.7,273.7 L400.0,258.4" class="s-plzig" stroke-width="2"/>
-<circle cx="60.0" cy="306.2" r="4" class="f-plzig ring"><title>PL/Zig, 1 clients: 168 tps</title></circle>
-<circle cx="173.3" cy="293.9" r="4" class="f-plzig ring"><title>PL/Zig, 2 clients: 318 tps</title></circle>
-<circle cx="286.7" cy="273.7" r="4" class="f-plzig ring"><title>PL/Zig, 4 clients: 565 tps</title></circle>
-<circle cx="400.0" cy="258.4" r="4" class="f-plzig ring"><title>PL/Zig, 8 clients: 751 tps</title></circle>
+<path d="M60.0,265.7 L173.3,219.4 L286.7,146.9 L400.0,97.8" class="s-sql" stroke-width="2"/>
+<circle cx="60.0" cy="265.7" r="4" class="f-sql ring"><title>SQL, 1 clients: 657 tps</title></circle>
+<circle cx="173.3" cy="219.4" r="4" class="f-sql ring"><title>SQL, 2 clients: 1,217 tps</title></circle>
+<circle cx="286.7" cy="146.9" r="4" class="f-sql ring"><title>SQL, 4 clients: 2,095 tps</title></circle>
+<circle cx="400.0" cy="97.8" r="4" class="f-sql ring"><title>SQL, 8 clients: 2,689 tps</title></circle>
+<path d="M60.0,305.0 L173.3,291.0 L286.7,268.9 L400.0,253.9" class="s-plpgsql" stroke-width="2"/>
+<circle cx="60.0" cy="305.0" r="4" class="f-plpgsql ring"><title>PL/pgSQL, 1 clients: 181 tps</title></circle>
+<circle cx="173.3" cy="291.0" r="4" class="f-plpgsql ring"><title>PL/pgSQL, 2 clients: 351 tps</title></circle>
+<circle cx="286.7" cy="268.9" r="4" class="f-plpgsql ring"><title>PL/pgSQL, 4 clients: 618 tps</title></circle>
+<circle cx="400.0" cy="253.9" r="4" class="f-plpgsql ring"><title>PL/pgSQL, 8 clients: 800 tps</title></circle>
+<path d="M60.0,313.2 L173.3,307.4 L286.7,296.6 L400.0,291.1" class="s-plpython" stroke-width="2"/>
+<circle cx="60.0" cy="313.2" r="4" class="f-plpython ring"><title>PL/Python, 1 clients: 82 tps</title></circle>
+<circle cx="173.3" cy="307.4" r="4" class="f-plpython ring"><title>PL/Python, 2 clients: 152 tps</title></circle>
+<circle cx="286.7" cy="296.6" r="4" class="f-plpython ring"><title>PL/Python, 4 clients: 283 tps</title></circle>
+<circle cx="400.0" cy="291.1" r="4" class="f-plpython ring"><title>PL/Python, 8 clients: 350 tps</title></circle>
+<path d="M60.0,314.2 L173.3,308.6 L286.7,300.1 L400.0,294.2" class="s-plperl" stroke-width="2"/>
+<circle cx="60.0" cy="314.2" r="4" class="f-plperl ring"><title>PL/Perl, 1 clients: 70 tps</title></circle>
+<circle cx="173.3" cy="308.6" r="4" class="f-plperl ring"><title>PL/Perl, 2 clients: 138 tps</title></circle>
+<circle cx="286.7" cy="300.1" r="4" class="f-plperl ring"><title>PL/Perl, 4 clients: 241 tps</title></circle>
+<circle cx="400.0" cy="294.2" r="4" class="f-plperl ring"><title>PL/Perl, 8 clients: 313 tps</title></circle>
+<path d="M60.0,306.7 L173.3,293.8 L286.7,273.8 L400.0,258.8" class="s-plzig" stroke-width="2"/>
+<circle cx="60.0" cy="306.7" r="4" class="f-plzig ring"><title>PL/Zig, 1 clients: 161 tps</title></circle>
+<circle cx="173.3" cy="293.8" r="4" class="f-plzig ring"><title>PL/Zig, 2 clients: 317 tps</title></circle>
+<circle cx="286.7" cy="273.8" r="4" class="f-plzig ring"><title>PL/Zig, 4 clients: 560 tps</title></circle>
+<circle cx="400.0" cy="258.8" r="4" class="f-plzig ring"><title>PL/Zig, 8 clients: 741 tps</title></circle>
 <text x="480" y="70" class="lab">Task 7: 1 000 key lookups per transaction</text>
 <line x1="480" y1="320.0" x2="820" y2="320.0" class="grid"/>
 <text x="474" y="324.0" text-anchor="end">0</text>
-<line x1="480" y1="248.0" x2="820" y2="248.0" class="grid"/>
-<text x="474" y="252.0" text-anchor="end">500</text>
-<line x1="480" y1="175.9" x2="820" y2="175.9" class="grid"/>
-<text x="474" y="179.9" text-anchor="end">1,000</text>
-<line x1="480" y1="103.9" x2="820" y2="103.9" class="grid"/>
-<text x="474" y="107.9" text-anchor="end">1,500</text>
+<line x1="480" y1="245.3" x2="820" y2="245.3" class="grid"/>
+<text x="474" y="249.3" text-anchor="end">500</text>
+<line x1="480" y1="170.6" x2="820" y2="170.6" class="grid"/>
+<text x="474" y="174.6" text-anchor="end">1,000</text>
+<line x1="480" y1="95.9" x2="820" y2="95.9" class="grid"/>
+<text x="474" y="99.9" text-anchor="end">1,500</text>
 <text x="480.0" y="338" text-anchor="middle">1</text>
 <text x="593.3" y="338" text-anchor="middle">2</text>
 <text x="706.7" y="338" text-anchor="middle">4</text>
 <text x="820.0" y="338" text-anchor="middle">8</text>
 <text x="650" y="356" text-anchor="middle">clients</text>
 <text x="434" y="200" text-anchor="middle" transform="rotate(-90 434 200)">transactions per second</text>
-<path d="M480.0,304.2 L593.3,290.5 L706.7,269.1 L820.0,251.2" class="s-sql" stroke-width="2"/>
-<circle cx="480.0" cy="304.2" r="4" class="f-sql ring"><title>SQL, 1 clients: 110 tps</title></circle>
-<circle cx="593.3" cy="290.5" r="4" class="f-sql ring"><title>SQL, 2 clients: 205 tps</title></circle>
-<circle cx="706.7" cy="269.1" r="4" class="f-sql ring"><title>SQL, 4 clients: 353 tps</title></circle>
-<circle cx="820.0" cy="251.2" r="4" class="f-sql ring"><title>SQL, 8 clients: 477 tps</title></circle>
-<path d="M480.0,268.5 L593.3,224.5 L706.7,155.1 L820.0,97.8" class="s-plpgsql" stroke-width="2"/>
-<circle cx="480.0" cy="268.5" r="4" class="f-plpgsql ring"><title>PL/pgSQL, 1 clients: 357 tps</title></circle>
-<circle cx="593.3" cy="224.5" r="4" class="f-plpgsql ring"><title>PL/pgSQL, 2 clients: 663 tps</title></circle>
-<circle cx="706.7" cy="155.1" r="4" class="f-plpgsql ring"><title>PL/pgSQL, 4 clients: 1,145 tps</title></circle>
-<circle cx="820.0" cy="97.8" r="4" class="f-plpgsql ring"><title>PL/pgSQL, 8 clients: 1,542 tps</title></circle>
-<path d="M480.0,286.3 L593.3,256.9 L706.7,209.5 L820.0,167.7" class="s-plpython" stroke-width="2"/>
-<circle cx="480.0" cy="286.3" r="4" class="f-plpython ring"><title>PL/Python, 1 clients: 234 tps</title></circle>
-<circle cx="593.3" cy="256.9" r="4" class="f-plpython ring"><title>PL/Python, 2 clients: 438 tps</title></circle>
-<circle cx="706.7" cy="209.5" r="4" class="f-plpython ring"><title>PL/Python, 4 clients: 767 tps</title></circle>
-<circle cx="820.0" cy="167.7" r="4" class="f-plpython ring"><title>PL/Python, 8 clients: 1,057 tps</title></circle>
-<path d="M480.0,288.6 L593.3,261.6 L706.7,219.8 L820.0,178.6" class="s-plperl" stroke-width="2"/>
-<circle cx="480.0" cy="288.6" r="4" class="f-plperl ring"><title>PL/Perl, 1 clients: 218 tps</title></circle>
-<circle cx="593.3" cy="261.6" r="4" class="f-plperl ring"><title>PL/Perl, 2 clients: 406 tps</title></circle>
-<circle cx="706.7" cy="219.8" r="4" class="f-plperl ring"><title>PL/Perl, 4 clients: 695 tps</title></circle>
-<circle cx="820.0" cy="178.6" r="4" class="f-plperl ring"><title>PL/Perl, 8 clients: 982 tps</title></circle>
-<path d="M480.0,269.5 L593.3,227.3 L706.7,159.1 L820.0,102.3" class="s-plzig" stroke-width="2"/>
-<circle cx="480.0" cy="269.5" r="4" class="f-plzig ring"><title>PL/Zig, 1 clients: 351 tps</title></circle>
-<circle cx="593.3" cy="227.3" r="4" class="f-plzig ring"><title>PL/Zig, 2 clients: 643 tps</title></circle>
-<circle cx="706.7" cy="159.1" r="4" class="f-plzig ring"><title>PL/Zig, 4 clients: 1,117 tps</title></circle>
-<circle cx="820.0" cy="102.3" r="4" class="f-plzig ring"><title>PL/Zig, 8 clients: 1,511 tps</title></circle>
-<path d="M480.0,310.4 L593.3,301.7 L706.7,287.0 L820.0,275.8" class="s-plzig" stroke-width="2" stroke-dasharray="5 4"/>
-<circle cx="480.0" cy="310.4" r="4" class="f-plzig ring"><title>PL/Zig (exec), 1 clients: 67 tps</title></circle>
-<circle cx="593.3" cy="301.7" r="4" class="f-plzig ring"><title>PL/Zig (exec), 2 clients: 127 tps</title></circle>
-<circle cx="706.7" cy="287.0" r="4" class="f-plzig ring"><title>PL/Zig (exec), 4 clients: 229 tps</title></circle>
-<circle cx="820.0" cy="275.8" r="4" class="f-plzig ring"><title>PL/Zig (exec), 8 clients: 307 tps</title></circle>
+<path d="M480.0,304.5 L593.3,289.3 L706.7,265.5 L820.0,249.6" class="s-sql" stroke-width="2"/>
+<circle cx="480.0" cy="304.5" r="4" class="f-sql ring"><title>SQL, 1 clients: 104 tps</title></circle>
+<circle cx="593.3" cy="289.3" r="4" class="f-sql ring"><title>SQL, 2 clients: 205 tps</title></circle>
+<circle cx="706.7" cy="265.5" r="4" class="f-sql ring"><title>SQL, 4 clients: 365 tps</title></circle>
+<circle cx="820.0" cy="249.6" r="4" class="f-sql ring"><title>SQL, 8 clients: 471 tps</title></circle>
+<path d="M480.0,270.1 L593.3,220.5 L706.7,149.4 L820.0,97.8" class="s-plpgsql" stroke-width="2"/>
+<circle cx="480.0" cy="270.1" r="4" class="f-plpgsql ring"><title>PL/pgSQL, 1 clients: 334 tps</title></circle>
+<circle cx="593.3" cy="220.5" r="4" class="f-plpgsql ring"><title>PL/pgSQL, 2 clients: 666 tps</title></circle>
+<circle cx="706.7" cy="149.4" r="4" class="f-plpgsql ring"><title>PL/pgSQL, 4 clients: 1,142 tps</title></circle>
+<circle cx="820.0" cy="97.8" r="4" class="f-plpgsql ring"><title>PL/pgSQL, 8 clients: 1,488 tps</title></circle>
+<path d="M480.0,286.5 L593.3,256.2 L706.7,209.3 L820.0,169.2" class="s-plpython" stroke-width="2"/>
+<circle cx="480.0" cy="286.5" r="4" class="f-plpython ring"><title>PL/Python, 1 clients: 224 tps</title></circle>
+<circle cx="593.3" cy="256.2" r="4" class="f-plpython ring"><title>PL/Python, 2 clients: 427 tps</title></circle>
+<circle cx="706.7" cy="209.3" r="4" class="f-plpython ring"><title>PL/Python, 4 clients: 741 tps</title></circle>
+<circle cx="820.0" cy="169.2" r="4" class="f-plpython ring"><title>PL/Python, 8 clients: 1,009 tps</title></circle>
+<path d="M480.0,286.4 L593.3,257.1 L706.7,212.4 L820.0,174.6" class="s-plperl" stroke-width="2"/>
+<circle cx="480.0" cy="286.4" r="4" class="f-plperl ring"><title>PL/Perl, 1 clients: 225 tps</title></circle>
+<circle cx="593.3" cy="257.1" r="4" class="f-plperl ring"><title>PL/Perl, 2 clients: 421 tps</title></circle>
+<circle cx="706.7" cy="212.4" r="4" class="f-plperl ring"><title>PL/Perl, 4 clients: 720 tps</title></circle>
+<circle cx="820.0" cy="174.6" r="4" class="f-plperl ring"><title>PL/Perl, 8 clients: 974 tps</title></circle>
+<path d="M480.0,269.4 L593.3,226.6 L706.7,156.4 L820.0,103.0" class="s-plzig" stroke-width="2"/>
+<circle cx="480.0" cy="269.4" r="4" class="f-plzig ring"><title>PL/Zig, 1 clients: 339 tps</title></circle>
+<circle cx="593.3" cy="226.6" r="4" class="f-plzig ring"><title>PL/Zig, 2 clients: 626 tps</title></circle>
+<circle cx="706.7" cy="156.4" r="4" class="f-plzig ring"><title>PL/Zig, 4 clients: 1,095 tps</title></circle>
+<circle cx="820.0" cy="103.0" r="4" class="f-plzig ring"><title>PL/Zig, 8 clients: 1,452 tps</title></circle>
+<path d="M480.0,310.1 L593.3,301.3 L706.7,285.7 L820.0,276.5" class="s-plzig" stroke-width="2" stroke-dasharray="5 4"/>
+<circle cx="480.0" cy="310.1" r="4" class="f-plzig ring"><title>PL/Zig (exec), 1 clients: 66 tps</title></circle>
+<circle cx="593.3" cy="301.3" r="4" class="f-plzig ring"><title>PL/Zig (exec), 2 clients: 125 tps</title></circle>
+<circle cx="706.7" cy="285.7" r="4" class="f-plzig ring"><title>PL/Zig (exec), 4 clients: 230 tps</title></circle>
+<circle cx="820.0" cy="276.5" r="4" class="f-plzig ring"><title>PL/Zig (exec), 8 clients: 291 tps</title></circle>
 </svg>

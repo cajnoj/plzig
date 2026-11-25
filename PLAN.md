@@ -1458,10 +1458,9 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
       changed nothing measurable except slowing task 8's SQL baseline when
       forced.
     - *Runs published*: PG 18.7 full (15 timed runs, JIT off and on,
-      pgbench at 1/2/4/8 clients), 14.25 and 19rc2 with JIT off, 10 runs,
-      no pgbench; container pinned to the six performance cores. The
-      `jit.csv` step was added while the cross-version run was in progress,
-      so 19rc2 has one and 14.25 does not (no effect on timings).
+      pgbench at 1/2/4/8 clients); 15.20, 16.16, 17.12 and 19.0 with JIT
+      off, 10 runs, no pgbench; container pinned to the six performance
+      cores.
     - *Task 11* measures `CREATE FUNCTION` and the first call separately
       (PL/Zig compiles in the validator, so the first call only loads the
       cached module); cold Zig cache = `pgsql_tmp.zig-cache` deleted before
@@ -2918,6 +2917,10 @@ Recorded by the implementation (2026-11-14). The sections above are unchanged.
     pg_upgrade test (`docker/Dockerfile.variant`, the `upgrade` layer) now
     upgrades from PostgreSQL 15 instead of 14. The tested set is now
     15.20, 16.16, 17.12, 18.7, 19.0.
-    * Not yet done (see TODO.md): regenerate `doc/benchmarks.md` for the
-      new set (measure 19.0 in place of 19rc2). The report still shows
-      19rc2 numbers as historical.
+    * `doc/benchmarks.md` regenerated 2026-11-25 for the new set: PG 18.7
+      full primary plus a cross-version run of 15.20, 16.16, 17.12 and 19.0
+      (all five majors now in the cross-version table and correctness gate;
+      19.0 measured, not copied from 19rc2). The 19rc2 benchmark data
+      (`doc/benchmarks/19rc2/`) was removed. Images were rebuilt from the
+      then-current source; all five gates compared 69 results each against
+      PL/pgSQL, all identical.

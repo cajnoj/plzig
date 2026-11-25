@@ -7,7 +7,7 @@
   "pin": 8,
   "online_cpus": 22,
   "mem_total_gb": 93.9,
-  "kernel": "7.2.15-200.fc44.x86_64",
+  "kernel": "7.3.4-200.fc44.x86_64",
   "governor": "powersave",
   "os_image": "12.15",
   "server_version": "18.7 (Debian 18.7-1.pgdg12+2)",
@@ -58,7 +58,7 @@
     "csv_rows": 20000,
     "blob_kb": 1024
   },
-  "started": "2026-11-18 22:02:20 +0000",
+  "started": "2026-11-25 07:57:53 +0000",
   "defaults_of_interest": {
     "jit_above_cost": "100000",
     "jit_inline_above_cost": "500000",

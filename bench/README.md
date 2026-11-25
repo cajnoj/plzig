@@ -33,19 +33,21 @@ rendered into `build/bench/<timestamp>/report/`; `--publish` writes it to
 `doc/benchmarks.md` and `doc/benchmarks/` (SVG charts, CSV copies) instead.
 The exit status is non-zero if a build, a run or the correctness gate fails.
 
-The published report was produced by (last done 2026-11-19, with `v62-`
+The published report was produced by (last done 2026-11-25, with `v63-`
 directory names; the history directories are those of phase D). `--pin 8`
 pins every single-session timed backend to one performance core, so the
 build-to-build and core-to-core variation of *How much the numbers vary* in
-the report does not also move the numbers between tasks within one run:
+the report does not also move the numbers between tasks within one run. The
+primary version (18.7) is measured in full; the other four majors make up
+the cross-version table:
 
 ```sh
-bench/run.sh --cpus 0-11 --pin 8 --clients 1,2,4,8 --out build/bench/v62-pg18
-bench/run.sh --cpus 0-11 --pin 8 --versions "15.20 19.0" --jit off --runs 10 --clients "" --out build/bench/v62-xver
-bench/run.sh --cpus 0-11 --pin 8 --tasks 1,2,8 --jit off,on,force --clients "" --out build/bench/v62-jit
-# combined: build/bench/v62-pg18 plus the two version directories of v62-xver,
-# and build/bench/v62-jit/18.7 as v62-pg18/jit/18.7
-bench/run.sh --report-only build/bench/v62-pg18 --history build/bench/t10-history \
+bench/run.sh --cpus 0-11 --pin 8 --clients 1,2,4,8 --out build/bench/v63-pg18
+bench/run.sh --cpus 0-11 --pin 8 --versions "15.20 16.16 17.12 19.0" --jit off --runs 10 --clients "" --out build/bench/v63-xver
+bench/run.sh --cpus 0-11 --pin 8 --tasks 1,2,8 --jit off,on,force --clients "" --out build/bench/v63-jit
+# combined: build/bench/v63-pg18 plus the four version directories of v63-xver,
+# and build/bench/v63-jit/18.7 as v63-pg18/jit/18.7
+bench/run.sh --report-only build/bench/v63-pg18 --history build/bench/t10-history \
     --call-history build/bench/abc-history --publish
 ```
 
