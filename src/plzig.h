@@ -328,6 +328,25 @@ extern int	plzig_sandbox_apply_in_child(const PlzigSandbox *sb, int *abi_used,
 extern int	plzig_seccomp_apply_in_child(const PlzigSandbox *sb,
 										 char *errbuf, size_t errlen);
 
+#ifdef PLZIG_TESTING
+/*
+ * Fault injection for the child fail-closed regression test
+ * (test/sql/testing.sql via plzig_test_sandbox_fail()).  Compiled only in a
+ * PLZIG_TESTING build, never in a release.  Set in the parent before
+ * plzig_spawn(); the forked child reads it (inherited across fork) at the top
+ * of plzig_sandbox_apply_in_child() / plzig_seccomp_apply_in_child() and makes
+ * that step report "not enforced" (…_UNAVAIL) or "failed" (…_ERROR), so the
+ * REQUIRE-mode child must refuse to execve.  No real Landlock or seccomp call
+ * is made for any of these, so the test is deterministic on any kernel.
+ */
+#define PLZIG_FAULT_NONE		0
+#define PLZIG_FAULT_LL_UNAVAIL	1	/* landlock apply returns 0 (not enforced) */
+#define PLZIG_FAULT_LL_ERROR	2	/* landlock apply returns -1 (errbuf set) */
+#define PLZIG_FAULT_SC_UNAVAIL	3	/* seccomp apply returns 0 (not enforced) */
+#define PLZIG_FAULT_SC_ERROR	4	/* seccomp apply returns -1 (errbuf set) */
+extern int	plzig_sandbox_test_fault;
+#endif
+
 /* ---------------------------------------------------------------------
  * WebAssembly runtime (plzig_runtime.c)
  * ---------------------------------------------------------------------

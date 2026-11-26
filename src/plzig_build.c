@@ -2226,6 +2226,7 @@ PG_FUNCTION_INFO_V1(plzig_test_sandbox_missing);
 PG_FUNCTION_INFO_V1(plzig_test_replace_all);
 PG_FUNCTION_INFO_V1(plzig_test_is_sha256_hex);
 PG_FUNCTION_INFO_V1(plzig_test_sandbox_mode);
+PG_FUNCTION_INFO_V1(plzig_test_sandbox_fail);
 
 /* plzig_test_cache_key(src bytea) RETURNS text: the module cache key */
 Datum
@@ -2345,6 +2346,86 @@ Datum
 plzig_test_sandbox_mode(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT32(plzig_sandbox_mode());
+}
+
+/*
+ * plzig_test_sandbox_fail(which text) RETURNS text
+ *
+ * Fail-closed regression test for the compiler sandbox.  Spawns a child in
+ * plzig.compiler_sandbox = require with a fault injected into one confinement
+ * step (see plzig.h), then reports what the parent raised.  The child must
+ * refuse to execve and _exit(126) before running anything, so the program
+ * path below is deliberately non-existent: were fail-closed ever broken, the
+ * child would reach execve and the returned detail would be "execve failed"
+ * (or the program would run), which the expected output would catch.
+ *
+ * Returns the errdetail of the "could not set up helper process" error, which
+ * differs per fault:
+ *   landlock-unavailable -> landlock unavailable
+ *   landlock-error       -> landlock: forced test fault
+ *   seccomp-unavailable  -> seccomp unavailable
+ *   seccomp-error        -> seccomp: forced test fault
+ */
+Datum
+plzig_test_sandbox_fail(PG_FUNCTION_ARGS)
+{
+	char	   *which = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	MemoryContext caller = CurrentMemoryContext;
+	PlzigSandbox sb;
+	PlzigSpawnResult res;
+	char	   *argv[2];
+	char	   *envp[1];
+	char	   *result;
+	int			fault;
+
+	if (strcmp(which, "landlock-unavailable") == 0)
+		fault = PLZIG_FAULT_LL_UNAVAIL;
+	else if (strcmp(which, "landlock-error") == 0)
+		fault = PLZIG_FAULT_LL_ERROR;
+	else if (strcmp(which, "seccomp-unavailable") == 0)
+		fault = PLZIG_FAULT_SC_UNAVAIL;
+	else if (strcmp(which, "seccomp-error") == 0)
+		fault = PLZIG_FAULT_SC_ERROR;
+	else
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("unknown sandbox fault \"%s\"", which)));
+
+	/* a sandbox the child would accept were no fault injected */
+	memset(&sb, 0, sizeof(sb));
+	sb.mode = PLZIG_SANDBOX_REQUIRE;
+	sb.landlock_abi = PLZIG_LANDLOCK_MIN_REQUIRED_ABI;
+	sb.seccomp = 0;
+
+	argv[0] = "/nonexistent/plzig-fail-closed-must-not-execve";
+	argv[1] = NULL;
+	envp[0] = NULL;
+
+	plzig_sandbox_test_fault = fault;
+	PG_TRY();
+	{
+		/* DataDir is a directory the backend can chdir() into */
+		plzig_spawn(argv[0], argv, envp, DataDir, NULL, &sb, 5000, &res);
+		/* reached only if the child did NOT fail closed */
+		result = psprintf("NOT FAIL-CLOSED (exit=%d, signal=%d, output=%.64s)",
+						  res.exit_status, res.term_signal,
+						  res.output.len ? res.output.data : "");
+	}
+	PG_CATCH();
+	{
+		ErrorData  *ed;
+
+		plzig_sandbox_test_fault = PLZIG_FAULT_NONE;
+		MemoryContextSwitchTo(caller);
+		ed = CopyErrorData();
+		result = pstrdup(ed->detail ? ed->detail : ed->message);
+		FlushErrorState();
+		FreeErrorData(ed);
+	}
+	PG_END_TRY();
+	plzig_sandbox_test_fault = PLZIG_FAULT_NONE;
+
+	PG_RETURN_TEXT_P(cstring_to_text(result));
 }
 /* LCOV_EXCL_STOP */
 #endif							/* PLZIG_TESTING */

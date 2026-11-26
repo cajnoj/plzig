@@ -37,6 +37,12 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#ifdef PLZIG_TESTING
+/* See plzig.h: set in the parent, read in the forked child.  Compiled only in
+ * a PLZIG_TESTING build, never in a release. */
+int			plzig_sandbox_test_fault = PLZIG_FAULT_NONE;
+#endif
+
 #ifdef __linux__
 #include <stddef.h>
 #include <linux/audit.h>
@@ -187,6 +193,26 @@ plzig_sandbox_apply_in_child(const PlzigSandbox *sb, int *abi_used,
 	int			i;
 
 	*abi_used = 0;
+
+#ifdef PLZIG_TESTING
+	/* Fault injection (test build only): make this step report a state that
+	 * must make a REQUIRE-mode child refuse to execve.  No syscall is made. */
+	if (plzig_sandbox_test_fault == PLZIG_FAULT_LL_UNAVAIL)
+		return 0;				/* not enforced */
+	if (plzig_sandbox_test_fault == PLZIG_FAULT_LL_ERROR)
+	{
+		child_strlcpy(errbuf, "landlock: forced test fault", errlen);
+		return -1;				/* setup failure */
+	}
+	if (plzig_sandbox_test_fault == PLZIG_FAULT_SC_UNAVAIL ||
+		plzig_sandbox_test_fault == PLZIG_FAULT_SC_ERROR)
+	{
+		/* report Landlock enforced so the child reaches the seccomp check */
+		*abi_used = PLZIG_LANDLOCK_MIN_REQUIRED_ABI;
+		return 1;
+	}
+#endif
+
 	if (sb->mode == PLZIG_SANDBOX_OFF || abi <= 0)
 		return 0;
 
@@ -434,6 +460,18 @@ plzig_seccomp_apply_in_child(const PlzigSandbox *sb, char *errbuf, size_t errlen
 	do { struct sock_filter _i = BPF_STMT((code), (k)); f[n++] = _i; } while (0)
 #define EMIT_JUMP(code, k, jt, jf) \
 	do { struct sock_filter _i = BPF_JUMP((code), (k), (jt), (jf)); f[n++] = _i; } while (0)
+
+#ifdef PLZIG_TESTING
+	/* Fault injection (test build only): make this step report a state that
+	 * must make a REQUIRE-mode child refuse to execve.  No syscall is made. */
+	if (plzig_sandbox_test_fault == PLZIG_FAULT_SC_UNAVAIL)
+		return 0;				/* not enforced */
+	if (plzig_sandbox_test_fault == PLZIG_FAULT_SC_ERROR)
+	{
+		child_strlcpy(errbuf, "seccomp: forced test fault", errlen);
+		return -1;				/* setup failure */
+	}
+#endif
 
 	if (sb->mode == PLZIG_SANDBOX_OFF || sb->seccomp != 0)
 		return 0;

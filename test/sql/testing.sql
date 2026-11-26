@@ -22,6 +22,7 @@ CREATE FUNCTION sandbox_missing(int, int) RETURNS text STRICT LANGUAGE C AS 'plz
 CREATE FUNCTION replace_all(text, text, text) RETURNS text STRICT LANGUAGE C AS 'plzig', 'plzig_test_replace_all';
 CREATE FUNCTION is_sha256_hex(text) RETURNS bool STRICT LANGUAGE C AS 'plzig', 'plzig_test_is_sha256_hex';
 CREATE FUNCTION sandbox_mode() RETURNS int STRICT LANGUAGE C AS 'plzig', 'plzig_test_sandbox_mode';
+CREATE FUNCTION sandbox_fail(text) RETURNS text STRICT LANGUAGE C AS 'plzig', 'plzig_test_sandbox_fail';
 
 --
 -- parameter names
@@ -186,5 +187,16 @@ SELECT abi, sc, sandbox_missing(abi, sc)
 SELECT is_sha256_hex(repeat('a', 64)), is_sha256_hex(repeat('F', 64)), is_sha256_hex(repeat('a', 63)),
        is_sha256_hex(repeat('a', 65)), is_sha256_hex(repeat('g', 64)), is_sha256_hex('');
 SELECT sandbox_mode() AS mode_require_is_2;
+
+--
+-- fail-closed: in plzig.compiler_sandbox = require a child must refuse to
+-- execve unless both Landlock and seccomp are enforced.  Each case injects a
+-- fault into one confinement step in the forked child and checks that the
+-- parent raised "could not set up helper process" with the matching detail
+-- (never "execve failed", which would mean the child ran the program).
+--
+SELECT which, sandbox_fail(which) AS detail
+  FROM unnest(ARRAY['landlock-unavailable', 'landlock-error',
+                    'seccomp-unavailable', 'seccomp-error']) AS which;
 
 DROP SCHEMA plzig_testing CASCADE;
