@@ -1761,3 +1761,152 @@ test "memset and memcpy replacements: every length, offset and value against a b
         }
     }
 }
+
+test "hex: encode/decode, PostgreSQL encode/decode 'hex' semantics" {
+    const bytes = [_]u8{ 0x00, 0x0f, 0xa0, 0xff, 0x10, 0xde };
+    var ebuf: [16]u8 = undefined;
+    try testing.expectEqualStrings("000fa0ff10de", plzig.hex.encodeBuf(&bytes, &ebuf));
+    try testing.expectEqualStrings("", plzig.hex.encodeBuf(&[_]u8{}, &ebuf));
+    try testing.expectEqualStrings("000fa0ff10de", try plzig.hex.encode(a, &bytes));
+
+    var dbuf: [8]u8 = undefined;
+    try testing.expectEqualSlices(u8, &bytes, try plzig.hex.decodeBuf("000fa0ff10de", &dbuf));
+    try testing.expectEqualSlices(u8, &bytes, try plzig.hex.decodeBuf("000FA0FF10DE", &dbuf)); // upper case
+    try testing.expectEqualSlices(u8, &bytes, try plzig.hex.decode(a, "000fa0ff10de"));
+
+    try testing.expectError(error.InvalidHex, plzig.hex.decode(a, "abc")); // odd length
+    try testing.expectError(error.InvalidHex, plzig.hex.decode(a, "zz")); // not hex
+    try testing.expectError(error.InvalidHex, plzig.hex.decodeBuf("0g", &dbuf));
+}
+
+test "crypto: md5Hex and sha256Hex against known vectors; streaming == one-shot" {
+    const md5_abc = plzig.crypto.md5Hex("abc");
+    try testing.expectEqualStrings("900150983cd24fb0d6963f7d28e17f72", &md5_abc);
+    const md5_empty = plzig.crypto.md5Hex("");
+    try testing.expectEqualStrings("d41d8cd98f00b204e9800998ecf8427e", &md5_empty);
+    const sha_abc = plzig.crypto.sha256Hex("abc");
+    try testing.expectEqualStrings(
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        &sha_abc,
+    );
+    // the re-exported streaming primitive agrees with the one-shot helper
+    var d: [plzig.crypto.Sha256.digest_length]u8 = undefined;
+    plzig.crypto.Sha256.hash("abc", &d, .{});
+    var hexbuf: [64]u8 = undefined;
+    try testing.expectEqualStrings(&sha_abc, plzig.hex.encodeBuf(&d, &hexbuf));
+}
+
+test "Uuid: v3/v5 name-based (RFC vectors), nil, max, version, variant, namespaces" {
+    var buf: [36]u8 = undefined;
+    // Python uuid docs: uuid3/uuid5(NAMESPACE_DNS, 'python.org')
+    const v3 = plzig.Uuid.v3(plzig.Uuid.namespace.dns, "python.org");
+    try testing.expectEqualStrings("6fa459ea-ee8a-3ca4-894e-db77e160355e", v3.format(&buf));
+    const v5 = plzig.Uuid.v5(plzig.Uuid.namespace.dns, "python.org");
+    try testing.expectEqualStrings("886313e1-3b8a-5372-9b90-0c9aee199e5d", v5.format(&buf));
+
+    try testing.expectEqual(@as(u4, 3), v3.version());
+    try testing.expectEqual(@as(u4, 5), v5.version());
+    try testing.expectEqual(plzig.Uuid.Variant.rfc4122, v5.variant());
+
+    try testing.expect(plzig.Uuid.nil.isNil());
+    try testing.expect(!plzig.Uuid.nil.isMax());
+    try testing.expect(plzig.Uuid.max.isMax());
+    try testing.expectEqualStrings("00000000-0000-0000-0000-000000000000", plzig.Uuid.nil.format(&buf));
+    try testing.expectEqualStrings("ffffffff-ffff-ffff-ffff-ffffffffffff", plzig.Uuid.max.format(&buf));
+
+    try testing.expectEqualStrings("6ba7b810-9dad-11d1-80b4-00c04fd430c8", plzig.Uuid.namespace.dns.format(&buf));
+    try testing.expectEqualStrings("6ba7b814-9dad-11d1-80b4-00c04fd430c8", plzig.Uuid.namespace.x500.format(&buf));
+}
+
+test "Timestamp/TimestampTz: Unix-epoch conversions, flooring, round trips, range errors" {
+    const off: i64 = 946_684_800_000_000; // usecs between the 1970 and 2000 epochs
+
+    // exact value and inverse at microsecond granularity for ordinary timestamps
+    for ([_]i64{ 0, 1, -1, 1_000_000, -1_000_000, 123_456_789, -off }) |u| {
+        const t = plzig.Timestamp{ .usecs = u };
+        try testing.expectEqual(u + off, try t.toUnixMicros());
+        try testing.expectEqual(u, (try plzig.Timestamp.fromUnixMicros(u + off)).usecs);
+    }
+
+    // PostgreSQL epoch (usecs 0) is Unix second 946684800
+    const pg_epoch = plzig.Timestamp{ .usecs = 0 };
+    try testing.expectEqual(@as(i64, 946_684_800), try pg_epoch.toUnixSeconds());
+    try testing.expectEqual(@as(i64, 946_684_800_000), try pg_epoch.toUnixMillis());
+
+    // seconds/millis floor toward minus infinity (0.5 s before the Unix epoch)
+    const half = plzig.Timestamp{ .usecs = -off - 500_000 };
+    try testing.expectEqual(@as(i64, -1), try half.toUnixSeconds());
+    try testing.expectEqual(@as(i64, -500), try half.toUnixMillis());
+
+    // the infinities
+    try testing.expectError(error.NotFinite, plzig.Timestamp.infinity.toUnixSeconds());
+    try testing.expectError(error.NotFinite, plzig.Timestamp.neg_infinity.toUnixMicros());
+
+    // out of PostgreSQL's range
+    try testing.expectError(error.OutOfRange, plzig.Timestamp.fromUnixSeconds(1 << 60));
+
+    // the very top of the range: micros overflow i64 but seconds do not
+    const near_end = plzig.Timestamp{ .usecs = 9223371331200000000 - 1 };
+    try testing.expectError(error.OutOfRange, near_end.toUnixMicros());
+    try testing.expectEqual(@as(i64, 9224318015999), try near_end.toUnixSeconds());
+
+    // TimestampTz shares the same arithmetic
+    try testing.expectEqual(off, try (plzig.TimestampTz{ .usecs = 0 }).toUnixMicros());
+    try testing.expectEqual(@as(i64, 7), (try plzig.TimestampTz.fromUnixMicros(off + 7)).usecs);
+}
+
+test "strings.splitPart: positive, negative, out of range, empty and multi-char delimiters" {
+    const sp = plzig.strings.splitPart;
+    try testing.expectEqualStrings("a", sp("a~b~c", "~", 1));
+    try testing.expectEqualStrings("b", sp("a~b~c", "~", 2));
+    try testing.expectEqualStrings("c", sp("a~b~c", "~", 3));
+    try testing.expectEqualStrings("", sp("a~b~c", "~", 4));
+    try testing.expectEqualStrings("c", sp("a~b~c", "~", -1));
+    try testing.expectEqualStrings("b", sp("a~b~c", "~", -2));
+    try testing.expectEqualStrings("", sp("a~b~c", "~", -4));
+    try testing.expectEqualStrings("", sp("a~b~c", "~", 0));
+    try testing.expectEqualStrings("", sp("a,,c", ",", 2)); // empty middle field
+    try testing.expectEqualStrings("b", sp("a::b::c", "::", 2)); // multi-char
+    try testing.expectEqualStrings("abc", sp("abc", "", 1)); // empty delimiter
+    try testing.expectEqualStrings("", sp("abc", "", 2));
+    try testing.expectEqualStrings("", sp("", ",", 1));
+}
+
+test "strings.repeat, reverse (character-aware)" {
+    try testing.expectEqualStrings("ababab", try plzig.strings.repeat(a, "ab", 3));
+    try testing.expectEqualStrings("", try plzig.strings.repeat(a, "x", 0));
+    try testing.expectEqualStrings("", try plzig.strings.repeat(a, "x", -1));
+    try testing.expectEqualStrings("", try plzig.strings.repeat(a, "", 5));
+
+    try testing.expectEqualStrings("cba", try plzig.strings.reverse(a, "abc"));
+    try testing.expectEqualStrings("", try plzig.strings.reverse(a, ""));
+    // 'é' (U+00E1? no, U+00E9 = 0xc3 0xa9) must stay intact when reversed
+    try testing.expectEqualStrings("\u{00e9}a", try plzig.strings.reverse(a, "a\u{00e9}"));
+    try testing.expectEqual(@as(usize, 2), plzig.strings.charLength("a\u{00e9}"));
+}
+
+test "strings.lpad/rpad: pad cycling, truncation, empty fill, multibyte" {
+    try testing.expectEqualStrings("   hi", try plzig.strings.lpad(a, "hi", 5, " "));
+    try testing.expectEqualStrings("xyxhi", try plzig.strings.lpad(a, "hi", 5, "xy"));
+    try testing.expectEqualStrings("hixyx", try plzig.strings.rpad(a, "hi", 5, "xy"));
+    try testing.expectEqualStrings("hel", try plzig.strings.lpad(a, "hello", 3, "x")); // truncate
+    try testing.expectEqualStrings("hel", try plzig.strings.rpad(a, "hello", 3, "x"));
+    try testing.expectEqualStrings("hi", try plzig.strings.lpad(a, "hi", 5, "")); // empty fill
+    try testing.expectEqualStrings("", try plzig.strings.lpad(a, "hi", 0, "x"));
+    try testing.expectEqualStrings("", try plzig.strings.rpad(a, "hi", -1, "x"));
+    try testing.expectEqualStrings("xx\u{00e9}", try plzig.strings.lpad(a, "\u{00e9}", 3, "x")); // 'é' is one char
+}
+
+test "strings.chr and ascii" {
+    try testing.expectEqualStrings("A", try plzig.strings.chr(a, 65));
+    try testing.expectEqualStrings("\u{263a}", try plzig.strings.chr(a, 0x263a)); // ☺
+    try testing.expectError(error.InvalidCodepoint, plzig.strings.chr(a, 0));
+    try testing.expectError(error.InvalidCodepoint, plzig.strings.chr(a, -1));
+    try testing.expectError(error.InvalidCodepoint, plzig.strings.chr(a, 0x110000));
+    try testing.expectError(error.InvalidCodepoint, plzig.strings.chr(a, 0xd800)); // surrogate
+
+    try testing.expectEqual(@as(i32, 65), plzig.strings.ascii("A"));
+    try testing.expectEqual(@as(i32, 97), plzig.strings.ascii("abc"));
+    try testing.expectEqual(@as(i32, 0), plzig.strings.ascii(""));
+    try testing.expectEqual(@as(i32, 0x263a), plzig.strings.ascii("\u{263a}!"));
+}

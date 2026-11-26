@@ -334,6 +334,35 @@ const min_date_days: i64 = 0 - postgres_epoch_jdate; // DATETIME_MIN_JULIAN
 const max_date_days: i64 = 2147483494 - postgres_epoch_jdate - 1; // DATE_END_JULIAN
 const min_timestamp: i64 = -211813488000000000; // MIN_TIMESTAMP
 const end_timestamp: i64 = 9223371331200000000; // END_TIMESTAMP
+const usecs_per_sec: i64 = 1_000_000;
+const usecs_per_ms: i64 = 1_000;
+// microseconds between the Unix epoch (1970-01-01) and PostgreSQL's epoch
+// (2000-01-01): 946684800 seconds.  The arithmetic below is done in i128 so a
+// timestamp near the ends of PostgreSQL's range cannot overflow i64.
+const unix_epoch_offset_usecs: i64 = 946_684_800 * usecs_per_sec;
+
+// Unix-epoch conversions shared by Timestamp and TimestampTz (same internal
+// representation: microseconds since 2000-01-01 UTC, the infinities at the
+// i64 ends).  These match extract(epoch from ...), which treats a bare
+// timestamp as UTC.
+fn tsIsFinite(usecs: i64) bool {
+    return usecs != s.math.maxInt(i64) and usecs != s.math.minInt(i64);
+}
+fn tsToUnixMicros(usecs: i64) error{ NotFinite, OutOfRange }!i64 {
+    if (!tsIsFinite(usecs)) return error.NotFinite;
+    const v = @as(i128, usecs) + unix_epoch_offset_usecs;
+    if (v > s.math.maxInt(i64) or v < s.math.minInt(i64)) return error.OutOfRange;
+    return @intCast(v);
+}
+fn tsToUnixScaled(usecs: i64, scale: i64) error{NotFinite}!i64 {
+    if (!tsIsFinite(usecs)) return error.NotFinite;
+    return @intCast(@divFloor(@as(i128, usecs) + unix_epoch_offset_usecs, scale));
+}
+fn tsFromUnixScaled(unix_val: i64, scale: i64) error{OutOfRange}!i64 {
+    const v = @as(i128, unix_val) * scale - unix_epoch_offset_usecs;
+    if (v < min_timestamp or v >= end_timestamp) return error.OutOfRange;
+    return @intCast(v);
+}
 
 /// PostgreSQL's date2j (proleptic Gregorian, astronomical year numbering).
 fn date2j(year: i32, month: u8, day: u8) i32 {
@@ -498,6 +527,35 @@ pub const Timestamp = extern struct {
         if (!self.isFinite()) return error.NotFinite;
         return .{ .usecs = @mod(self.usecs, usecs_per_day) };
     }
+
+    /// Microseconds since the Unix epoch (1970-01-01 00:00:00 UTC), treating
+    /// this bare timestamp as UTC (as extract(epoch ...) does).
+    /// error.NotFinite for the infinities; error.OutOfRange only within a few
+    /// hundred thousand years of the end of PostgreSQL's range.
+    pub fn toUnixMicros(self: Timestamp) error{ NotFinite, OutOfRange }!i64 {
+        return tsToUnixMicros(self.usecs);
+    }
+    /// Milliseconds since the Unix epoch (floored); see toUnixMicros.
+    pub fn toUnixMillis(self: Timestamp) error{NotFinite}!i64 {
+        return tsToUnixScaled(self.usecs, usecs_per_ms);
+    }
+    /// Whole seconds since the Unix epoch (floored); see toUnixMicros.
+    pub fn toUnixSeconds(self: Timestamp) error{NotFinite}!i64 {
+        return tsToUnixScaled(self.usecs, usecs_per_sec);
+    }
+    /// The timestamp at `unix_usecs` microseconds since the Unix epoch.
+    /// error.OutOfRange outside PostgreSQL's timestamp range.
+    pub fn fromUnixMicros(unix_usecs: i64) error{OutOfRange}!Timestamp {
+        return .{ .usecs = try tsFromUnixScaled(unix_usecs, 1) };
+    }
+    /// The timestamp at `unix_ms` milliseconds since the Unix epoch.
+    pub fn fromUnixMillis(unix_ms: i64) error{OutOfRange}!Timestamp {
+        return .{ .usecs = try tsFromUnixScaled(unix_ms, usecs_per_ms) };
+    }
+    /// The timestamp at `unix_s` seconds since the Unix epoch.
+    pub fn fromUnixSeconds(unix_s: i64) error{OutOfRange}!Timestamp {
+        return .{ .usecs = try tsFromUnixScaled(unix_s, usecs_per_sec) };
+    }
 };
 
 /// SQL `timestamp with time zone`: microseconds since 2000-01-01 00:00:00 UTC.
@@ -538,6 +596,34 @@ pub const TimestampTz = extern struct {
     pub fn fromFields(f: DateTime, zone: ?[]const u8) CalendarError!TimestampTz {
         return fromLocal(try Timestamp.fromFields(f), zone);
     }
+
+    /// Microseconds since the Unix epoch (1970-01-01 00:00:00 UTC), as
+    /// extract(epoch ...).  error.NotFinite for the infinities;
+    /// error.OutOfRange only near the end of PostgreSQL's range.
+    pub fn toUnixMicros(self: TimestampTz) error{ NotFinite, OutOfRange }!i64 {
+        return tsToUnixMicros(self.usecs);
+    }
+    /// Milliseconds since the Unix epoch (floored); see toUnixMicros.
+    pub fn toUnixMillis(self: TimestampTz) error{NotFinite}!i64 {
+        return tsToUnixScaled(self.usecs, usecs_per_ms);
+    }
+    /// Whole seconds since the Unix epoch (floored); see toUnixMicros.
+    pub fn toUnixSeconds(self: TimestampTz) error{NotFinite}!i64 {
+        return tsToUnixScaled(self.usecs, usecs_per_sec);
+    }
+    /// The instant at `unix_usecs` microseconds since the Unix epoch.
+    /// error.OutOfRange outside PostgreSQL's range.
+    pub fn fromUnixMicros(unix_usecs: i64) error{OutOfRange}!TimestampTz {
+        return .{ .usecs = try tsFromUnixScaled(unix_usecs, 1) };
+    }
+    /// The instant at `unix_ms` milliseconds since the Unix epoch.
+    pub fn fromUnixMillis(unix_ms: i64) error{OutOfRange}!TimestampTz {
+        return .{ .usecs = try tsFromUnixScaled(unix_ms, usecs_per_ms) };
+    }
+    /// The instant at `unix_s` seconds since the Unix epoch.
+    pub fn fromUnixSeconds(unix_s: i64) error{OutOfRange}!TimestampTz {
+        return .{ .usecs = try tsFromUnixScaled(unix_s, usecs_per_sec) };
+    }
 };
 
 // @plzig-abi begin enum tz_op -- generated from abi/plzig-abi.table (make abi), do not edit
@@ -569,15 +655,15 @@ pub const Uuid = extern struct {
 
     /// The canonical text form (lower case, as uuid_out writes it).
     pub fn format(self: Uuid, buf: *[36]u8) []const u8 {
-        const hex = "0123456789abcdef";
+        const hex_digits = "0123456789abcdef";
         var o: usize = 0;
         for (self.bytes, 0..) |b, i| {
             if (i == 4 or i == 6 or i == 8 or i == 10) {
                 buf[o] = '-';
                 o += 1;
             }
-            buf[o] = hex[b >> 4];
-            buf[o + 1] = hex[b & 15];
+            buf[o] = hex_digits[b >> 4];
+            buf[o + 1] = hex_digits[b & 15];
             o += 2;
         }
         return buf[0..36];
@@ -607,11 +693,323 @@ pub const Uuid = extern struct {
         if (n != 32) return error.InvalidUuid;
         return out;
     }
+
+    /// The all-zero UUID ('00000000-0000-0000-0000-000000000000').
+    pub const nil: Uuid = .{ .bytes = @splat(0) };
+    /// The all-ones UUID ('ffffffff-ffff-ffff-ffff-ffffffffffff').
+    pub const max: Uuid = .{ .bytes = @splat(0xff) };
+
+    /// The RFC 4122 namespaces for the name-based versions v3 and v5.
+    pub const namespace = struct {
+        pub const dns: Uuid = comptimeParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8");
+        pub const url: Uuid = comptimeParse("6ba7b811-9dad-11d1-80b4-00c04fd430c8");
+        pub const oid: Uuid = comptimeParse("6ba7b812-9dad-11d1-80b4-00c04fd430c8");
+        pub const x500: Uuid = comptimeParse("6ba7b814-9dad-11d1-80b4-00c04fd430c8");
+    };
+
+    fn comptimeParse(comptime text: []const u8) Uuid {
+        return parse(text) catch unreachable;
+    }
+
+    /// The version nibble: 4 for gen_random_uuid(), 3/5 for the name-based
+    /// forms, 7 for a time-ordered v7, etc.  Meaningful only for an
+    /// RFC-variant UUID (variant() == .rfc4122).
+    pub fn version(self: Uuid) u4 {
+        return @truncate(self.bytes[6] >> 4);
+    }
+
+    pub const Variant = enum { ncs, rfc4122, microsoft, reserved };
+
+    /// The variant, from the top bits of octet 8.  An RFC 4122 UUID
+    /// (including nil) is .rfc4122; .max is .reserved.
+    pub fn variant(self: Uuid) Variant {
+        const b = self.bytes[8];
+        if (b & 0x80 == 0x00) return .ncs;
+        if (b & 0xc0 == 0x80) return .rfc4122;
+        if (b & 0xe0 == 0xc0) return .microsoft;
+        return .reserved;
+    }
+
+    /// True for the nil UUID (all zero).
+    pub fn isNil(self: Uuid) bool {
+        return s.mem.eql(u8, &self.bytes, &nil.bytes);
+    }
+
+    /// True for the max UUID (all ones).
+    pub fn isMax(self: Uuid) bool {
+        return s.mem.eql(u8, &self.bytes, &max.bytes);
+    }
+
+    /// Name-based UUID version 3 (MD5) of `name` within namespace `ns`
+    /// (RFC 4122 §4.3).  Pure and deterministic: the same inputs always
+    /// produce the same UUID, so a function using only this can stay
+    /// IMMUTABLE.
+    pub fn v3(ns: Uuid, name: []const u8) Uuid {
+        var h = crypto.Md5.init(.{});
+        h.update(&ns.bytes);
+        h.update(name);
+        var d: [crypto.Md5.digest_length]u8 = undefined;
+        h.final(&d);
+        return nameBased(d[0..16].*, 3);
+    }
+
+    /// Name-based UUID version 5 (SHA-1) of `name` within namespace `ns`
+    /// (RFC 4122 §4.3).  Pure and deterministic (see v3).
+    pub fn v5(ns: Uuid, name: []const u8) Uuid {
+        var h = crypto.Sha1.init(.{});
+        h.update(&ns.bytes);
+        h.update(name);
+        var d: [crypto.Sha1.digest_length]u8 = undefined;
+        h.final(&d);
+        return nameBased(d[0..16].*, 5);
+    }
+
+    fn nameBased(first16: [16]u8, ver: u8) Uuid {
+        var out: Uuid = .{ .bytes = first16 };
+        out.bytes[6] = (out.bytes[6] & 0x0f) | (ver << 4); // version
+        out.bytes[8] = (out.bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+        return out;
+    }
 };
 
 /// SQL `oid`.
 pub const Oid = extern struct {
     value: u32,
+};
+
+// ---------------------------------------------------------------------------
+// hex and digests: pure, in-guest, no host call.
+
+/// Hexadecimal, matching PostgreSQL's encode(bytea,'hex') /
+/// decode(text,'hex'): two lower-case digits per byte, no separators.  Unlike
+/// decode(), the input is not allowed to contain whitespace.
+pub const hex = struct {
+    const lower = "0123456789abcdef";
+
+    /// Write the lower-case hex of `bytes` into `buf` (buf.len must be at
+    /// least bytes.len * 2) and return the written slice.
+    pub fn encodeBuf(bytes: []const u8, buf: []u8) []u8 {
+        var o: usize = 0;
+        for (bytes) |b| {
+            buf[o] = lower[b >> 4];
+            buf[o + 1] = lower[b & 15];
+            o += 2;
+        }
+        return buf[0..o];
+    }
+
+    /// The lower-case hex of `bytes`, allocated with `gpa`.
+    pub fn encode(gpa: s.mem.Allocator, bytes: []const u8) error{OutOfMemory}![]u8 {
+        const out = try gpa.alloc(u8, bytes.len * 2);
+        return encodeBuf(bytes, out);
+    }
+
+    fn nibble(c: u8) ?u8 {
+        return switch (c) {
+            '0'...'9' => c - '0',
+            'a'...'f' => c - 'a' + 10,
+            'A'...'F' => c - 'A' + 10,
+            else => null,
+        };
+    }
+
+    /// Decode hex `text` into `buf` (buf.len must be at least text.len / 2)
+    /// and return the written slice.  error.InvalidHex on an odd length or a
+    /// character that is not a hex digit.
+    pub fn decodeBuf(text: []const u8, buf: []u8) error{InvalidHex}![]u8 {
+        if (text.len % 2 != 0) return error.InvalidHex;
+        var o: usize = 0;
+        var i: usize = 0;
+        while (i < text.len) : (i += 2) {
+            const hi = nibble(text[i]) orelse return error.InvalidHex;
+            const lo = nibble(text[i + 1]) orelse return error.InvalidHex;
+            buf[o] = (hi << 4) | lo;
+            o += 1;
+        }
+        return buf[0..o];
+    }
+
+    /// The bytes of hex `text`, allocated with `gpa`.
+    pub fn decode(gpa: s.mem.Allocator, text: []const u8) error{ InvalidHex, OutOfMemory }![]u8 {
+        if (text.len % 2 != 0) return error.InvalidHex;
+        const out = try gpa.alloc(u8, text.len / 2);
+        errdefer gpa.free(out);
+        return decodeBuf(text, out);
+    }
+};
+
+/// Cryptographic digests, re-exported from the Zig standard library: pure,
+/// deterministic, no host call.  Use these to hash in-guest instead of a
+/// round trip to md5()/digest().  The rest of std.crypto (its RNG and TLS,
+/// which are OS-facing) is intentionally not exposed; random UUIDs come from
+/// the host (Uuid.v4/v7), not from here.
+pub const crypto = struct {
+    pub const Md5 = s.crypto.hash.Md5;
+    pub const Sha1 = s.crypto.hash.Sha1;
+    pub const Sha256 = s.crypto.hash.sha2.Sha256;
+    pub const Sha512 = s.crypto.hash.sha2.Sha512;
+
+    /// SQL md5(): the 32 lower-case hex characters of the MD5 digest of `data`.
+    pub fn md5Hex(data: []const u8) [32]u8 {
+        var d: [Md5.digest_length]u8 = undefined;
+        Md5.hash(data, &d, .{});
+        var out: [32]u8 = undefined;
+        _ = hex.encodeBuf(&d, &out);
+        return out;
+    }
+
+    /// The 64 lower-case hex characters of the SHA-256 digest of `data`
+    /// (= encode(digest(data, 'sha256'), 'hex')).
+    pub fn sha256Hex(data: []const u8) [64]u8 {
+        var d: [Sha256.digest_length]u8 = undefined;
+        Sha256.hash(data, &d, .{});
+        var out: [64]u8 = undefined;
+        _ = hex.encodeBuf(&d, &out);
+        return out;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// strings: a few SQL string functions, in-guest, so a function need not round
+// trip to SQL for them.  Lengths and positions are counted in characters
+// (UTF-8 code points), as the SQL functions do in a UTF-8 database; a byte
+// that is not the start of a valid sequence counts as one character, so these
+// never read past the end of the input.
+
+pub const strings = struct {
+    /// The byte length of the UTF-8 sequence starting at `bytes[i]`, or 1 for
+    /// a leading byte with no room for its sequence or an invalid one.
+    fn stepLen(bytes: []const u8, i: usize) usize {
+        const n = s.unicode.utf8ByteSequenceLength(bytes[i]) catch return 1;
+        return if (i + n <= bytes.len) n else 1;
+    }
+
+    /// The number of characters in `bytes`.
+    pub fn charLength(bytes: []const u8) usize {
+        var i: usize = 0;
+        var c: usize = 0;
+        while (i < bytes.len) : (c += 1) i += stepLen(bytes, i);
+        return c;
+    }
+
+    /// The byte offset just past the first `nchars` characters of `bytes`.
+    fn prefixBytes(bytes: []const u8, nchars: usize) usize {
+        var i: usize = 0;
+        var c: usize = 0;
+        while (i < bytes.len and c < nchars) : (c += 1) i += stepLen(bytes, i);
+        return i;
+    }
+
+    /// split_part(string, delimiter, n): the n-th field (1-based) of `string`
+    /// split on `delimiter`, or "" if n is out of range.  n < 0 counts from
+    /// the end (as PostgreSQL 14+); n == 0 gives "" (PostgreSQL raises).  An
+    /// empty delimiter makes the whole string field 1.  The result is a slice
+    /// into `string`: no allocation, valid as long as `string` is.
+    pub fn splitPart(string: []const u8, delimiter: []const u8, n: i32) []const u8 {
+        if (n == 0) return "";
+        if (delimiter.len == 0) return if (n == 1 or n == -1) string else "";
+
+        var total: usize = 0;
+        var it = s.mem.splitSequence(u8, string, delimiter);
+        while (it.next()) |_| total += 1;
+
+        var idx: usize = undefined;
+        if (n > 0) {
+            if (@as(usize, @intCast(n)) > total) return "";
+            idx = @intCast(n - 1);
+        } else {
+            const from_end: usize = @intCast(-n);
+            if (from_end > total) return "";
+            idx = total - from_end;
+        }
+        it = s.mem.splitSequence(u8, string, delimiter);
+        var i: usize = 0;
+        while (it.next()) |f| : (i += 1) if (i == idx) return f;
+        return "";
+    }
+
+    /// repeat(string, count): `string` repeated `count` times, allocated with
+    /// `gpa` ("" for count <= 0).
+    pub fn repeat(gpa: s.mem.Allocator, string: []const u8, count: i32) error{OutOfMemory}![]u8 {
+        if (count <= 0 or string.len == 0) return gpa.alloc(u8, 0);
+        const c: usize = @intCast(count);
+        const total = s.math.mul(usize, string.len, c) catch return error.OutOfMemory;
+        const out = try gpa.alloc(u8, total);
+        var o: usize = 0;
+        while (o < total) : (o += string.len) @memcpy(out[o..][0..string.len], string);
+        return out;
+    }
+
+    /// reverse(string): the characters of `string` in reverse order, allocated
+    /// with `gpa`.  Each character's bytes are kept intact.
+    pub fn reverse(gpa: s.mem.Allocator, string: []const u8) error{OutOfMemory}![]u8 {
+        const out = try gpa.alloc(u8, string.len);
+        var i: usize = 0;
+        var o: usize = string.len;
+        while (i < string.len) {
+            const n = stepLen(string, i);
+            o -= n;
+            @memcpy(out[o..][0..n], string[i..][0..n]);
+            i += n;
+        }
+        return out;
+    }
+
+    /// lpad(string, length, fill): `string` padded on the left with characters
+    /// of `fill` to `length` characters, or truncated to its first `length`
+    /// characters if longer.  Allocated with `gpa`.
+    pub fn lpad(gpa: s.mem.Allocator, string: []const u8, length: i32, fill: []const u8) error{OutOfMemory}![]u8 {
+        return pad(gpa, string, length, fill, true);
+    }
+
+    /// rpad(string, length, fill): like lpad, padding on the right.
+    pub fn rpad(gpa: s.mem.Allocator, string: []const u8, length: i32, fill: []const u8) error{OutOfMemory}![]u8 {
+        return pad(gpa, string, length, fill, false);
+    }
+
+    fn pad(gpa: s.mem.Allocator, string: []const u8, length: i32, fill: []const u8, left: bool) error{OutOfMemory}![]u8 {
+        const target: usize = if (length <= 0) 0 else @intCast(length);
+        const slen = charLength(string);
+        if (slen >= target) {
+            const b = prefixBytes(string, target);
+            return gpa.dupe(u8, string[0..b]);
+        }
+        const npad = target - slen;
+        var out: s.ArrayList(u8) = .empty;
+        errdefer out.deinit(gpa);
+        if (!left) try out.appendSlice(gpa, string);
+        if (fill.len > 0) {
+            var fi: usize = 0;
+            var k: usize = 0;
+            while (k < npad) : (k += 1) {
+                if (fi >= fill.len) fi = 0;
+                const n = stepLen(fill, fi);
+                try out.appendSlice(gpa, fill[fi..][0..n]);
+                fi += n;
+            }
+        }
+        if (left) try out.appendSlice(gpa, string);
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// chr(code): the UTF-8 encoding of Unicode code point `code`, allocated
+    /// with `gpa`.  error.InvalidCodepoint for 0 (PostgreSQL forbids the null
+    /// character), a negative value, or a value that is not a code point.
+    pub fn chr(gpa: s.mem.Allocator, code: i64) error{ InvalidCodepoint, OutOfMemory }![]u8 {
+        if (code <= 0 or code > 0x10FFFF) return error.InvalidCodepoint;
+        var buf: [4]u8 = undefined;
+        const n = s.unicode.utf8Encode(@intCast(code), &buf) catch return error.InvalidCodepoint;
+        return gpa.dupe(u8, buf[0..n]);
+    }
+
+    /// ascii(string): the Unicode code point of the first character of
+    /// `string` (as PostgreSQL in a UTF-8 database), or 0 if it is empty.
+    pub fn ascii(string: []const u8) i32 {
+        if (string.len == 0) return 0;
+        const n = s.unicode.utf8ByteSequenceLength(string[0]) catch return string[0];
+        if (string.len < n) return string[0];
+        return @intCast(s.unicode.utf8Decode(string[0..n]) catch return string[0]);
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -2135,8 +2533,8 @@ fn writeJsonString(gpa: s.mem.Allocator, out: *s.ArrayList(u8), str: []const u8)
             '"' => try out.appendSlice(gpa, "\\\""),
             '\\' => try out.appendSlice(gpa, "\\\\"),
             else => if (c < 0x20) {
-                const hex = "0123456789abcdef";
-                try out.appendSlice(gpa, &[6]u8{ '\\', 'u', '0', '0', hex[c >> 4], hex[c & 15] });
+                const hex_digits = "0123456789abcdef";
+                try out.appendSlice(gpa, &[6]u8{ '\\', 'u', '0', '0', hex_digits[c >> 4], hex_digits[c & 15] });
             } else try out.append(gpa, c),
         }
     }
