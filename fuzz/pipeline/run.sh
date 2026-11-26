@@ -73,8 +73,10 @@ create_ok=" ok 42501 42P13 54000 57014 22021 22P05 "
 # are reachable from any family, so they are global, not per-family.
 call_ok=" ok P0001 38000 22023 57014 22003 22012 53200 54001 54000 42883 42P01 42703 0A000 25006 42501 22P02 22021 42P02 "
 declare -A create_extra=(
-    # a //#use directive moved after the first line of code
-    [use]=" 42601 "
+    # a //#use directive moved after the first line of code (42601); a
+    # malformed type in the directive target, which PL/Zig hands to
+    # PostgreSQL's regprocedurein (plzig_use.c): "improper type name" (22P02)
+    [use]=" 42601 22P02 "
 )
 declare -A call_extra=(
     # results the host checks: date/timestamp range, numeric, JSON text
